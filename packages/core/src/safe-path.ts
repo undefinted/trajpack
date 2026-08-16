@@ -21,7 +21,10 @@ function isWithin(base: string, target: string): boolean {
 export async function assertSafeOutputParent(input: string): Promise<string> {
   const parent = resolve(input);
   const metadata = await lstat(parent);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`Output parent contains a symbolic-link or junction ancestor: ${parent}`);
+  }
+  if (!metadata.isDirectory()) {
     throw new Error(`Output parent must be an existing real directory: ${parent}`);
   }
 
