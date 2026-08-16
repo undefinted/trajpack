@@ -3,7 +3,7 @@ import process from "node:process";
 export const name = "trajpack";
 export const harnessCompatibility = "0.1.0-rc.6";
 
-const MAX_EVENT_BYTES = 16 * 1024 * 1024;
+const MAX_EVENT_BYTES = 8 * 1024 * 1024;
 
 interface HarnessContext {
   on(event: "session/event", listener: (...args: unknown[]) => Promise<void>): unknown;

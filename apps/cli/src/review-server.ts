@@ -439,7 +439,11 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   let origin = "";
   let hostHeader = "";
   let locked = false;
-  const idleMs = Math.max(1, options.idleMinutes ?? 15) * 60_000;
+  const idleMinutes = options.idleMinutes ?? 15;
+  if (!Number.isFinite(idleMinutes) || idleMinutes < 1 / 60 || idleMinutes > 24 * 60) {
+    throw new Error("Reviewer idle timeout must be a finite value from one second to 24 hours");
+  }
+  const idleMs = idleMinutes * 60_000;
   let idleLockAt = Date.now() + idleMs;
   let idleTimer: NodeJS.Timeout;
   const locks = new Map<string, Promise<void>>();
@@ -596,14 +600,14 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   });
 
   app.get(`${API}/traces`, async () => {
-    const bundles: TraceBundle[] = [];
+    const traces: ReturnType<typeof summary>[] = [];
     // Vault decryption is deliberately sequential: each encrypted trace has a
-    // bounded read, and the reviewer must not multiply that memory bound by
-    // loading every trace concurrently.
+    // bounded read. Convert each trace to its compact summary immediately so
+    // full decrypted bundles are not retained for the entire vault listing.
     for (const traceId of await listTraceIds(paths)) {
-      bundles.push(await loadTrace(traceId, passphrase, paths));
+      traces.push(summary(await loadTrace(traceId, passphrase, paths)));
     }
-    return { traces: bundles.map(summary) };
+    return { traces };
   });
 
   app.get(`${API}/traces/:traceId`, async (request) => {
@@ -853,8 +857,8 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
     if (!exportMode || !["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"].includes(exportMode)) {
       throw Object.assign(new Error("Invalid export eligibility mode"), { statusCode: 400, code: "invalid_request" });
     }
-    if (["atif", "hf-trl"].includes(format) && !exportMode.startsWith("training_")) {
-      throw Object.assign(new Error("ATIF and HF/TRL require a training eligibility mode"), { statusCode: 400, code: "invalid_request" });
+    if (format === "hf-trl" && !exportMode.startsWith("training_")) {
+      throw Object.assign(new Error("HF/TRL requires a training eligibility mode"), { statusCode: 400, code: "invalid_request" });
     }
     const gate = evaluateGate(bundle, exportMode);
     const excluded = bundle.events.filter((event) => event.review_disposition === "exclude").length;

@@ -1,0 +1,42 @@
+import { lstat, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, normalize, parse, relative, resolve } from "node:path";
+
+function comparable(path: string): string {
+  const value = normalize(path);
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function isWithin(base: string, target: string): boolean {
+  const child = relative(base, target);
+  return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`));
+}
+
+/**
+ * Resolve an output parent without silently following a caller-controlled
+ * symlink/junction. The process cwd and OS temp directory are trusted roots so
+ * platform aliases such as macOS `/var` -> `/private/var` do not make every
+ * temporary export fail; links introduced below those roots are still denied.
+ */
+export async function assertSafeOutputParent(input: string): Promise<string> {
+  const parent = resolve(input);
+  const metadata = await lstat(parent);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(`Output parent must be an existing real directory: ${parent}`);
+  }
+
+  const candidates = [resolve(process.cwd()), resolve(tmpdir()), parse(parent).root]
+    .filter((candidate, index, values) => values.indexOf(candidate) === index)
+    .filter((candidate) => isWithin(candidate, parent))
+    .sort((left, right) => right.length - left.length);
+  const trustedBase = candidates[0] ?? parse(parent).root;
+  const [canonicalBase, canonicalParent] = await Promise.all([
+    realpath(trustedBase),
+    realpath(parent),
+  ]);
+  const expected = resolve(join(canonicalBase, relative(trustedBase, parent)));
+  if (comparable(expected) !== comparable(canonicalParent)) {
+    throw new Error(`Output parent contains a symbolic-link or junction ancestor: ${parent}`);
+  }
+  return parent;
+}

@@ -4,6 +4,8 @@ import {
   authoritativeCaptureArguments,
   assertDeepSeekHarnessVersionReport,
   captureChildEnvironment,
+  consumeUtf8StreamWithBackpressure,
+  splitUtf8Lines,
   observedRepoCommit,
   scrubHostEnvironment,
 } from "./capture-command.js";
@@ -63,5 +65,73 @@ describe("capture child environment", () => {
   it("records only a validated Git object id", () => {
     const commit = observedRepoCommit(process.cwd(), process.env);
     expect(commit === null || /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(commit)).toBe(true);
+  });
+
+  it("decodes UTF-8 correctly when a multibyte character crosses stdout chunks", () => {
+    const lines: string[] = [];
+    const violations: string[] = [];
+    const expected = '{"type":"message","text":"跨块中文🙂"}';
+    const bytes = Buffer.from(`${expected}\n`, "utf8");
+    const emojiStart = bytes.indexOf(Buffer.from("🙂", "utf8"));
+    const splitter = splitUtf8Lines(
+      (line) => lines.push(line),
+      { maxLineBytes: 1024, maxTotalBytes: 4096 },
+      (reason) => violations.push(reason),
+    );
+
+    splitter.push(bytes.subarray(0, emojiStart + 2));
+    splitter.push(bytes.subarray(emojiStart + 2));
+    splitter.flush();
+
+    expect(lines).toEqual([expected]);
+    expect(violations).toEqual([]);
+  });
+
+  it("applies the stdout line bound per decoded line rather than per chunk", () => {
+    const lines: string[] = [];
+    const violations: string[] = [];
+    const splitter = splitUtf8Lines(
+      (line) => lines.push(line),
+      { maxLineBytes: 4, maxTotalBytes: 64 },
+      (reason) => violations.push(reason),
+    );
+    splitter.push(Buffer.from("one\ntwo\n", "utf8"));
+    splitter.flush();
+    expect(lines).toEqual(["one", "two"]);
+    expect(violations).toEqual([]);
+  });
+
+  it("does not pull the next stdout chunk until current lines are durably ingested", async () => {
+    const lines: string[] = [];
+    let releaseFirst!: () => void;
+    let observeFirst!: () => void;
+    const firstObserved = new Promise<void>((resolve) => { observeFirst = resolve; });
+    let ingestQueue: Promise<void> = Promise.resolve();
+    let requestedSecondChunk = false;
+    const splitter = splitUtf8Lines((line) => {
+      lines.push(line);
+      if (lines.length === 1) {
+        ingestQueue = new Promise<void>((resolve) => { releaseFirst = resolve; });
+        observeFirst();
+      } else {
+        ingestQueue = Promise.resolve();
+      }
+    }, { maxLineBytes: 1024, maxTotalBytes: 4096 }, (reason) => {
+      throw new Error(reason);
+    });
+    async function* fastProducer(): AsyncGenerator<Buffer> {
+      yield Buffer.from("first\n", "utf8");
+      requestedSecondChunk = true;
+      yield Buffer.from("second\n", "utf8");
+    }
+
+    const consuming = consumeUtf8StreamWithBackpressure(fastProducer(), splitter, () => ingestQueue);
+    await firstObserved;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(requestedSecondChunk).toBe(false);
+    releaseFirst();
+    await consuming;
+    expect(requestedSecondChunk).toBe(true);
+    expect(lines).toEqual(["first", "second"]);
   });
 });

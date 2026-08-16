@@ -19,9 +19,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dsnp/parquetjs": "^1.8.9",
+    "@dsnp/parquetjs": "1.8.9",
     "@trajpack/schema": "workspace:*",
-    "libsodium-wrappers-sumo": "^0.7.15"
+    "libsodium-wrappers-sumo": "0.7.16"
   },
   "devDependencies": {
     "@types/libsodium-wrappers-sumo": "^0.7.8"

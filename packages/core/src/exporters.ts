@@ -1,11 +1,13 @@
-import { chmod, lstat, mkdir, open, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { ParquetSchema, ParquetWriter } from "@dsnp/parquetjs";
+import { randomBytes } from "node:crypto";
+import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApprovalMode, DatasetExample, TraceBundle, TrajectoryEvent } from "@trajpack/schema";
 import { verifierConfirmationSchema, verifierEvidenceSchema } from "@trajpack/schema";
 import { canonicalJson, sha256, stableId } from "./canonical.js";
 import { approvalFingerprint, evaluateGate, POLICY_VERSION, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
 import { inspectQuality, type QualityReport } from "./quality.js";
+import { writeHfParquet } from "./hf-parquet.js";
+import { assertSafeOutputParent } from "./safe-path.js";
 
 export type ExportFormat = "canonical" | "atif" | "hf-trl" | "otlp";
 export type TrainingMode = "training_noncompetitive" | "training_competitive_distillation";
@@ -152,75 +154,472 @@ function selectedBundle(bundle: TraceBundle, excluded: ExportResult["excludedPar
 }
 
 export function toAtif(bundle: TraceBundle): Record<string, unknown> {
+  const events = [...bundle.events]
+    .filter((event) => event.review_disposition === "include")
+    .sort((left, right) => left.sequence - right.sequence);
+  if (events.length === 0) throw new Error("ATIF-v1.7 requires at least one included trajectory step");
+  const units = atifUnits(events);
+  const steps = units.map((unit, index) => atifStep(unit, index + 1, bundle));
+  const sessionId = events.find((event) => event.source_session_id !== null)?.source_session_id;
+  const definitions = atifToolDefinitions(events);
   const label = verifiedLabel(bundle);
   return {
-    schema_version: "atif/rfc-0001-pinned-2026-08-16",
+    schema_version: "ATIF-v1.7",
+    ...(sessionId ? { session_id: sessionId } : {}),
     trajectory_id: bundle.manifest.trace_id,
-    source: bundle.manifest.source,
-    messages: bundle.events.filter((event) => event.review_disposition === "include").map((event) => ({
-      message_id: event.event_id,
-      parent_message_id: event.parent_span_id,
-      source_call_id: event.tool?.call_id ?? null,
-      role: event.actor,
-      timestamp: event.started_at,
-      status: event.status,
-      content: event.content
-        .filter((part) => part.review_disposition === "include")
-        .filter((part) => part.type !== "reasoning" && part.reasoning?.representation !== "opaque_reasoning_state")
-        .map((part) => ({ type: part.type, value: part.value, blob_ref: part.blob_ref, sha256: part.sha256 })),
-      reasoning_content: event.content
-        .filter((part) => part.review_disposition === "include")
-        .filter((part) => part.type === "reasoning" && part.reasoning?.representation !== "opaque_reasoning_state")
-        .map((part) => ({ value: part.value, metadata: part.reasoning })),
-      tool_call: event.event_type === "tool.call" ? event.tool : null,
-      observation: event.event_type === "tool.result" ? event.tool : null,
-      metadata: {
-        trace_id: event.trace_id,
-        span_id: event.span_id,
-        links: event.links,
-        source_session_id: event.source_session_id,
-        source_turn_id: event.source_turn_id,
-        source_step_id: event.source_step_id,
-        usage: event.usage,
-        event_type: event.event_type,
+    agent: {
+      name: bundle.manifest.source.product,
+      version: bundle.manifest.source.adapter_version,
+      ...(bundle.manifest.source.model_id ? { model_name: bundle.manifest.source.model_id } : {}),
+      ...(definitions.length > 0 ? { tool_definitions: definitions } : {}),
+      extra: {
+        host: bundle.manifest.source.host,
+        provider: bundle.manifest.source.provider,
+        surface: bundle.manifest.source.surface,
+        capture_method: bundle.manifest.source.capture_method,
+        interface_version: bundle.manifest.source.interface_version,
+        fidelity: bundle.manifest.source.fidelity,
       },
-    })),
-    reward: label?.reward ?? null,
-    provenance: {
-      schema_version: bundle.manifest.schema_version,
-      policy_decisions: bundle.manifest.eligibility,
-      review: bundle.manifest.review,
-      lineage: bundle.manifest.lineage,
-      verified_label: label,
+    },
+    steps,
+    final_metrics: atifFinalMetrics(steps, events),
+    extra: {
+      trajpack: {
+        canonical_schema_version: bundle.manifest.schema_version,
+        mapping_version: "trajectory-0.1-to-ATIF-v1.7/1",
+        mapping_fidelity: "lossy_with_canonical_sidecar",
+        reasoning_notice: "reasoning_content is provider-exposed or generated observable data; it does not assert hidden chain-of-thought access",
+        verified_label: label,
+        policy_decisions: bundle.manifest.eligibility,
+        review: bundle.manifest.review,
+        lineage: bundle.manifest.lineage,
+      },
     },
   };
 }
 
-export function toHfExample(bundle: TraceBundle): DatasetExample {
+type AtifSource = "system" | "user" | "agent";
+
+interface AtifUnit {
+  events: TrajectoryEvent[];
+  results: TrajectoryEvent[];
+}
+
+interface AtifCallGroup extends AtifUnit {
+  start: number;
+  end: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function atifObject(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return Object.fromEntries(Object.entries(value));
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (isRecord(parsed)) return Object.fromEntries(Object.entries(parsed));
+    } catch {
+      // Preserve non-JSON tool arguments explicitly instead of dropping them.
+    }
+  }
+  return value === null || value === undefined ? {} : { value };
+}
+
+function atifValue(value: unknown): string {
+  return typeof value === "string" ? value : canonicalJson(value);
+}
+
+function atifCallId(event: TrajectoryEvent): string {
+  return event.tool?.call_id
+    ?? `trajpack-call-${sha256(canonicalJson({ event_id: event.event_id, sequence: event.sequence })).slice(0, 24)}`;
+}
+
+/**
+ * A complete session/turn/step tuple is the only portable evidence that
+ * adjacent call events came from one model step. Missing boundaries fail
+ * closed to one call per ATIF step rather than inventing parallelism.
+ */
+function atifParallelBoundary(event: TrajectoryEvent): string | null {
+  if (event.source_session_id === null || event.source_turn_id === null || event.source_step_id === null) return null;
+  return canonicalJson([event.source_session_id, event.source_turn_id, event.source_step_id]);
+}
+
+function compatibleRun(call: TrajectoryEvent, result: TrajectoryEvent): boolean {
+  if (call.source_session_id !== null && result.source_session_id !== null
+    && call.source_session_id !== result.source_session_id) return false;
+  if (call.source_turn_id !== null && result.source_turn_id !== null
+    && call.source_turn_id !== result.source_turn_id) return false;
+  return true;
+}
+
+function atifUnits(events: TrajectoryEvent[]): AtifUnit[] {
+  const groups: AtifCallGroup[] = [];
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!;
+    if (event.event_type !== "tool.call") continue;
+    const boundary = atifParallelBoundary(event);
+    const calls = [event];
+    let end = index;
+    while (boundary !== null && end + 1 < events.length) {
+      const candidate = events[end + 1]!;
+      if (candidate.event_type !== "tool.call" || atifParallelBoundary(candidate) !== boundary) break;
+      calls.push(candidate);
+      end += 1;
+    }
+    groups.push({ start: index, end, events: calls, results: [] });
+    index = end;
+  }
+
+  const assignedResults = new Set<number>();
+  for (let index = 0; index < events.length; index += 1) {
+    const result = events[index]!;
+    if (result.event_type !== "tool.result"
+      || result.tool?.call_id === null || result.tool?.call_id === undefined) continue;
+    const group = [...groups].reverse().find((candidate) => candidate.end < index
+      && candidate.events.some((call) => call.tool?.call_id === result.tool?.call_id && compatibleRun(call, result)));
+    if (!group) continue;
+    group.results.push(result);
+    assignedResults.add(index);
+  }
+
+  const groupByStart = new Map(groups.map((group) => [group.start, group]));
+  const groupedIndexes = new Set(groups.flatMap((group) => group.events.map((_, offset) => group.start + offset)));
+  const units: AtifUnit[] = [];
+  for (let index = 0; index < events.length; index += 1) {
+    const group = groupByStart.get(index);
+    if (group) {
+      units.push({ events: group.events, results: group.results });
+      continue;
+    }
+    if (groupedIndexes.has(index) || assignedResults.has(index)) continue;
+    units.push({ events: [events[index]!], results: [] });
+  }
+  return units;
+}
+
+function atifSource(unit: AtifUnit): AtifSource {
+  const event = unit.events[0]!;
+  if (event.event_type === "tool.call") return "agent";
+  if (event.event_type === "compaction") return "system";
+  if (event.actor === "user") return "user";
+  if (event.actor === "assistant" || event.actor === "agent") return "agent";
+  return "system";
+}
+
+function atifReasoning(events: TrajectoryEvent[]): {
+  text: string;
+  representations: Array<Record<string, unknown>>;
+} {
+  const parts = events.flatMap((event) => event.content
+    .filter((part) => part.review_disposition === "include")
+    .filter((part) => part.type === "reasoning")
+    .filter((part) => part.reasoning?.representation !== "opaque_reasoning_state"));
+  return {
+    text: parts.map((part) => part.value).filter((value): value is string => value !== null).join("\n"),
+    representations: parts.map((part) => ({
+      representation: part.reasoning?.representation ?? "unavailable",
+      provider_claim: part.reasoning?.provider_claim ?? "none",
+      source_field: part.reasoning?.source_field ?? null,
+      visibility: part.reasoning?.visibility ?? "not_returned",
+      include_in_loss: part.reasoning?.include_in_loss ?? false,
+      sha256: part.sha256,
+    })),
+  };
+}
+
+function atifMessage(events: TrajectoryEvent[]): string {
+  return events.map((event) => eventText(event, false)).filter(Boolean).join("\n");
+}
+
+function atifUsage(events: TrajectoryEvent[]): Record<string, unknown> | null {
+  const sum = (field: keyof TrajectoryEvent["usage"]): number | undefined => {
+    const values = events.map((event) => event.usage[field]).filter((value): value is number => value !== null);
+    return values.length > 0 ? values.reduce((total, value) => total + value, 0) : undefined;
+  };
+  const promptTokens = sum("input_tokens");
+  const completionTokens = sum("output_tokens");
+  const cachedTokens = sum("cache_read_tokens");
+  const costUsd = sum("cost_usd");
+  const reasoningTokens = sum("reasoning_tokens");
+  const latencyMs = sum("latency_ms");
+  if ([promptTokens, completionTokens, cachedTokens, costUsd, reasoningTokens, latencyMs]
+    .every((value) => value === undefined)) return null;
+  return {
+    ...(promptTokens === undefined ? {} : { prompt_tokens: promptTokens }),
+    ...(completionTokens === undefined ? {} : { completion_tokens: completionTokens }),
+    ...(cachedTokens === undefined ? {} : { cached_tokens: cachedTokens }),
+    ...(costUsd === undefined ? {} : { cost_usd: costUsd }),
+    ...((reasoningTokens === undefined && latencyMs === undefined) ? {} : {
+      extra: {
+        ...(reasoningTokens === undefined ? {} : { reasoning_tokens: reasoningTokens }),
+        ...(latencyMs === undefined ? {} : { latency_ms: latencyMs }),
+      },
+    }),
+  };
+}
+
+function atifObservationResult(event: TrajectoryEvent, knownCallIds: Set<string>): Record<string, unknown> {
+  const canonicalCallId = event.tool?.call_id;
+  const content = event.tool?.result === null || event.tool?.result === undefined
+    ? eventText(event, false)
+    : atifValue(event.tool.result);
+  return {
+    ...(canonicalCallId !== null && canonicalCallId !== undefined && knownCallIds.has(canonicalCallId)
+      ? { source_call_id: canonicalCallId }
+      : {}),
+    ...(content ? { content } : {}),
+    extra: {
+      trajpack: {
+        canonical_event_id: event.event_id,
+        status: event.status,
+        tool_name: event.tool?.name ?? null,
+        exit_code: event.tool?.exit_code ?? null,
+        unpaired_source_call_id: canonicalCallId !== null && canonicalCallId !== undefined
+          && !knownCallIds.has(canonicalCallId) ? canonicalCallId : null,
+      },
+    },
+  };
+}
+
+function atifStepExtra(unit: AtifUnit, reasoning: ReturnType<typeof atifReasoning>): Record<string, unknown> {
+  const events = [...unit.events, ...unit.results];
+  return {
+    trajpack: {
+      canonical_event_ids: events.map((event) => event.event_id),
+      canonical_event_types: events.map((event) => event.event_type),
+      span_ids: [...new Set(events.map((event) => event.span_id))],
+      parent_span_ids: [...new Set(events.map((event) => event.parent_span_id).filter((value): value is string => value !== null))],
+      source_session_ids: [...new Set(events.map((event) => event.source_session_id).filter((value): value is string => value !== null))],
+      source_turn_ids: [...new Set(events.map((event) => event.source_turn_id).filter((value): value is string => value !== null))],
+      source_step_ids: [...new Set(events.map((event) => event.source_step_id).filter((value): value is string => value !== null))],
+      statuses: [...new Set(events.map((event) => event.status))],
+      reasoning_representations: reasoning.representations,
+    },
+  };
+}
+
+function reportedLlmCallCount(events: TrajectoryEvent[]): number | undefined {
+  const counts = events.map((event) => event.metadata.llm_call_count)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0);
+  if (counts.length > 0) return Math.max(...counts);
+  return events.some((event) => event.event_type === "model.inference") ? 1 : undefined;
+}
+
+function atifStep(unit: AtifUnit, stepId: number, bundle: TraceBundle): Record<string, unknown> {
+  const event = unit.events[0]!;
+  const source = atifSource(unit);
+  const message = atifMessage(unit.events);
+  const reasoning = atifReasoning(unit.events);
+  const knownCallIds = new Set(unit.events
+    .filter((candidate) => candidate.event_type === "tool.call")
+    .map(atifCallId));
+  const toolCalls = event.event_type === "tool.call" ? unit.events.map((call) => ({
+    tool_call_id: atifCallId(call),
+    function_name: call.tool?.name ?? "unknown_tool",
+    arguments: atifObject(call.tool?.arguments),
+    extra: {
+      trajpack: {
+        canonical_event_id: call.event_id,
+        status: call.status,
+        source_call_id_was_missing: call.tool?.call_id === null || call.tool?.call_id === undefined,
+      },
+    },
+  })) : [];
+  const observations = event.event_type === "tool.result"
+    ? [atifObservationResult(event, knownCallIds)]
+    : unit.results.map((result) => atifObservationResult(result, knownCallIds));
+  const llmCallCount = reportedLlmCallCount(unit.events);
+  const deterministicDispatch = source === "agent" && llmCallCount === 0;
+  const metrics = source === "agent" && !deterministicDispatch ? atifUsage(unit.events) : null;
+  const compaction = event.event_type === "compaction";
+  const contextMetadata = isRecord(event.metadata.context_management) ? event.metadata.context_management : {};
+  const contextType = typeof contextMetadata.type === "string" ? contextMetadata.type : "compaction";
+  const contextBoundary = typeof contextMetadata.boundary === "string"
+    ? contextMetadata.boundary
+    : message ? "replace" : "unknown";
+  const extra = atifStepExtra(unit, reasoning);
+  if (compaction) {
+    extra.context_management = { type: contextType, boundary: contextBoundary };
+  }
+  const compactionObservation = compaction && message ? [{
+    content: message,
+    extra: { trajpack: { canonical_event_id: event.event_id, context_summary: true } },
+  }] : [];
+  return {
+    step_id: stepId,
+    timestamp: event.started_at,
+    source,
+    ...(source === "agent" && bundle.manifest.source.model_id
+      ? { model_name: bundle.manifest.source.model_id }
+      : {}),
+    message: message || (compaction ? "Context compaction performed" : ""),
+    ...(source === "agent" && !deterministicDispatch && reasoning.text ? { reasoning_content: reasoning.text } : {}),
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...((observations.length > 0 || compactionObservation.length > 0)
+      ? { observation: { results: [...observations, ...compactionObservation] } }
+      : {}),
+    ...(metrics === null ? {} : { metrics }),
+    ...(llmCallCount === undefined ? {} : { llm_call_count: llmCallCount }),
+    extra,
+  };
+}
+
+function atifToolDefinitions(events: TrajectoryEvent[]): Array<Record<string, unknown>> {
+  const definitions = new Map<string, Record<string, unknown>>();
+  for (const event of events.filter((candidate) => candidate.event_type === "tool.call")) {
+    const name = event.tool?.name ?? "unknown_tool";
+    if (definitions.has(name)) continue;
+    const schema = event.metadata.tool_schema ?? event.metadata.input_schema;
+    const description = event.metadata.tool_description;
+    definitions.set(name, {
+      type: "function",
+      function: {
+        name,
+        ...(typeof description === "string" ? { description } : {}),
+        parameters: atifObject(schema),
+      },
+    });
+  }
+  return [...definitions.values()];
+}
+
+function atifFinalMetrics(steps: Array<Record<string, unknown>>, events: TrajectoryEvent[]): Record<string, unknown> {
+  const sum = (field: keyof TrajectoryEvent["usage"]): number | undefined => {
+    const values = events.map((event) => event.usage[field]).filter((value): value is number => value !== null);
+    return values.length > 0 ? values.reduce((total, value) => total + value, 0) : undefined;
+  };
+  const promptTokens = sum("input_tokens");
+  const completionTokens = sum("output_tokens");
+  const cachedTokens = sum("cache_read_tokens");
+  const costUsd = sum("cost_usd");
+  const reasoningTokens = sum("reasoning_tokens");
+  const latencyMs = sum("latency_ms");
+  return {
+    ...(promptTokens === undefined ? {} : { total_prompt_tokens: promptTokens }),
+    ...(completionTokens === undefined ? {} : { total_completion_tokens: completionTokens }),
+    ...(cachedTokens === undefined ? {} : { total_cached_tokens: cachedTokens }),
+    ...(costUsd === undefined ? {} : { total_cost_usd: costUsd }),
+    total_steps: steps.length,
+    extra: {
+      canonical_event_count: events.length,
+      ...(reasoningTokens === undefined ? {} : { total_reasoning_tokens: reasoningTokens }),
+      ...(latencyMs === undefined ? {} : { total_latency_ms: latencyMs }),
+    },
+  };
+}
+
+interface HfView {
+  events: TrajectoryEvent[];
+  sessionSha256: string | null;
+  branchLeafSha256: string | null;
+}
+
+function hfViews(bundle: TraceBundle): HfView[] {
+  const included = [...bundle.events]
+    .filter((event) => event.review_disposition === "include")
+    .sort((left, right) => left.sequence - right.sequence);
+  const groups = new Map<string, TrajectoryEvent[]>();
+  for (const event of included) {
+    const key = event.source_session_id === null ? "\0unscoped" : `session:${event.source_session_id}`;
+    groups.set(key, [...(groups.get(key) ?? []), event]);
+  }
+  const views: HfView[] = [];
+  for (const events of [...groups.values()].sort((left, right) => left[0]!.sequence - right[0]!.sequence)) {
+    const sessionId = events.find((event) => event.source_session_id !== null)?.source_session_id ?? null;
+    const isPureMessageGraph = events.length > 0
+      && events.every((event) => event.event_type === "message")
+      && events.some((event) => typeof event.metadata.source_parent_message_id === "string");
+    if (!isPureMessageGraph) {
+      views.push({
+        events,
+        sessionSha256: sessionId === null ? null : sha256(`trajpack.hf-session/v1\0${sessionId}`),
+        branchLeafSha256: null,
+      });
+      continue;
+    }
+    const bySpan = new Map(events.map((event) => [event.span_id, event]));
+    const parentBySpan = new Map(events.map((event) => [
+      event.span_id,
+      event.parent_span_id !== null && bySpan.has(event.parent_span_id) ? event.parent_span_id : null,
+    ]));
+    const parentSpans = new Set([...parentBySpan.values()].filter((value): value is string => value !== null));
+    const leaves = events.filter((event) => !parentSpans.has(event.span_id));
+    for (const leaf of leaves) {
+      const path: TrajectoryEvent[] = [];
+      const visited = new Set<string>();
+      let current: TrajectoryEvent | undefined = leaf;
+      while (current && !visited.has(current.span_id)) {
+        path.push(current);
+        visited.add(current.span_id);
+        const parentSpan: string | null = parentBySpan.get(current.span_id) ?? null;
+        current = parentSpan === null ? undefined : bySpan.get(parentSpan);
+      }
+      path.reverse();
+      views.push({
+        events: path,
+        sessionSha256: sessionId === null ? null : sha256(`trajpack.hf-session/v1\0${sessionId}`),
+        branchLeafSha256: sha256(`trajpack.hf-branch-leaf/v1\0${leaf.event_id}`),
+      });
+    }
+  }
+  return views;
+}
+
+function toHfViewExample(bundle: TraceBundle, view: HfView): DatasetExample {
   const messages: Array<Record<string, unknown>> = [];
   const lossMask: boolean[] = [];
+  const trainingTargets: DatasetExample["training_targets"] = [];
   const tools = new Map<string, Record<string, unknown>>();
-  const label = verifiedLabel(bundle);
+  const label = verifiedLabel({ ...bundle, events: view.events });
 
-  for (const event of bundle.events.filter((candidate) => candidate.review_disposition === "include")) {
+  const events = view.events;
+  for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+    const event = events[eventIndex]!;
     if (event.event_type === "tool.call" && event.tool) {
-      const call = {
-        id: event.tool.call_id,
+      const boundary = atifParallelBoundary(event);
+      const calls = [event];
+      while (boundary !== null && eventIndex + 1 < events.length) {
+        const candidate = events[eventIndex + 1]!;
+        if (candidate.event_type !== "tool.call" || candidate.tool === null
+          || atifParallelBoundary(candidate) !== boundary) break;
+        calls.push(candidate);
+        eventIndex += 1;
+      }
+      const messageIndex = messages.length;
+      const toolCalls = calls.map((callEvent) => ({
+        id: callEvent.tool!.call_id,
         type: "function",
         function: {
-          name: event.tool.name,
-          arguments: typeof event.tool.arguments === "string" ? event.tool.arguments : canonicalJson(event.tool.arguments),
+          name: callEvent.tool!.name,
+          arguments: typeof callEvent.tool!.arguments === "string"
+            ? callEvent.tool!.arguments
+            : canonicalJson(callEvent.tool!.arguments),
         },
-      };
-      messages.push({ role: "assistant", content: null, tool_calls: [call], event_id: event.event_id });
-      lossMask.push(true);
-      if (event.tool.name) tools.set(event.tool.name, {
-        type: "function",
-        function: {
-          name: event.tool.name,
-          parameters: event.metadata.tool_schema ?? event.metadata.input_schema ?? {},
-        },
+      }));
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: toolCalls,
+        event_id: calls.map((callEvent) => callEvent.event_id).join(","),
       });
+      lossMask.push(true);
+      trainingTargets.push({
+        message_index: messageIndex,
+        components: ["tool_name", "tool_arguments"],
+        loss_weight: 1,
+        source_event_ids: calls.map((callEvent) => callEvent.event_id),
+      });
+      for (const callEvent of calls) {
+        if (callEvent.tool?.name) tools.set(callEvent.tool.name, {
+          type: "function",
+          function: {
+            name: callEvent.tool.name,
+            parameters: callEvent.metadata.tool_schema ?? callEvent.metadata.input_schema ?? {},
+          },
+        });
+      }
       continue;
     }
     if (event.event_type === "tool.result" && event.tool) {
@@ -235,7 +634,11 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
       continue;
     }
     if (!["message", "reasoning", "plan", "error", "feedback", "evaluation"].includes(event.event_type)) continue;
-    const role = event.actor === "agent" ? "assistant" : event.actor;
+    const role = event.actor === "agent" || event.actor === "assistant"
+      ? "assistant"
+      : event.actor === "user" || event.actor === "developer" || event.actor === "system"
+        ? event.actor
+        : "system";
     const reasoning = event.content
       .filter((part) => part.review_disposition === "include")
       .filter((part) => part.type === "reasoning"
@@ -249,6 +652,7 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
       .filter((part) => part.review_disposition === "include")
       .filter((part) => part.reasoning?.representation !== "opaque_reasoning_state");
     if (!content && !reasoning) continue;
+    const messageIndex = messages.length;
     messages.push({
       role,
       content,
@@ -258,16 +662,29 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
     });
     const hasLossTarget = includedParts.some((part) => part.value !== null
       && (part.type !== "reasoning" || part.reasoning?.include_in_loss === true));
-    lossMask.push(role === "assistant" && hasLossTarget);
+    const trainable = role === "assistant" && hasLossTarget;
+    lossMask.push(trainable);
+    if (trainable) {
+      const components: DatasetExample["training_targets"][number]["components"] = [];
+      if (content) components.push(event.event_type === "plan" ? "plan" : "answer_text");
+      if (reasoning) components.push("reasoning");
+      if (components.length > 0) trainingTargets.push({
+        message_index: messageIndex,
+        components,
+        loss_weight: 1,
+        source_event_ids: [event.event_id],
+      });
+    }
   }
 
   return {
-    id: stableId("example", { trace: bundle.manifest.trace_id, events: bundle.events.map((event) => event.event_id) }),
+    id: stableId("example", { trace: bundle.manifest.trace_id, events: view.events.map((event) => event.event_id) }),
     trace_id: bundle.manifest.trace_id,
-    source_event_ids: bundle.events.map((event) => event.event_id),
+    source_event_ids: view.events.map((event) => event.event_id),
     messages,
     tools: [...tools.values()],
     assistant_loss_mask: lossMask,
+    training_targets: trainingTargets,
     reward: label?.reward ?? null,
     verifier: label?.verifier ?? null,
     metadata: {
@@ -277,8 +694,25 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
       review: bundle.manifest.review,
       lineage: bundle.manifest.lineage,
       verified_label_source_event_id: label?.sourceEventId ?? null,
+      view: {
+        recipe: "trace_full",
+        source_session_sha256: view.sessionSha256,
+        branch_leaf_sha256: view.branchLeafSha256,
+      },
     },
   };
+}
+
+export function toHfExamples(bundle: TraceBundle): DatasetExample[] {
+  return hfViews(bundle).map((view) => toHfViewExample(bundle, view));
+}
+
+export function toHfExample(bundle: TraceBundle): DatasetExample {
+  const examples = toHfExamples(bundle);
+  if (examples.length !== 1) {
+    throw new Error(`Trace compiles to ${examples.length} isolated HF views; use toHfExamples()`);
+  }
+  return examples[0]!;
 }
 
 export function toOtlp(bundle: TraceBundle): Record<string, unknown> {
@@ -361,57 +795,33 @@ provider-exposed representation and do not assert access to hidden chain-of-thou
 `;
 }
 
-async function writeParquet(path: string, example: DatasetExample): Promise<void> {
-  const schema = new ParquetSchema({
-    id: { type: "UTF8" },
-    trace_id: { type: "UTF8" },
-    messages_json: { type: "UTF8" },
-    tools_json: { type: "UTF8" },
-    assistant_loss_mask_json: { type: "UTF8" },
-    reward: { type: "DOUBLE", optional: true },
-    verifier_json: { type: "UTF8", optional: true },
-    metadata_json: { type: "UTF8" },
-  });
-  // parquetjs opens with truncation but does not expose a creation-mode
-  // option. Pre-create atomically at 0600 so there is never a world-readable
-  // interval between writer creation and the final chmod.
-  const placeholder = await open(path, "wx", 0o600);
-  await placeholder.close();
-  const writer = await ParquetWriter.openFile(schema, path);
+async function createPrivateStagingDirectory(finalPath: string): Promise<{ finalPath: string; stagingPath: string }> {
+  const absolute = resolve(finalPath);
+  const parent = dirname(absolute);
+  await assertSafeOutputParent(parent);
   try {
-    await writer.appendRow({
-      id: example.id,
-      trace_id: example.trace_id,
-      messages_json: canonicalJson(example.messages),
-      tools_json: canonicalJson(example.tools),
-      assistant_loss_mask_json: canonicalJson(example.assistant_loss_mask),
-      ...(example.reward === null ? {} : { reward: example.reward }),
-      ...(example.verifier === null ? {} : { verifier_json: canonicalJson(example.verifier) }),
-      metadata_json: canonicalJson(example.metadata),
-    });
-  } finally {
-    await writer.close();
-  }
-}
-
-async function createPrivateOutputDirectory(path: string): Promise<void> {
-  const parent = dirname(path);
-  const parentDetails = await lstat(parent);
-  if (!parentDetails.isDirectory() || parentDetails.isSymbolicLink()) {
-    throw new Error(`Export parent must be an existing non-symlink directory: ${parent}`);
-  }
-  try {
-    await lstat(path);
-    throw new Error(`Export destination already exists: ${path}`);
+    await lstat(absolute);
+    throw new Error(`Export destination already exists: ${absolute}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await mkdir(path, { recursive: false, mode: 0o700 });
-  const created = await lstat(path);
+  const stagingPath = join(parent, `.${basename(absolute)}.trajpack-stage-${randomBytes(12).toString("hex")}`);
+  await mkdir(stagingPath, { recursive: false, mode: 0o700 });
+  const created = await lstat(stagingPath);
   if (!created.isDirectory() || created.isSymbolicLink()) {
-    throw new Error(`Export destination is not a private managed directory: ${path}`);
+    throw new Error(`Export staging path is not a private managed directory: ${stagingPath}`);
   }
-  await chmod(path, 0o700);
+  await chmod(stagingPath, 0o700);
+  return { finalPath: absolute, stagingPath };
+}
+
+async function removeExportStaging(stagingPath: string, finalPath: string): Promise<void> {
+  const parent = dirname(finalPath);
+  if (dirname(stagingPath) !== parent
+    || !basename(stagingPath).startsWith(`.${basename(finalPath)}.trajpack-stage-`)) {
+    throw new Error("Refusing to remove an unverified export staging directory");
+  }
+  await rm(stagingPath, { recursive: true, force: true });
 }
 
 async function writeTrackedFile(directory: string, relativePath: string, value: string | Uint8Array, files: string[], checksums: Record<string, string>): Promise<void> {
@@ -467,9 +877,9 @@ function lineageReport(bundle: TraceBundle, format: ExportFormat, mode: Approval
 
 export async function exportApprovedBundle(bundle: TraceBundle, options: ExportOptions): Promise<ExportResult> {
   const mode = options.mode ?? (options.format === "canonical" ? "archive" : "training_competitive_distillation");
-  if (["atif", "hf-trl"].includes(options.format)
+  if (options.format === "hf-trl"
     && mode !== "training_noncompetitive" && mode !== "training_competitive_distillation") {
-    throw new Error("ATIF and HF/TRL exports require an explicit training eligibility gate");
+    throw new Error("HF/TRL exports require an explicit training eligibility gate");
   }
   const gate = evaluateGate(bundle, mode);
   const reviewReasons = [
@@ -479,7 +889,9 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   if (!gate.allowed || reviewReasons.length > 0) {
     throw new Error(`Export blocked by policy: ${[...new Set([...gate.reasonCodes, ...reviewReasons])].join(", ")}`);
   }
-  await createPrivateOutputDirectory(options.outputDirectory);
+  const output = await createPrivateStagingDirectory(options.outputDirectory);
+  const outputDirectory = output.stagingPath;
+  try {
   const files: string[] = [];
   const checksums: Record<string, string> = {};
   const selected = selectedBundle(bundle, gate.excludedContentParts);
@@ -500,41 +912,45 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     export_mode: mode,
     eligibility_decision: exportDecision(selected, mode),
     approval_scope: selected.manifest.review.approval_scope,
+    verified_label: verifiedLabel(selected),
   });
   const quality = inspectQuality(selected);
   const redaction = redactionReport(bundle, selected);
 
   if (options.format === "canonical") {
-    await writeTrackedFile(options.outputDirectory, "manifest.json", `${canonicalJson(selected.manifest)}\n`, files, checksums);
-    await writeTrackedFile(options.outputDirectory, "events.jsonl", `${selected.events.map(canonicalJson).join("\n")}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "manifest.json", `${canonicalJson(selected.manifest)}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "events.jsonl", `${selected.events.map(canonicalJson).join("\n")}\n`, files, checksums);
     const blobs = new Map<string, string>();
     for (const part of selected.events.flatMap((event) => event.content)) {
       if (part.value !== null) blobs.set(part.sha256, part.value);
     }
     for (const [digest, value] of [...blobs].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
-      await writeTrackedFile(options.outputDirectory, `blobs/sha256/${digest}`, value, files, checksums);
+      await writeTrackedFile(outputDirectory, `blobs/sha256/${digest}`, value, files, checksums);
     }
   } else if (options.format === "atif") {
-    await writeTrackedFile(options.outputDirectory, "trajectory.atif.json", `${canonicalJson(toAtif(selected))}\n`, files, checksums);
-    await writeTrackedFile(options.outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "trajectory.atif.json", `${canonicalJson(toAtif(selected))}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   } else if (options.format === "hf-trl") {
-    const example = toHfExample(selected);
-    await writeTrackedFile(options.outputDirectory, "dataset.jsonl", `${canonicalJson(example)}\n`, files, checksums);
-    const parquetPath = join(options.outputDirectory, "dataset.parquet");
-    await writeParquet(parquetPath, example);
+    const examples = toHfExamples(selected);
+    if (examples.length === 0 || examples.some((example) => example.messages.length === 0)) {
+      throw new Error("HF/TRL export requires at least one non-empty topology-safe training view");
+    }
+    await writeTrackedFile(outputDirectory, "dataset.jsonl", `${examples.map(canonicalJson).join("\n")}\n`, files, checksums);
+    const parquetPath = join(outputDirectory, "dataset.parquet");
+    await writeHfParquet(parquetPath, examples);
     await chmod(parquetPath, 0o600);
     const parquet = await import("node:fs/promises").then(({ readFile }) => readFile(parquetPath));
     files.push(parquetPath);
     checksums["dataset.parquet"] = sha256(parquet);
-    await writeTrackedFile(options.outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   } else {
-    await writeTrackedFile(options.outputDirectory, "traces.otlp.json", `${canonicalJson(toOtlp(selected))}\n`, files, checksums);
-    await writeTrackedFile(options.outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "traces.otlp.json", `${canonicalJson(toOtlp(selected))}\n`, files, checksums);
+    await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   }
-  await writeTrackedFile(options.outputDirectory, "lineage.json", `${canonicalJson(lineageReport(selected, options.format, mode))}\n`, files, checksums);
-  await writeTrackedFile(options.outputDirectory, "quality-report.json", `${canonicalJson(quality)}\n`, files, checksums);
-  await writeTrackedFile(options.outputDirectory, "redaction-report.json", `${canonicalJson(redaction)}\n`, files, checksums);
-  await writeTrackedFile(options.outputDirectory, "license-summary.json", `${canonicalJson({
+  await writeTrackedFile(outputDirectory, "lineage.json", `${canonicalJson(lineageReport(selected, options.format, mode))}\n`, files, checksums);
+  await writeTrackedFile(outputDirectory, "quality-report.json", `${canonicalJson(quality)}\n`, files, checksums);
+  await writeTrackedFile(outputDirectory, "redaction-report.json", `${canonicalJson(redaction)}\n`, files, checksums);
+  await writeTrackedFile(outputDirectory, "license-summary.json", `${canonicalJson({
     code_license: "Apache-2.0",
     data_license_is_independent: true,
     export_mode: mode,
@@ -554,13 +970,33 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     terms_snapshots: selected.manifest.account_contract.terms,
     eligibility: selected.manifest.eligibility,
   })}\n`, files, checksums);
-  await writeTrackedFile(options.outputDirectory, "DATASET_CARD.md", datasetCard(selected, options.format, exportedExcludedParts, quality, redaction, mode), files, checksums);
+  await writeTrackedFile(outputDirectory, "DATASET_CARD.md", datasetCard(selected, options.format, exportedExcludedParts, quality, redaction, mode), files, checksums);
   await writeTrackedFile(
-    options.outputDirectory,
+    outputDirectory,
     "checksums.txt",
     `${Object.entries(checksums).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([name, digest]) => `${digest}  ${name}`).join("\n")}\n`,
     files,
     checksums,
   );
-  return { directory: options.outputDirectory, files, checksums, excludedParts: exportedExcludedParts };
+  await writeTrackedFile(outputDirectory, "COMPLETE", `${canonicalJson({
+    schema_version: "export-complete/0.1",
+    format: options.format,
+    mode,
+    trace_id: selected.manifest.trace_id,
+    checksums_sha256: checksums["checksums.txt"],
+  })}\n`, files, checksums);
+  await assertSafeOutputParent(dirname(output.finalPath));
+  try {
+    await lstat(output.finalPath);
+    throw new Error(`Export destination appeared before publication: ${output.finalPath}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await rename(output.stagingPath, output.finalPath);
+  const publishedFiles = files.map((path) => join(output.finalPath, relative(output.stagingPath, path)));
+  return { directory: output.finalPath, files: publishedFiles, checksums, excludedParts: exportedExcludedParts };
+  } catch (error) {
+    await removeExportStaging(output.stagingPath, output.finalPath).catch(() => undefined);
+    throw error;
+  }
 }

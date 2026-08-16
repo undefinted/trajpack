@@ -113,11 +113,11 @@ export function defaultSource(
   provider: Provider = "unknown",
 ): Source {
   const defaults = {
-    codex: { product: "codex", surface: "cli" as const, capture_method: "official_stream" as const, fidelity: "A" as const },
-    claude_code: { product: "claude-code", surface: "cli" as const, capture_method: "official_stream" as const, fidelity: "A" as const },
-    deepseek_harness: { product: "deepseek-harness", surface: "harness" as const, capture_method: "instrumented_harness" as const, fidelity: "A" as const },
-    manual_import: { product: "official-export", surface: "manual_import" as const, capture_method: "official_export" as const, fidelity: "B" as const },
-    browser: { product: "authorized-web", surface: "web" as const, capture_method: "authorized_dom" as const, fidelity: "C" as const },
+    codex: { product: "codex", surface: "cli" as const, capture_method: "official_stream" as const, fidelity: "A" as const, authenticity: "locally_observed" as const },
+    claude_code: { product: "claude-code", surface: "cli" as const, capture_method: "official_stream" as const, fidelity: "A" as const, authenticity: "locally_observed" as const },
+    deepseek_harness: { product: "deepseek-harness", surface: "harness" as const, capture_method: "instrumented_harness" as const, fidelity: "A" as const, authenticity: "locally_observed" as const },
+    manual_import: { product: "official-export", surface: "manual_import" as const, capture_method: "official_export" as const, fidelity: "B" as const, authenticity: "user_supplied" as const },
+    browser: { product: "authorized-web", surface: "web" as const, capture_method: "authorized_dom" as const, fidelity: "C" as const, authenticity: "user_authorized_observation" as const },
   }[host];
   return {
     host,
@@ -128,6 +128,7 @@ export function defaultSource(
     model_id: null,
     model_snapshot_or_weights_digest: null,
     origin: null,
+    authenticity_evidence_ref: null,
   };
 }
 

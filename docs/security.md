@@ -21,6 +21,24 @@ no-op unless an explicit wrapper token or unexpired one-shot arm descriptor is
 present. It does not write a plaintext fallback spool. The browser collector
 requires an exact extension origin, one-time pairing nonce, and a recipe digest
 that is recomputed against the submitted selectors and authorization evidence.
+Collectors enforce bounded request bodies plus configurable hard limits on
+captured events and cumulative raw bytes. Wrapper stdout additionally has a
+20 MiB single-line limit. Exceeding any limit aborts the capture rather than
+finalizing a partial vault. Hook authentication and a four-request admission
+limit run before JSON body parsing; hook bodies are capped at 8 MiB, browser
+captures at 20 MiB, and malformed authenticated traffic has its own bounded
+attempt budget instead of consuming the valid-event quota.
+
+Claude Code's opaque JSONL artifact is never selected from a `SessionEnd` path
+alone. The collector first requires the session's cwd-matching `SessionStart`
+hook and its documented common `transcript_path`, then binds the session ID,
+resolved path, real parent directory, and file identity. `SessionEnd` must name
+that exact bound file, which must retain the same identity and pass the existing
+root-containment, no-link, fstat, and size checks. A missing/invalid
+`SessionStart` path, another session/cwd/project path, or a file replaced after
+binding produces no opaque artifact. This follows Claude Code's documented
+[SessionStart input](https://code.claude.com/docs/en/hooks#sessionstart-input);
+trajpack does not depend on the private JSONL field schema.
 
 The wrapper capability is inherited by the explicitly launched host so its
 native plugin can post events. A host may in turn pass environment variables to
@@ -30,7 +48,24 @@ provider or that untrusted repository code could not forge an event. Use a
 clean, trusted execution environment for provenance-sensitive collection and
 retain provider request/response artifacts when available. Source provider,
 model, and license claims remain reviewer-verifiable evidence, not cryptographic
-attestation by trajpack.
+attestation by trajpack. In particular, a token-bearing child could race a
+forged `SessionStart`; the transcript binding prevents later cross-project path
+switching but cannot cryptographically identify the genuine Claude process.
+
+Source manifests therefore carry an independent authenticity tier:
+`cryptographically_verified`, `request_receipt_verified`, `locally_observed`,
+`user_supplied`, `user_authorized_observation`, or `unknown`. Import format
+detection never upgrades this tier. A user-supplied offline API response needs
+an evidence-backed, trace-scoped manual training decision; legal permission and
+teacher-source authenticity are separate questions.
+
+For the default native DeepSeek Harness path, the pinned adapter also requires
+a durable `request/header` event and reconciles its provider/model against the
+manifest. The resulting evidence reference is bound to those raw header
+envelopes. This detects configuration/label drift; because the local capture
+process tree can forge events, it still is not a provider signature. Self-hosted
+weights remain stricter and need an evidence-backed manual runtime-binding
+decision before training.
 
 ## Vault
 
@@ -44,6 +79,11 @@ Vault headers are public metadata. Prompt, response, tool result, code, and
 normalized content must not occur in plaintext vault bytes or logs. A plaintext
 export is always explicit, goes to a new directory, and cannot be recalled after
 the user copies it elsewhere.
+
+Plaintext serializers write only inside a random 0700 staging directory with
+0600 files. They publish through a same-parent rename after checksums and a
+`COMPLETE` marker exist. A failed serializer leaves no final destination;
+verified staging paths are removed on failure.
 
 Wrapper-mode authoritative JSON stdout and provider stderr are consumed without
 being echoed. Only sanitized byte counts, trace IDs, and check status are logged;
@@ -70,6 +110,15 @@ DeepSeek origins are explicitly blocked.
 - Terms and authorization references are evidence records, not legal opinions.
 - Native capture credentials authenticate a local process tree, not an
   adversarial host/tool subprocess or the upstream model provider.
+- Dataset planning/export currently uses a bounded in-process compiler. A
+  selection whose conservative decrypted-object estimate exceeds 256 MiB must
+  be split into smaller builds; a future streaming compiler can lift this cap.
+- Dataset export performs stable group splitting, complete-view exact checks,
+  and a versioned, bounded token-shingle Jaccard pass over text, code, patches,
+  and structured tool traffic. It does not claim embedding-level semantic
+  deduplication, tokenizer-aware packing, or cryptographic signatures over
+  reviewer identity; research-strict builds fail closed if the bounded scan
+  cannot complete.
 
 Report security issues privately to the repository maintainers. Do not attach
 real prompts, credentials, vault files, or exported datasets to a public issue.

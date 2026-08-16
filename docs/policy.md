@@ -37,22 +37,68 @@ The built-in registry records engineering defaults and official authority URLs:
 - Self-hosted models: model/weights license, input rights, and tool/repository
   rights must still be known.
 
+Provider/product shape and source authenticity are independent. Native typed
+streams are `locally_observed`; official/manual exports and offline API JSON are
+`user_supplied`. The `request_receipt_verified` and
+`cryptographically_verified` enum values are reserved for a future trusted
+verifier result; v1 has no such verifier, so an arbitrary evidence-reference
+string never upgrades a source or creates a default training allow. In
+particular, an OpenAI-compatible JSON object with a DeepSeek model name is not a
+trusted DeepSeek teacher. It remains archiveable, but training requires a
+trace-scoped reviewer decision with evidence for the teacher-source claim as
+well as the separate rights/terms decision.
+
+Importing an encrypted `.trajpack` is also a new trust boundary: knowledge of
+its passphrase proves only frame integrity. Re-import keeps the recorded source
+labels and the original consent/withdrawal state, but downgrades source
+authenticity to `user_supplied` (or leaves it `unknown`), clears authenticity
+evidence, and does not inherit unsigned scoped-permission assertions. Provider,
+account, model, origin, interface, and model-digest labels cannot be changed by
+the re-import command.
+
+For a self-hosted Harness source, a model name or user-entered digest alone is
+not sufficient. The default path requires a native `locally_observed` capture,
+a `sha256:<digest>` weights snapshot, and a locally generated evidence binding
+of the exact form `local-model-artifact:sha256:<digest>`. This records local
+artifact observation; it is not a model-vendor signature.
+It also does not prove that the captured process loaded that artifact. As a
+result, self-hosted training remains `unknown` until a trace-scoped manual
+decision binds a retained run configuration, model-load receipt, container
+attestation, or equivalent evidence file to the exact target and use.
+
 `trajpack policy snapshot` hashes a locally downloaded terms document. The tool
 does not download or interpret it. `trajpack policy override` is intentionally
 trace- and dimension-scoped, expiring, evidence-backed, and resets human
 approval. There is no global bypass.
 
+A manual override's evidence is content-bound, not a free-form label. Its
+`evidence_ref` must have the canonical form
+`<kind>:sha256:<64-lowercase-hex>`, where `kind` is a lowercase safe token such
+as `contract`, `teacher-receipt`, or `ethics-approval.v1`. The CLI computes this
+reference by streaming a regular local evidence file with a 64 MiB limit and
+rejecting symbolic links or files that change while being read. Keep the exact
+external file under the research project's evidence-retention controls: v1
+records its digest but deliberately does not embed the file in the vault or
+claim that the file or digest is cryptographically signed. Supply it with
+`--evidence-kind <kind> --evidence-file <path>`; the CLI does not accept a
+caller-authored digest in place of reading the file.
+
 `--written-permission <reference>` records a lineage reference only. It never
 changes a decision or substitutes for a pinned terms snapshot by itself. To use
 a contract or written authorization as a hard-gate input, pass a local JSON
-document with `--permission-evidence <json>`. The evidence is stored in the
-encrypted manifest and must match the provider, account class, capture method,
-origin, requested purpose, reviewer, validity window, and—for training—the exact
-target model owner and product. A mismatch or expired scope fails closed.
+metadata file with `--permission-evidence <json>` and the actual retained order
+form or permission document with `--permission-document <path>`. The CLI hashes
+the latter with the same bounded, symlink-safe reader used for manual overrides;
+the resulting canonical artifact reference is stored in the encrypted manifest.
+The metadata must match the provider, account class, capture method, origin,
+requested purpose, reviewer, validity window, and—for training—the exact target
+model owner and product. A caller-authored label, missing document, mismatch, or
+expired scope fails closed. The digest proves which bytes were reviewed, not who
+issued them; validating the issuer and legal effect remains the named reviewer's
+responsibility.
 
 ```json
 {
-  "evidence_ref": "contract:order-form-2026-17",
   "provider": "deepseek",
   "account_type": "api",
   "capture_methods": ["instrumented_harness"],

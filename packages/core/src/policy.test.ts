@@ -2,14 +2,20 @@ import { describe, expect, it } from "vitest";
 import type { PermissionEvidence, Source } from "@trajpack/schema";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { createManifest } from "./manifest.js";
-import { evaluateDefaultEligibility, evaluateGate, reviewEvidenceFingerprint } from "./policy.js";
+import {
+  createApprovalScope,
+  evaluateDefaultEligibility,
+  evaluateGate,
+  isEvidenceArtifactReference,
+  reviewEvidenceFingerprint,
+} from "./policy.js";
 import { fixtureBundle } from "./testing.js";
 
 const EVIDENCE_NOW = new Date("2026-08-16T00:00:00.000Z");
 
 function scopedPermission(overrides: Partial<PermissionEvidence> = {}): PermissionEvidence {
   return {
-    evidence_ref: "contract:scope-17",
+    evidence_ref: `contract:sha256:${"a".repeat(64)}`,
     provider: "openai",
     account_type: "consumer",
     capture_methods: ["official_hook"],
@@ -35,6 +41,42 @@ function codexConsumerSource(overrides: Partial<Source> = {}): Source {
     origin: null,
     ...overrides,
   };
+}
+
+function manualDeepSeekBundle(
+  authenticity: Source["authenticity"],
+  authenticityEvidenceRef: string | null,
+): ReturnType<typeof fixtureBundle> {
+  const bundle = fixtureBundle();
+  bundle.manifest.source = {
+    ...bundle.manifest.source,
+    host: "manual_import",
+    provider: "deepseek",
+    product: "deepseek-api-response",
+    surface: "api",
+    capture_method: "manual_copy",
+    interface_version: "deepseek_api_response",
+    model_id: "deepseek-reasoner",
+    authenticity,
+    authenticity_evidence_ref: authenticityEvidenceRef,
+  };
+  bundle.manifest.account_contract.account_type = "api";
+  bundle.manifest.account_contract.terms = [{
+    name: "DeepSeek Terms of Use",
+    url: "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
+    effective_at: "2026-01-01T00:00:00.000Z",
+    retrieved_at: "2026-08-16T00:00:00.000Z",
+    snapshot_sha256: "a".repeat(64),
+    review_after: "2099-01-01T00:00:00.000Z",
+  }];
+  return bundle;
+}
+
+function locallyBoundSelfHostedBundle(text?: string): ReturnType<typeof fixtureBundle> {
+  const bundle = fixtureBundle(text);
+  bundle.manifest.source.authenticity_evidence_ref =
+    `local-model-artifact:${bundle.manifest.source.model_snapshot_or_weights_digest}`;
+  return bundle;
 }
 
 function attestEventRights(
@@ -83,7 +125,7 @@ describe("policy gates", () => {
   });
 
   it("allows a reviewed self-hosted fixture", () => {
-    expect(evaluateGate(fixtureBundle(), "training_competitive_distillation").allowed).toBe(true);
+    expect(evaluateGate(locallyBoundSelfHostedBundle(), "training_competitive_distillation").allowed).toBe(true);
   });
 
   it("requires a model/weights license chain for self-hosted training", () => {
@@ -114,6 +156,16 @@ describe("policy gates", () => {
       .toContain("CONSENT_WITHDRAWN");
   });
 
+  it("requires the stored competitiveness judgment to match the selected training gate", () => {
+    const bundle = fixtureBundle();
+    bundle.manifest.eligibility.training_competitive_distillation.competitive_with_source = "no";
+    expect(evaluateGate(bundle, "training_competitive_distillation").reasonCodes)
+      .toContain("COMPETITIVE_DECISION_REQUIRED");
+    bundle.manifest.eligibility.training_noncompetitive.competitive_with_source = "yes";
+    expect(evaluateGate(bundle, "training_noncompetitive").reasonCodes)
+      .toContain("NONCOMPETITIVE_DECISION_REQUIRED");
+  });
+
   it("blocks unknown account/provider and unspecified training targets", () => {
     const bundle = fixtureBundle();
     bundle.manifest.source.provider = "unknown";
@@ -130,7 +182,7 @@ describe("policy gates", () => {
   });
 
   it("does not let excluded content block or leak into a training gate", () => {
-    const bundle = fixtureBundle();
+    const bundle = locallyBoundSelfHostedBundle();
     const excluded = structuredClone(bundle.events[0]!);
     excluded.event_id = "evt_excluded_secret";
     excluded.span_id = "fedcba9876543210";
@@ -143,6 +195,12 @@ describe("policy gates", () => {
 
   it("requires terms from the provider and account registry authority", () => {
     const bundle = fixtureBundle();
+    bundle.manifest.eligibility.training_competitive_distillation = {
+      ...bundle.manifest.eligibility.training_competitive_distillation,
+      basis: "provider-default:fixture",
+      evidence_ref: null,
+      reviewer: null,
+    };
     bundle.manifest.source.provider = "deepseek";
     bundle.manifest.source.surface = "api";
     bundle.manifest.account_contract.account_type = "api";
@@ -270,18 +328,58 @@ describe("policy gates", () => {
     expect(eligibility.automatic_capture.evidence_ref).toBeNull();
   });
 
+  it("never treats a caller-authored scoped permission label as legal evidence", () => {
+    const evidence = scopedPermission({
+      evidence_ref: "typed-by-user-no-document",
+      permitted_purposes: ["training_competitive_distillation"],
+      target_model_owner: "example-lab",
+      target_product: "example-general-model",
+    });
+    const eligibility = evaluateDefaultEligibility({
+      source: codexConsumerSource({ provider: "openai" }),
+      accountType: "consumer",
+      rights: fixtureBundle().manifest.rights,
+      consentActive: true,
+      writtenPermissionRef: evidence.evidence_ref,
+      permissionEvidence: evidence,
+      targetModelOwner: "example-lab",
+      targetProduct: "example-general-model",
+      competitive: "yes",
+      now: EVIDENCE_NOW,
+    });
+    expect(eligibility.training_competitive_distillation.status).not.toBe("allow");
+    expect(eligibility.training_competitive_distillation.reason_codes)
+      .toContain("SCOPED_TRAINING_OVERRIDE_REQUIRED");
+
+    const manifest = createManifest({
+      source: codexConsumerSource({ provider: "openai" }),
+      accountType: "consumer",
+      rights: fixtureBundle().manifest.rights,
+      consentReceipt: "consent:permission-negative",
+      consentPurposes: ["archive", "capture", "distillation"],
+      permissionEvidence: evidence,
+      targetModelOwner: "example-lab",
+      targetProduct: "example-general-model",
+      competitive: "yes",
+      createdAt: EVIDENCE_NOW,
+    });
+    expect(evaluateGate({ manifest, raw: [], events: [] }, "training_competitive_distillation", EVIDENCE_NOW).reasonCodes)
+      .toContain("SCOPED_PERMISSION_EVIDENCE_REFERENCE_INVALID");
+  });
+
   it("allows automatic capture only when every scoped permission field matches", () => {
+    const validPermission = scopedPermission();
     const baseContext = {
       source: codexConsumerSource(),
       accountType: "consumer" as const,
       rights: fixtureBundle().manifest.rights,
       consentActive: true,
-      writtenPermissionRef: "contract:scope-17",
+      writtenPermissionRef: validPermission.evidence_ref,
       now: EVIDENCE_NOW,
     };
     expect(evaluateDefaultEligibility({
       ...baseContext,
-      permissionEvidence: scopedPermission(),
+      permissionEvidence: validPermission,
     }).automatic_capture.status).toBe("allow");
 
     const mismatches: PermissionEvidence[] = [
@@ -293,7 +391,7 @@ describe("policy gates", () => {
       scopedPermission({ reviewer: " " }),
       scopedPermission({ effective_at: "2026-09-01T00:00:00.000Z" }),
       scopedPermission({ expires_at: "2026-08-15T00:00:00.000Z" }),
-      scopedPermission({ evidence_ref: "contract:some-other-scope" }),
+      scopedPermission({ evidence_ref: `contract:sha256:${"b".repeat(64)}` }),
     ];
     for (const evidence of mismatches) {
       expect(evaluateDefaultEligibility({
@@ -304,14 +402,24 @@ describe("policy gates", () => {
   });
 
   it("binds training permission to its exact purpose and target", () => {
+    const nativeSource = {
+      ...fixtureBundle().manifest.source,
+      provider: "deepseek" as const,
+      model_snapshot_or_weights_digest: null,
+      authenticity: "locally_observed" as const,
+      authenticity_evidence_ref: `native-request-header:sha256:${"d".repeat(64)}`,
+    };
     const evidence = scopedPermission({
+      provider: "deepseek",
+      account_type: "api",
+      capture_methods: ["instrumented_harness"],
       permitted_purposes: ["training_competitive_distillation"],
       target_model_owner: "example-lab",
       target_product: "example-general-model",
     });
     const baseContext = {
-      source: codexConsumerSource(),
-      accountType: "consumer" as const,
+      source: nativeSource,
+      accountType: "api" as const,
       rights: fixtureBundle().manifest.rights,
       consentActive: true,
       writtenPermissionRef: evidence.evidence_ref,
@@ -327,6 +435,10 @@ describe("policy gates", () => {
     expect(evaluateDefaultEligibility({
       ...baseContext,
       targetProduct: "different-model",
+    }).training_competitive_distillation.status).not.toBe("allow");
+    expect(evaluateDefaultEligibility({
+      ...baseContext,
+      source: { ...nativeSource, authenticity_evidence_ref: null },
     }).training_competitive_distillation.status).not.toBe("allow");
   });
 
@@ -388,7 +500,190 @@ describe("policy gates", () => {
       now: new Date("2026-08-16T00:00:00.000Z"),
     });
     expect(eligibility.automatic_capture.status).toBe("deny");
-    expect(eligibility.training_competitive_distillation.status).toBe("allow");
+    expect(eligibility.training_competitive_distillation.status).toBe("unknown");
+    const claimedPermission = scopedPermission({
+      evidence_ref: "contract:deepseek-offline-claim",
+      provider: "deepseek",
+      account_type: "api",
+      capture_methods: ["manual_copy"],
+      permitted_purposes: ["training_competitive_distillation"],
+      target_model_owner: "user",
+      target_product: "general-model",
+    });
+    const receiptVerified = evaluateDefaultEligibility({
+      source: {
+        ...bundle.manifest.source,
+        host: "manual_import",
+        provider: "deepseek",
+        product: "deepseek-api-response",
+        surface: "api",
+        capture_method: "manual_copy",
+        interface_version: "deepseek_api_response",
+        authenticity: "request_receipt_verified",
+        authenticity_evidence_ref: "provider-receipt:sha256:fixture",
+      },
+      accountType: "api",
+      rights: bundle.manifest.rights,
+      consentActive: true,
+      writtenPermissionRef: claimedPermission.evidence_ref,
+      permissionEvidence: claimedPermission,
+      targetModelOwner: "user",
+      targetProduct: "general-model",
+      competitive: "yes",
+      now: new Date("2026-08-16T00:00:00.000Z"),
+    });
+    expect(receiptVerified.training_competitive_distillation.status).toBe("unknown");
+  });
+
+  it("does not trust a user-authored verified enum or receipt string", () => {
+    const bundle = manualDeepSeekBundle(
+      "request_receipt_verified",
+      "provider-receipt:sha256:attacker-controlled-string",
+    );
+    bundle.manifest.eligibility.training_competitive_distillation = {
+      ...bundle.manifest.eligibility.training_competitive_distillation,
+      status: "allow",
+      basis: "forged-provider-receipt",
+      target_model_owner: "research-lab",
+      target_product: "general-model",
+      competitive_with_source: "yes",
+      reason_codes: ["FORGED_VERIFICATION"],
+    };
+    bundle.manifest.review.approval_scope = createApprovalScope(
+      bundle,
+      ["training_competitive_distillation"],
+    );
+
+    const result = evaluateGate(bundle, "training_competitive_distillation", EVIDENCE_NOW);
+    expect(result.allowed).toBe(false);
+    expect(result.reasonCodes).toContain("SOURCE_AUTHENTICITY_VERIFIER_UNAVAILABLE");
+  });
+
+  it("allows an evidence-backed trace-scoped manual decision for offline teacher data", () => {
+    const bundle = manualDeepSeekBundle("user_supplied", null);
+    bundle.manifest.eligibility.training_competitive_distillation = {
+      ...bundle.manifest.eligibility.training_competitive_distillation,
+      status: "allow",
+      basis: "manual-override:policy/2026-08-16.4:reviewed external teacher receipt",
+      target_model_owner: "research-lab",
+      target_product: "general-model",
+      competitive_with_source: "yes",
+      reason_codes: ["MANUAL_OVERRIDE_ALLOW"],
+      reviewer: "dataset-governance-reviewer",
+      evidence_ref: `teacher-receipt:sha256:${"c".repeat(64)}`,
+    };
+    bundle.manifest.review.approval_scope = createApprovalScope(
+      bundle,
+      ["training_competitive_distillation"],
+    );
+
+    expect(evaluateGate(bundle, "training_competitive_distillation", EVIDENCE_NOW).allowed).toBe(true);
+  });
+
+  it("requires manual override evidence to be bound to a canonical artifact digest", () => {
+    expect(isEvidenceArtifactReference(`teacher-receipt:sha256:${"a".repeat(64)}`)).toBe(true);
+    expect(isEvidenceArtifactReference(`Teacher:sha256:${"a".repeat(64)}`)).toBe(false);
+    expect(isEvidenceArtifactReference(`${"a".repeat(65)}:sha256:${"a".repeat(64)}`)).toBe(false);
+    expect(isEvidenceArtifactReference("evidence:offline-teacher-review-17")).toBe(false);
+
+    const bundle = manualDeepSeekBundle("user_supplied", null);
+    bundle.manifest.eligibility.training_competitive_distillation = {
+      ...bundle.manifest.eligibility.training_competitive_distillation,
+      status: "allow",
+      basis: "manual-override:policy/2026-08-16.4:unbound evidence label",
+      target_model_owner: "research-lab",
+      target_product: "general-model",
+      competitive_with_source: "yes",
+      reason_codes: ["MANUAL_OVERRIDE_ALLOW"],
+      reviewer: "dataset-governance-reviewer",
+      evidence_ref: "evidence:offline-teacher-review-17",
+    };
+    bundle.manifest.review.approval_scope = createApprovalScope(
+      bundle,
+      ["training_competitive_distillation"],
+    );
+
+    const result = evaluateGate(bundle, "training_competitive_distillation", EVIDENCE_NOW);
+    expect(result.allowed).toBe(false);
+    expect(result.reasonCodes).toContain("OVERRIDE_EVIDENCE_REFERENCE_INVALID");
+    expect(result.reasonCodes).toContain("TEACHER_SOURCE_AUTHENTICITY_UNVERIFIED");
+  });
+
+  it("keeps native Harness local observation but requires manual runtime binding for self-hosted artifacts", () => {
+    const base = fixtureBundle();
+    const nativeDeepSeek = evaluateDefaultEligibility({
+      source: {
+        ...base.manifest.source,
+        provider: "deepseek",
+        model_snapshot_or_weights_digest: null,
+        authenticity: "locally_observed",
+        authenticity_evidence_ref: `native-request-header:sha256:${"d".repeat(64)}`,
+      },
+      accountType: "api",
+      rights: base.manifest.rights,
+      consentActive: true,
+      targetModelOwner: "research-lab",
+      targetProduct: "general-model",
+      competitive: "yes",
+      now: EVIDENCE_NOW,
+    });
+    expect(nativeDeepSeek.training_competitive_distillation.status).toBe("allow");
+
+    const uncorrelatedNative = evaluateDefaultEligibility({
+      source: {
+        ...base.manifest.source,
+        provider: "deepseek",
+        model_snapshot_or_weights_digest: null,
+        authenticity: "locally_observed",
+        authenticity_evidence_ref: null,
+      },
+      accountType: "api",
+      rights: base.manifest.rights,
+      consentActive: true,
+      targetModelOwner: "research-lab",
+      targetProduct: "general-model",
+      competitive: "yes",
+      now: EVIDENCE_NOW,
+    });
+    expect(uncorrelatedNative.training_competitive_distillation.status).not.toBe("allow");
+
+    const digest = `sha256:${"f".repeat(64)}`;
+    const unbound = evaluateDefaultEligibility({
+      source: {
+        ...base.manifest.source,
+        provider: "self_hosted",
+        model_snapshot_or_weights_digest: digest,
+        authenticity: "locally_observed",
+        authenticity_evidence_ref: null,
+      },
+      accountType: "self_hosted",
+      rights: base.manifest.rights,
+      consentActive: true,
+      targetModelOwner: "research-lab",
+      targetProduct: "general-model",
+      competitive: "yes",
+      now: EVIDENCE_NOW,
+    });
+    expect(unbound.training_competitive_distillation.status).toBe("unknown");
+    const bound = evaluateDefaultEligibility({
+      source: {
+        ...base.manifest.source,
+        provider: "self_hosted",
+        model_snapshot_or_weights_digest: digest,
+        authenticity: "locally_observed",
+        authenticity_evidence_ref: `local-model-artifact:${digest}`,
+      },
+      accountType: "self_hosted",
+      rights: base.manifest.rights,
+      consentActive: true,
+      targetModelOwner: "research-lab",
+      targetProduct: "general-model",
+      competitive: "yes",
+      now: EVIDENCE_NOW,
+    });
+    expect(bound.training_competitive_distillation.status).toBe("unknown");
+    expect(bound.training_competitive_distillation.reason_codes)
+      .toContain("SELF_HOSTED_RUNTIME_BINDING_REQUIRED");
   });
 
   it("does not grant DeepSeek training from a mutable provider label alone", () => {

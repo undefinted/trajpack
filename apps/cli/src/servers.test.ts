@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ import {
   sha256,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { CaptureSession } from "./capture-session.js";
+import { CaptureLimitError, CaptureSession } from "./capture-session.js";
 import { startIngestServer } from "./ingest-server.js";
 import { startReviewServer } from "./review-server.js";
 
@@ -279,6 +279,230 @@ afterEach(async () => {
 });
 
 describe("loopback collectors", () => {
+  it("fails closed when an authenticated capture exceeds its event budget", async () => {
+    const ingest = vi.fn(async () => true);
+    const onLimitExceeded = vi.fn();
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      expectedCwd: "C:\\owned\\repo",
+      maxEvents: 1,
+      maxTotalRawBytes: 1024 * 1024,
+      onLimitExceeded,
+    });
+    const request = () => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: {
+        authorization: "Bearer capture-token",
+        "x-trajpack-host": "codex",
+        "x-trajpack-interface": "codex-hook/1",
+      },
+      payload: makeHookEnvelope("session-a", "PostToolUse", "C:\\owned\\repo", 0).payload,
+    });
+    try {
+      expect((await request()).statusCode).toBe(202);
+      const exceeded = await request();
+      expect(exceeded.statusCode).toBe(429);
+      expect(exceeded.json()).toEqual({
+        error: "capture_limit_exceeded",
+        reason: "CAPTURE_EVENT_LIMIT_EXCEEDED",
+      });
+      expect(running.limitViolation()).toBe("CAPTURE_EVENT_LIMIT_EXCEEDED");
+      expect(onLimitExceeded).toHaveBeenCalledTimes(1);
+      expect(ingest).toHaveBeenCalledTimes(1);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("does not charge rejected authenticated requests to the main event or raw-byte budgets", async () => {
+    const cwd = "C:\\owned\\repo";
+    const ingest = vi.fn(async () => true);
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      expectedCwd: cwd,
+      maxEvents: 1,
+      maxTotalRawBytes: 2048,
+      maxInvalidAttempts: 4,
+    });
+    try {
+      const invalid = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers: {
+          authorization: "Bearer capture-token",
+          "x-trajpack-host": "codex",
+          "x-trajpack-interface": "codex-hook/1",
+        },
+        payload: { session_id: "session-a", hook_event_name: "Stop", padding: "x".repeat(10_000) },
+      });
+      expect(invalid.statusCode).toBe(422);
+      expect(invalid.json()).toEqual({ error: "cwd_required" });
+      expect(running.limitViolation()).toBeNull();
+
+      const accepted = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers: {
+          authorization: "Bearer capture-token",
+          "x-trajpack-host": "codex",
+          "x-trajpack-interface": "codex-hook/1",
+        },
+        payload: makeHookEnvelope("session-a", "Stop", cwd, 0).payload,
+      });
+      expect(accepted.statusCode).toBe(202);
+      expect(ingest).toHaveBeenCalledTimes(1);
+      expect(running.limitViolation()).toBeNull();
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("uses a separate bounded invalid-attempt budget", async () => {
+    const onLimitExceeded = vi.fn();
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest: vi.fn(async () => true) } as unknown as CaptureSession,
+      maxInvalidAttempts: 1,
+      onLimitExceeded,
+    });
+    const invalid = () => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: { authorization: "Bearer capture-token" },
+      payload: { hook_event_name: "Stop" },
+    });
+    try {
+      expect((await invalid()).statusCode).toBe(400);
+      const exceeded = await invalid();
+      expect(exceeded.statusCode).toBe(429);
+      expect(exceeded.json()).toEqual({
+        error: "capture_limit_exceeded",
+        reason: "CAPTURE_INVALID_ATTEMPT_LIMIT_EXCEEDED",
+      });
+      expect(onLimitExceeded).toHaveBeenCalledTimes(1);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("authenticates before parsing large bodies and bounds concurrent request parsing", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const ingest = vi.fn(async () => { await blocked; return true; });
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      maxConcurrentRequests: 1,
+    });
+    const headers = {
+      authorization: "Bearer capture-token",
+      "x-trajpack-host": "codex",
+      "x-trajpack-interface": "codex-hook/1",
+    };
+    try {
+      const unauthorized = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers: { authorization: "Bearer wrong-token", "content-type": "application/json" },
+        payload: "x".repeat(9 * 1024 * 1024),
+      });
+      expect(unauthorized.statusCode).toBe(401);
+
+      const first = running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers,
+        payload: makeHookEnvelope("session-a", "Stop", "C:\\owned\\repo", 0).payload,
+      });
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+      const concurrent = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers,
+        payload: makeHookEnvelope("session-a", "Stop", "C:\\owned\\repo", 1).payload,
+      });
+      expect(concurrent.statusCode).toBe(429);
+      expect(concurrent.json()).toEqual({ error: "collector_busy" });
+      release();
+      expect((await first).statusCode).toBe(202);
+      expect(ingest).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await running.close();
+    }
+  });
+
+  it("waits for in-flight ingestion so a late drain limit prevents finalization", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const ingest = vi.fn(async () => {
+      await blocked;
+      throw new CaptureLimitError("CAPTURE_RAW_BYTE_LIMIT_EXCEEDED");
+    });
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+    });
+    const request = running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: {
+        authorization: "Bearer capture-token",
+        "x-trajpack-host": "codex",
+        "x-trajpack-interface": "codex-hook/1",
+      },
+      payload: makeHookEnvelope("session-a", "Stop", "C:\\owned\\repo", 0).payload,
+    });
+    await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+    let closeResolved = false;
+    const closing = running.close().then(() => { closeResolved = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeResolved).toBe(false);
+
+    release();
+    expect((await request).statusCode).toBe(429);
+    await closing;
+    expect(running.limitViolation()).toBe("CAPTURE_RAW_BYTE_LIMIT_EXCEEDED");
+  });
+
+  it("fails closed on stored raw-byte overflow before ingesting", async () => {
+    const ingest = vi.fn(async () => true);
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      maxTotalRawBytes: 1,
+    });
+    try {
+      const response = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers: {
+          authorization: "Bearer capture-token",
+          "x-trajpack-host": "codex",
+          "x-trajpack-interface": "codex-hook/1",
+        },
+        payload: makeHookEnvelope("session-a", "Stop", "C:\\owned\\repo", 0).payload,
+      });
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toEqual({
+        error: "capture_limit_exceeded",
+        reason: "CAPTURE_RAW_BYTE_LIMIT_EXCEEDED",
+      });
+      expect(ingest).not.toHaveBeenCalled();
+    } finally {
+      await running.close();
+    }
+  });
+
   it("binds an armed collector to its first non-empty session and only ends for that session", async () => {
     const cwd = "C:\\owned\\repo";
     const ingest = vi.fn(async () => true);
@@ -441,7 +665,6 @@ describe("loopback collectors", () => {
       token: "capture-token",
       session: { ingest } as unknown as CaptureSession,
       expectedCwd: cwd,
-      bindNextSession: true,
       claudeTranscriptRoot: transcriptRoot,
       onSessionEnd,
     });
@@ -466,7 +689,7 @@ describe("loopback collectors", () => {
       expect(unauthorized.statusCode).toBe(401);
       expect(ingest).not.toHaveBeenCalled();
 
-      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionStart", cwd, 0))).statusCode).toBe(202);
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionStart", cwd, 0, transcriptPath))).statusCode).toBe(202);
       expect((await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", cwd, 1, transcriptPath))).statusCode).toBe(202);
       expect(ingest).toHaveBeenCalledTimes(3);
       expect(onSessionEnd).toHaveBeenCalledTimes(1);
@@ -487,6 +710,149 @@ describe("loopback collectors", () => {
       expect(forged.statusCode).toBe(422);
       expect(forged.json()).toEqual({ error: "hook_event_name_required" });
       expect(ingest).toHaveBeenCalledTimes(3);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("requires Claude SessionStart and rejects cross-cwd, cross-session, and cross-project transcript injection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-claude-session-binding-test-"));
+    temporaryRoots.push(root);
+    const transcriptRoot = join(root, ".claude", "projects");
+    const expectedProject = join(transcriptRoot, "owned-repo");
+    const otherProject = join(transcriptRoot, "other-repo");
+    await Promise.all([mkdir(expectedProject, { recursive: true }), mkdir(otherProject, { recursive: true })]);
+    const sessionId = "11111111-aaaa-bbbb-cccc-222222222222";
+    const expectedPath = join(expectedProject, `${sessionId}.jsonl`);
+    const otherProjectPath = join(otherProject, `${sessionId}.jsonl`);
+    await Promise.all([
+      writeFile(expectedPath, "owned project transcript"),
+      writeFile(otherProjectPath, "other project transcript"),
+    ]);
+    const cwd = join(root, "owned-repo");
+    const ingest = vi.fn(async () => true);
+    const running = await startIngestServer({
+      host: "claude_code",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      expectedCwd: cwd,
+      bindNextSession: true,
+      claudeTranscriptRoot: transcriptRoot,
+    });
+    const post = (envelope: RawEnvelope) => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: {
+        authorization: "Bearer capture-token",
+        "x-trajpack-host": "claude_code",
+        "x-trajpack-interface": "claude-hook/1",
+      },
+      payload: envelope.payload,
+    });
+    try {
+      const beforeStart = await post(makeClaudeHookEnvelope(sessionId, "PostToolUse", cwd, 0));
+      expect(beforeStart.statusCode).toBe(409);
+      expect(beforeStart.json()).toEqual({ error: "session_start_required" });
+
+      const missingPath = await post(makeClaudeHookEnvelope(sessionId, "SessionStart", cwd, 1));
+      expect(missingPath.statusCode).toBe(422);
+      expect(missingPath.json()).toEqual({ error: "transcript_path_required" });
+
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionStart", cwd, 2, expectedPath))).statusCode).toBe(202);
+
+      const wrongCwd = await post(makeClaudeHookEnvelope(sessionId, "PostToolUse", join(root, "other-repo"), 3));
+      expect(wrongCwd.statusCode).toBe(409);
+      expect(wrongCwd.json()).toEqual({ error: "cwd_mismatch" });
+
+      const otherSession = await post(makeClaudeHookEnvelope("different-session", "PostToolUse", cwd, 4));
+      expect(otherSession.statusCode).toBe(409);
+      expect(otherSession.json()).toEqual({ error: "session_mismatch" });
+
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", cwd, 5, otherProjectPath))).statusCode).toBe(202);
+      expect(ingest).toHaveBeenCalledTimes(2);
+      expect(ingest.mock.calls.every(([envelope]) =>
+        (envelope as RawEnvelope).interface_version === "claude-hook/1")).toBe(true);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("does not read a Claude transcript when the collector has no expected cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-claude-unbound-cwd-test-"));
+    temporaryRoots.push(root);
+    const transcriptRoot = join(root, ".claude", "projects");
+    const project = join(transcriptRoot, "repo");
+    await mkdir(project, { recursive: true });
+    const sessionId = "55555555-aaaa-bbbb-cccc-666666666666";
+    const transcriptPath = join(project, `${sessionId}.jsonl`);
+    await writeFile(transcriptPath, "must not be collected");
+    const ingest = vi.fn(async () => true);
+    const running = await startIngestServer({
+      host: "claude_code",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      bindNextSession: true,
+      claudeTranscriptRoot: transcriptRoot,
+    });
+    const post = (envelope: RawEnvelope) => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: {
+        authorization: "Bearer capture-token",
+        "x-trajpack-host": "claude_code",
+        "x-trajpack-interface": "claude-hook/1",
+      },
+      payload: envelope.payload,
+    });
+    try {
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionStart", root, 0, transcriptPath))).statusCode).toBe(202);
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", root, 1, transcriptPath))).statusCode).toBe(202);
+      expect(ingest).toHaveBeenCalledTimes(2);
+      expect(ingest.mock.calls.every(([envelope]) =>
+        (envelope as RawEnvelope).interface_version === "claude-hook/1")).toBe(true);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("rejects a Claude transcript file swapped after SessionStart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-claude-path-swap-test-"));
+    temporaryRoots.push(root);
+    const transcriptRoot = join(root, ".claude", "projects");
+    const project = join(transcriptRoot, "owned-repo");
+    await mkdir(project, { recursive: true });
+    const sessionId = "33333333-aaaa-bbbb-cccc-444444444444";
+    const transcriptPath = join(project, `${sessionId}.jsonl`);
+    const originalPath = join(project, `${sessionId}.original`);
+    await writeFile(transcriptPath, "original transcript");
+    const cwd = join(root, "owned-repo");
+    const ingest = vi.fn(async () => true);
+    const running = await startIngestServer({
+      host: "claude_code",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      expectedCwd: cwd,
+      bindNextSession: true,
+      claudeTranscriptRoot: transcriptRoot,
+    });
+    const post = (envelope: RawEnvelope) => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers: {
+        authorization: "Bearer capture-token",
+        "x-trajpack-host": "claude_code",
+        "x-trajpack-interface": "claude-hook/1",
+      },
+      payload: envelope.payload,
+    });
+    try {
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionStart", cwd, 0, transcriptPath))).statusCode).toBe(202);
+      await rename(transcriptPath, originalPath);
+      await writeFile(transcriptPath, "replacement transcript");
+      expect((await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", cwd, 1, transcriptPath))).statusCode).toBe(202);
+      expect(ingest).toHaveBeenCalledTimes(2);
+      expect(ingest.mock.calls.every(([envelope]) =>
+        (envelope as RawEnvelope).interface_version === "claude-hook/1")).toBe(true);
     } finally {
       await running.close();
     }
@@ -514,6 +880,7 @@ describe("loopback collectors", () => {
       host: "claude_code",
       token: "capture-token",
       session: { ingest } as unknown as CaptureSession,
+      expectedCwd: root,
       bindNextSession: true,
       claudeTranscriptRoot: transcriptRoot,
     });
@@ -528,13 +895,12 @@ describe("loopback collectors", () => {
       payload: envelope.payload,
     });
     try {
-      await post(makeClaudeHookEnvelope(sessionId, "SessionStart", root, 0));
-      await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", root, 1, outsidePath));
-      await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", root, 2, mismatchedPath));
-      await post(makeClaudeHookEnvelope(sessionId, "SessionEnd", root, 3, wrongExtension));
-      expect(ingest).toHaveBeenCalledTimes(4);
-      expect(ingest.mock.calls.every(([envelope]) =>
-        (envelope as RawEnvelope).interface_version === "claude-hook/1")).toBe(true);
+      for (const [index, invalidPath] of [outsidePath, mismatchedPath, wrongExtension].entries()) {
+        const response = await post(makeClaudeHookEnvelope(sessionId, "SessionStart", root, index, invalidPath));
+        expect(response.statusCode).toBe(422);
+        expect(response.json()).toEqual({ error: "transcript_binding_rejected" });
+      }
+      expect(ingest).not.toHaveBeenCalled();
     } finally {
       await running.close();
     }
@@ -571,6 +937,7 @@ describe("loopback collectors", () => {
         host: "claude_code",
         token: `capture-token-${index}`,
         session: { ingest } as unknown as CaptureSession,
+        expectedCwd: root,
         bindNextSession: true,
         claudeTranscriptRoot: transcriptRoot,
         maxClaudeTranscriptBytes: attempt.kind === "oversized" ? 4 : 1024,
@@ -586,9 +953,10 @@ describe("loopback collectors", () => {
         payload: envelope.payload,
       });
       try {
-        await post(makeClaudeHookEnvelope(attempt.sessionId, "SessionStart", root, 0));
-        await post(makeClaudeHookEnvelope(attempt.sessionId, "SessionEnd", root, 1, path));
-        expect(ingest).toHaveBeenCalledTimes(2);
+        const response = await post(makeClaudeHookEnvelope(attempt.sessionId, "SessionStart", root, 0, path));
+        expect(response.statusCode).toBe(422);
+        expect(response.json()).toEqual({ error: "transcript_binding_rejected" });
+        expect(ingest).not.toHaveBeenCalled();
       } finally {
         await running.close();
       }
