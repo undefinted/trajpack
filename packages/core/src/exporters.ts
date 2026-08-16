@@ -634,6 +634,13 @@ function toHfViewExample(bundle: TraceBundle, view: HfView): DatasetExample {
       continue;
     }
     if (!["message", "reasoning", "plan", "error", "feedback", "evaluation"].includes(event.event_type)) continue;
+    // Streaming adapters retain provider chunks as partial observable events.
+    // They remain available in canonical/ATIF and lineage, but compiling them
+    // as conversational assistant turns would duplicate prefixes and create
+    // accidental loss targets alongside the completed host response.
+    if (event.status === "partial"
+      && (event.actor === "assistant" || event.actor === "agent")
+      && ["message", "reasoning", "plan"].includes(event.event_type)) continue;
     const role = event.actor === "agent" || event.actor === "assistant"
       ? "assistant"
       : event.actor === "user" || event.actor === "developer" || event.actor === "system"

@@ -35,6 +35,58 @@ afterEach(async () => {
 });
 
 describe("import command integration", () => {
+  it("imports a validated Gemini Takeout activity snapshot as Google consumer archive metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "trajpack-cli-gemini-takeout-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "MyActivity.json");
+    const termsPath = join(directory, "google-terms.json");
+    await writeFile(path, JSON.stringify([{
+      header: "Gemini Apps",
+      title: "Prompted summarize this fixture",
+      description: "Activity metadata; not an inferred assistant answer.",
+      time: "2026-08-16T12:00:00.000Z",
+      products: ["Gemini Apps"],
+    }]));
+    await writeFile(termsPath, JSON.stringify({
+      name: "Google Terms of Service",
+      url: "https://policies.google.com/terms",
+      effective_at: "2026-01-01T00:00:00.000Z",
+      retrieved_at: "2026-08-16T00:00:00.000Z",
+      snapshot_sha256: "a".repeat(64),
+      review_after: "2099-01-01T00:00:00.000Z",
+    }));
+    capture.create.mockImplementation(async (_host: string, manifest: { trace_id: string }) => ({
+      ingest: capture.ingest,
+      abort: capture.abort,
+      finalize: vi.fn(async () => ({ manifest })),
+    }));
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await runImport(path, {
+      sourceHint: "gemini",
+      accountType: "consumer",
+      terms: termsPath,
+    });
+
+    expect(capture.create).toHaveBeenCalledWith(
+      "manual_import",
+      expect.objectContaining({
+        source: expect.objectContaining({
+          provider: "google",
+          product: "official-export:gemini_takeout_activity_json",
+          interface_version: "gemini_takeout_activity_json",
+          authenticity: "user_supplied",
+        }),
+        eligibility: expect.objectContaining({
+          local_archive: expect.objectContaining({ status: "allow" }),
+          training_noncompetitive: expect.objectContaining({ status: "unknown" }),
+          training_competitive_distillation: expect.objectContaining({ status: "unknown" }),
+        }),
+      }),
+      "test-passphrase-long-enough",
+    );
+  });
+
   it("keeps a DeepSeek-shaped offline response user-supplied and non-training by default", async () => {
     const directory = await mkdtemp(join(tmpdir(), "trajpack-cli-deepseek-json-"));
     temporaryDirectories.push(directory);
@@ -179,6 +231,49 @@ describe("import command integration", () => {
 
     await expect(runImport(path, { maxBytes: "not-a-number" })).rejects.toThrow("--max-bytes must be a positive integer");
     await expect(runImport(path, { maxBytes: 1 })).rejects.toThrow("1-byte limit");
+  });
+
+  it("keeps a generic DeepSeek web archive labeled manual rather than official", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "trajpack-cli-deepseek-manual-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "manual-conversation.json");
+    const termsPath = join(directory, "deepseek-terms.json");
+    await writeFile(path, JSON.stringify({ messages: [{ role: "user", content: "archived by the user" }] }));
+    await writeFile(termsPath, JSON.stringify({
+      name: "DeepSeek Terms of Use",
+      url: "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
+      effective_at: "2026-01-01T00:00:00.000Z",
+      retrieved_at: "2026-08-16T00:00:00.000Z",
+      snapshot_sha256: "a".repeat(64),
+      review_after: "2099-01-01T00:00:00.000Z",
+    }));
+    capture.create.mockImplementation(async (_host: string, manifest: { trace_id: string }) => ({
+      ingest: capture.ingest,
+      abort: capture.abort,
+      finalize: vi.fn(async () => ({ manifest })),
+    }));
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await runImport(path, {
+      sourceHint: "generic",
+      provider: "deepseek",
+      accountType: "consumer",
+      terms: termsPath,
+    });
+
+    expect(capture.create).toHaveBeenCalledWith(
+      "manual_import",
+      expect.objectContaining({
+        source: expect.objectContaining({
+          provider: "deepseek",
+          product: "manual-archive:generic_json",
+          capture_method: "manual_copy",
+          fidelity: "C",
+          authenticity: "user_supplied",
+        }),
+      }),
+      "test-passphrase-long-enough",
+    );
   });
 
   it("downgrades unsigned vault assertions, preserves consent, and rejects source relabeling", async () => {

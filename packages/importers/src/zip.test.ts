@@ -112,6 +112,30 @@ describe("bounded official ZIP import", () => {
     expect(result.envelopes[0]?.session_id).toBe("claude-one");
   });
 
+  it("imports a bounded Google Takeout Gemini Apps activity archive without treating it as full chat history", () => {
+    const activity = [{
+      header: "Gemini Apps",
+      title: "Prompted Explain trajectory provenance",
+      time: "2026-08-15T12:00:00.000Z",
+      products: ["Gemini Apps"],
+    }];
+    const archive = zipSync({
+      "Takeout/My Activity/Gemini Apps/MyActivity.json": json(activity),
+      "Takeout/My Activity/Gemini Apps/MyActivity.html": strToU8(
+        "<!doctype html><title>My Activity</title><h1>Gemini Apps</h1><p>Prompted ignored viewer</p>",
+      ),
+    });
+    const result = importOfficialZipArchive(archive, { capturedAt, filename: "takeout.zip" });
+    expect(result.detection.format).toBe("gemini_takeout_activity_json");
+    expect(result.provenance.source_product).toBe("gemini");
+    expect(result.archive.selected_entries).toMatchObject([{
+      name: "Takeout/My Activity/Gemini Apps/MyActivity.json",
+      detected_format: "gemini_takeout_activity_json",
+    }]);
+    expect(result.warnings.join(" ")).toContain("activity log");
+    expect(result.warnings.join(" ")).toContain("HTML viewer was ignored");
+  });
+
   it("accepts a uniquely selected conversations.jsonl only after every record validates", () => {
     const jsonl = `${JSON.stringify(chatGptConversation("line-one"))}\n${JSON.stringify(chatGptConversation("line-two"))}\n`;
     const result = importOfficialZipArchive(zipSync({ "conversations.jsonl": strToU8(jsonl) }), { capturedAt });

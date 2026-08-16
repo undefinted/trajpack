@@ -1034,10 +1034,15 @@ describe("loopback collectors", () => {
       "https://chatgpt.com",
       "https://share.chatgpt.com",
       "https://chat.openai.com",
+      "https://platform.openai.com",
       "https://claude.ai",
+      "https://console.anthropic.com",
       "https://workspace.claude.ai",
       "https://chat.deepseek.com",
       "https://platform.deepseek.com",
+      "https://gemini.google.com",
+      "https://bard.google.com",
+      "https://aistudio.google.com",
     ];
     try {
       for (const blockedOrigin of blockedOrigins) {

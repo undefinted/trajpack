@@ -1,0 +1,160 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-session-start",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward an explicitly armed session start to the loopback Trajpack collector."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-session-end",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward the best-effort Gemini CLI session end event."
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-before-agent",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward the visible user prompt for an explicitly armed turn."
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-after-agent",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward the visible final response for an explicitly armed turn."
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-before-model",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward Gemini CLI's stable model-request projection."
+          }
+        ]
+      }
+    ],
+    "AfterModel": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-after-model",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward each visible Gemini CLI model-response chunk."
+          }
+        ]
+      }
+    ],
+    "BeforeToolSelection": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-before-tool-selection",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward the visible model request before tool selection."
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": ".*",
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-before-tool",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward visible tool arguments without changing the tool decision."
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": ".*",
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-after-tool",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward visible tool results without changing model context."
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-notification",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward observable permission notifications without granting permissions."
+          }
+        ]
+      }
+    ],
+    "PreCompress": [
+      {
+        "sequential": true,
+        "hooks": [
+          {
+            "name": "trajpack-pre-compress",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}forward-hook.mjs\"",
+            "timeout": 3000,
+            "description": "Forward the advisory context-compression boundary."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,7 +1,10 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
   authoritativeCaptureArguments,
+  armRuntimeDirectory,
   assertDeepSeekHarnessVersionReport,
   captureChildEnvironment,
   consumeUtf8StreamWithBackpressure,
@@ -11,6 +14,10 @@ import {
 } from "./capture-command.js";
 
 describe("capture child environment", () => {
+  it("uses a home-relative Gemini arm path that survives extension environment sanitization", () => {
+    expect(armRuntimeDirectory("gemini_cli")).toBe(join(homedir(), ".trajpack", "runtime"));
+  });
+
   it("removes the vault passphrase before injecting one-time collector credentials", () => {
     const base = {
       PATH: "test-path",

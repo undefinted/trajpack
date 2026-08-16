@@ -143,6 +143,9 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     ? "openai"
     : imported.detectedFormat === "claude_official_json"
       ? "anthropic"
+      : imported.detectedFormat === "gemini_takeout_activity_json"
+          || imported.detectedFormat === "gemini_takeout_activity_html"
+        ? "google"
       : imported.detectedFormat === "deepseek_api_response"
         ? "deepseek"
         : null;
@@ -157,6 +160,10 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     resolved.source.provider = "openai";
   } else if (resolved.source.provider === "unknown" && imported.detectedFormat === "claude_official_json") {
     resolved.source.provider = "anthropic";
+  } else if (resolved.source.provider === "unknown"
+    && (imported.detectedFormat === "gemini_takeout_activity_json"
+      || imported.detectedFormat === "gemini_takeout_activity_html")) {
+    resolved.source.provider = "google";
   } else if (
     resolved.source.provider === "unknown" &&
     imported.detectedFormat === "deepseek_api_response"
@@ -182,6 +189,12 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     resolved.source.capture_method = "manual_copy";
     resolved.source.fidelity = "B";
     resolved.source.model_id = models[0]!;
+  } else if (imported.detectedFormat === "generic_json"
+    || imported.detectedFormat === "generic_jsonl"
+    || imported.detectedFormat === "generic_html") {
+    resolved.source.product = `manual-archive:${imported.detectedFormat}`;
+    resolved.source.capture_method = "manual_copy";
+    resolved.source.fidelity = "C";
   } else {
     resolved.source.product = `official-export:${imported.detectedFormat}`;
   }

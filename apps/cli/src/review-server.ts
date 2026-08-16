@@ -49,7 +49,17 @@ import { CaptureSession } from "./capture-session.js";
 const API = "/api/v1/review";
 const TRACE_ID = /^[a-f0-9]{32}$/;
 const CSP = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'";
-const COMMERCIAL_WEB_CAPTURE_HOSTS = ["chatgpt.com", "chat.openai.com", "claude.ai", "deepseek.com"] as const;
+const COMMERCIAL_WEB_CAPTURE_HOSTS = [
+  "chatgpt.com",
+  "chat.openai.com",
+  "platform.openai.com",
+  "claude.ai",
+  "console.anthropic.com",
+  "deepseek.com",
+  "gemini.google.com",
+  "bard.google.com",
+  "aistudio.google.com",
+] as const;
 const DEFAULT_REVIEW_REDACTION = "[REDACTED BY REVIEWER]";
 
 interface StoredReview {

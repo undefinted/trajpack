@@ -14,6 +14,7 @@ import {
   type TermsSnapshotOptions,
 } from "./commands.js";
 import { runImport } from "./import-command.js";
+import { runDoctor } from "./doctor.js";
 import { runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
 import { startReviewServer } from "./review-server.js";
 import { safeCliDebugDiagnostic, safeCliErrorMessage } from "./safe-error.js";
@@ -21,7 +22,7 @@ import { readPassphrase } from "./secret.js";
 
 function addSourceOptions(command: Command): Command {
   return command
-    .addOption(new Option("--provider <provider>", "actual model provider").choices(["openai", "anthropic", "deepseek", "self_hosted", "other", "unknown"]).default("unknown"))
+    .addOption(new Option("--provider <provider>", "actual model provider").choices(["openai", "anthropic", "google", "deepseek", "self_hosted", "other", "unknown"]).default("unknown"))
     .addOption(new Option("--account-type <type>", "account or contract class").choices(["consumer", "api", "business", "enterprise", "managed_workspace", "self_hosted", "unknown"]).default("unknown"))
     .option("--model <id>", "exact model id")
     .option("--model-digest <digest>", "claimed model snapshot/weights digest; not proof by itself")
@@ -62,7 +63,7 @@ docs/research-workflow.md for an end-to-end reproducible workflow.`);
 addSourceOptions(
   program.command("capture")
     .description("Run one explicitly authorized host session under encrypted capture")
-    .argument("<host>", "codex, claude, or dsh")
+    .argument("<host>", "codex, claude, gemini, or dsh")
     .argument("[command...]", "host executable and arguments after --")
     .option("--cwd <path>", "working directory")
     .option("--max-events <count>", "hard limit across stdout and hook channels", String(DEFAULT_MAX_CAPTURE_EVENTS))
@@ -74,8 +75,8 @@ addSourceOptions(
 
 addSourceOptions(
   program.command("arm")
-    .description("Arm the next matching interactive Codex or Claude session")
-    .argument("<host>", "codex or claude")
+    .description("Arm the next matching interactive Codex, Claude, or Gemini CLI session")
+    .argument("<host>", "codex, claude, or gemini")
     .option("--next-session", "bind the first matching session")
     .requiredOption("--cwd <path>", "exact session working directory")
     .option("--ttl <duration>", "30s, 10m, or 1h", "10m")
@@ -89,7 +90,7 @@ addSourceOptions(
     .description("Import a user-provided official/manual export into the encrypted vault")
     .argument("<input>", "JSON, JSONL, HTML, ZIP official export, or .trajpack vault")
     .addOption(new Option("--source-hint <source>", "fail-closed source shape hint")
-      .choices(["chatgpt", "claude", "deepseek-api", "generic"]))
+      .choices(["chatgpt", "claude", "gemini", "deepseek-api", "generic"]))
     .option("--max-bytes <bytes>", "explicit compressed input/file byte limit")
     .option("--max-archive-entries <count>", "explicit ZIP entry-count limit")
     .option("--max-archive-entry-bytes <bytes>", "explicit ZIP per-entry decoded byte limit")
@@ -128,6 +129,11 @@ program.command("review")
     });
     await server.close();
   });
+
+program.command("doctor")
+  .description("Report native agent executables, pinned interfaces, and safe web import paths")
+  .option("--json", "emit a machine-readable compatibility report")
+  .action((options: { json?: boolean }) => runDoctor(options));
 
 program.command("validate")
   .description("Validate a managed/encrypted trace, build, export directory, canonical bundle, or HF JSONL")

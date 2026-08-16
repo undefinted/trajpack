@@ -22,6 +22,63 @@ const ownedRights = {
 };
 
 describe("capture session publication", () => {
+  it("does not publish an empty capture when no authoritative plugin or stream event arrived", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-empty-capture-"));
+    const paths: TrajpackPaths = {
+      data: root,
+      vault: join(root, "vault"),
+      runtime: join(root, "runtime"),
+      tombstones: join(root, "tombstones"),
+    };
+    const manifest = createManifest({
+      source: defaultSource("codex", "openai"),
+      accountType: "api",
+      rights: ownedRights,
+      consentReceipt: consentReceipt("codex", root),
+      consentPurposes: ["archive", "research", "capture"],
+    });
+    const session = await CaptureSession.create("codex", manifest, "test-passphrase", paths);
+    try {
+      await expect(session.finalize()).rejects.toThrow("no authoritative raw events");
+      await expect(stat(vaultPath(manifest.trace_id, paths))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await session.abort().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not publish a partially understood native hook capture", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-unsupported-hook-"));
+    const paths: TrajpackPaths = {
+      data: root,
+      vault: join(root, "vault"),
+      runtime: join(root, "runtime"),
+      tombstones: join(root, "tombstones"),
+    };
+    const manifest = createManifest({
+      source: defaultSource("gemini_cli", "google"),
+      accountType: "api",
+      rights: ownedRights,
+      consentReceipt: consentReceipt("gemini_cli", root),
+      consentPurposes: ["archive", "research", "capture"],
+    });
+    const session = await CaptureSession.create("gemini_cli", manifest, "test-passphrase", paths);
+    const future = classifyJsonLine("gemini_cli", JSON.stringify({
+      session_id: "future-session",
+      hook_event_name: "FutureHook",
+      cwd: root,
+      timestamp: "2026-08-17T00:00:00.000Z",
+    }), 0, "gemini-cli-hook/1");
+    try {
+      await session.ingest(future);
+      await expect(session.finalize()).rejects.toThrow("Unsupported or incomplete gemini_cli event");
+      await expect(stat(vaultPath(manifest.trace_id, paths))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await session.abort().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("binds a DeepSeek teacher label to the pinned Harness request header", () => {
     const source = defaultSource("deepseek_harness", "deepseek");
     source.model_id = "deepseek-reasoner";

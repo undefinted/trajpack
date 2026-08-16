@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Host } from "@trajpack/schema";
@@ -28,10 +29,11 @@ import { resolveSourceOptions, type SourceCliOptions } from "./source-options.js
 const HOSTS: Record<string, Host> = {
   codex: "codex",
   claude: "claude_code",
+  gemini: "gemini_cli",
   dsh: "deepseek_harness",
 };
 
-const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", dsh: "dsh" };
+const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", gemini: "gemini", dsh: "dsh" };
 
 export interface CaptureCommandOptions extends SourceCliOptions {
   cwd?: string;
@@ -234,6 +236,15 @@ async function ensurePrivateRuntimeDirectory(path: string): Promise<void> {
   }
 }
 
+export function armRuntimeDirectory(host: Host): string {
+  // Gemini's extension sandbox documents HOME as a safe inherited variable,
+  // but may filter LOCALAPPDATA/XDG_RUNTIME_DIR. A home-relative capability
+  // path keeps the wrapper and extension aligned without persistent settings.
+  return host === "gemini_cli"
+    ? join(homedir(), ".trajpack", "runtime")
+    : defaultPaths().runtime;
+}
+
 export async function runCapture(hostName: string, words: string[], options: CaptureCommandOptions): Promise<number> {
   const host = HOSTS[hostName];
   if (!host) throw new Error(`Unsupported host: ${hostName}`);
@@ -304,9 +315,29 @@ export async function runCapture(hostName: string, words: string[], options: Cap
     maxTotalRawBytes: hookMaxBytes,
     onLimitExceeded: violate,
   });
+  // Gemini CLI intentionally sanitizes extension environments. Use the same
+  // private, cwd-bound descriptor as one-shot arm so the extension can obtain
+  // the ephemeral collector capability without a persistent setting or
+  // keychain secret. The descriptor is removed when this wrapper exits.
+  const wrapperDescriptor = host === "gemini_cli"
+    ? join(armRuntimeDirectory(host), `arm-${host}.json`)
+    : null;
+  let wrapperDescriptorWritten = false;
   let rawSequence = 0;
   let ingestQueue: Promise<unknown> = Promise.resolve();
   try {
+    if (wrapperDescriptor !== null) {
+      await ensurePrivateRuntimeDirectory(armRuntimeDirectory(host));
+      await writeArmDescriptor(wrapperDescriptor, `${canonicalJson({
+        version: 1,
+        host,
+        url: `${server.url}/v1/hooks/events`,
+        token,
+        cwd,
+        expires_at: new Date(Date.now() + 12 * 60 * 60 * 1_000).toISOString(),
+      })}\n`);
+      wrapperDescriptorWritten = true;
+    }
     const spawned = spawn(executable, args, {
       cwd,
       env: captureChildEnvironment(process.env, {
@@ -369,6 +400,10 @@ export async function runCapture(hostName: string, words: string[], options: Cap
     await server.close().catch(() => undefined);
     await session.abort();
     throw error;
+  } finally {
+    if (wrapperDescriptorWritten && wrapperDescriptor !== null) {
+      await rm(wrapperDescriptor, { force: true });
+    }
   }
 }
 
@@ -392,7 +427,9 @@ export interface ArmCommandOptions extends SourceCliOptions {
 export async function runArm(hostName: string, options: ArmCommandOptions): Promise<void> {
   if (!options.nextSession) throw new Error("v1 requires --next-session");
   const host = HOSTS[hostName];
-  if (host !== "codex" && host !== "claude_code") throw new Error("arm supports codex or claude");
+  if (host !== "codex" && host !== "claude_code" && host !== "gemini_cli") {
+    throw new Error("arm supports codex, claude, or gemini");
+  }
   const cwd = resolve(options.cwd ?? process.cwd());
   const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
   const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
@@ -428,8 +465,8 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
   let ended = false;
   let endCapture!: () => void;
   const finished = new Promise<void>((resolveFinished) => { endCapture = resolveFinished; });
-  const paths = defaultPaths();
-  const descriptor = join(paths.runtime, `arm-${host}.json`);
+  const descriptorRuntime = armRuntimeDirectory(host);
+  const descriptor = join(descriptorRuntime, `arm-${host}.json`);
   const ttl = parseTtl(options.ttl ?? "10m");
   let server: Awaited<ReturnType<typeof startIngestServer>> | undefined;
   let descriptorWritten = false;
@@ -447,7 +484,7 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
       maxTotalRawBytes: maxRawBytes,
       onLimitExceeded: () => endCapture(),
     });
-    await ensurePrivateRuntimeDirectory(paths.runtime);
+    await ensurePrivateRuntimeDirectory(descriptorRuntime);
     await writeArmDescriptor(descriptor, `${canonicalJson({
       version: 1,
       host,

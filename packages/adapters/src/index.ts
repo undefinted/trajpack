@@ -17,13 +17,21 @@ import {
   normalizeCodexHook,
   normalizeCodexJsonEvent,
 } from "./codex.js";
-import { normalizeDeepSeekSessionEvent } from "./deepseek.js";
+import {
+  DEEPSEEK_HARNESS_INTERFACE_VERSION,
+  normalizeDeepSeekSessionEvent,
+} from "./deepseek.js";
+import {
+  GEMINI_CLI_HOOK_INTERFACE_VERSION,
+  normalizeGeminiCliHook,
+} from "./gemini.js";
 import { normalizeAuthorizedDomCapture, normalizeManualImport } from "./imported.js";
 
 export * from "./common.js";
 export * from "./codex.js";
 export * from "./claude.js";
 export * from "./deepseek.js";
+export * from "./gemini.js";
 export * from "./imported.js";
 
 export interface NormalizationContext {
@@ -31,12 +39,12 @@ export interface NormalizationContext {
   nextSequence: number;
 }
 
-export const DEEPSEEK_HARNESS_INTERFACE_VERSION = "deepseek-harness@0.1.0-rc.6/session-event/0";
 export const CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION = "claude-transcript-opaque/1";
 
 const DEFAULT_INTERFACES: Partial<Record<Host, string>> = {
   codex: CODEX_JSONL_INTERFACE_VERSION,
   claude_code: CLAUDE_STREAM_INTERFACE,
+  gemini_cli: GEMINI_CLI_HOOK_INTERFACE_VERSION,
   deepseek_harness: DEEPSEEK_HARNESS_INTERFACE_VERSION,
   browser: "authorized-dom-capture/1",
   manual_import: "manual-import/1",
@@ -58,6 +66,8 @@ export function classifyJsonLine(host: Host, line: string, sequence: number, dec
         ? [CODEX_JSONL_INTERFACE_VERSION, CODEX_HOOK_INTERFACE_VERSION, CODEX_APP_SERVER_INTERFACE_VERSION]
         : host === "claude_code"
           ? [CLAUDE_STREAM_INTERFACE, CLAUDE_HOOK_INTERFACE]
+          : host === "gemini_cli"
+            ? [GEMINI_CLI_HOOK_INTERFACE_VERSION]
           : host === "deepseek_harness"
             ? [DEEPSEEK_HARNESS_INTERFACE_VERSION]
             : [];
@@ -85,6 +95,12 @@ export function normalizeRawEnvelope(envelope: RawEnvelope, context: Normalizati
   if (
     envelope.adapter === "claude_code" &&
     envelope.interface_version === CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION
+  ) {
+    return [];
+  }
+  if (
+    envelope.adapter === "gemini_cli" &&
+    envelope.interface_version !== GEMINI_CLI_HOOK_INTERFACE_VERSION
   ) {
     return [];
   }
@@ -130,6 +146,8 @@ export function normalizeRawEnvelope(envelope: RawEnvelope, context: Normalizati
       ? envelope.interface_version.includes("hook")
         ? normalizeClaudeHook(envelope.payload, options)
         : normalizeClaudeStreamEvent(envelope.payload, options)
+      : envelope.adapter === "gemini_cli"
+        ? normalizeGeminiCliHook(envelope.payload, options)
       : envelope.adapter === "deepseek_harness"
         ? normalizeDeepSeekSessionEvent(envelope.payload, options)
         : envelope.adapter === "browser"

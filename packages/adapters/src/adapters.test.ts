@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEEPSEEK_HARNESS_INTERFACE_VERSION,
+  DEEPSEEK_HARNESS_DURABLE_EVENT_TYPES,
   CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION,
   CODEX_APP_SERVER_INTERFACE_VERSION,
   classifyJsonLine,
@@ -18,6 +19,7 @@ import {
   normalizeCodexAppServerJsonl,
   normalizeCodexHook,
   normalizeCodexJsonl,
+  normalizeDeepSeekSessionEvent,
   normalizeDeepSeekSessionJsonl,
   normalizeManualImport,
   normalizeRawEnvelope,
@@ -223,11 +225,11 @@ describe("DeepSeek Harness adapter", () => {
       .toBe("provider_exposed_reasoning");
     expect(normalized.events.filter((event) => event.event_type === "compaction")).toHaveLength(2);
     expect(normalized.events.filter((event) => event.event_type === "agent.invoke")).toHaveLength(2);
-    expect(normalized.events.filter((event) => event.event_type === "handoff")).toHaveLength(1);
+    expect(normalized.events.filter((event) => event.event_type === "handoff")).toHaveLength(0);
     const results = normalized.events.filter((event) => event.event_type === "tool.result");
     expect(results.map((event) => [event.tool?.call_id, event.status, event.tool?.exit_code])).toEqual([
-      ["dsh-tool-ok", "ok", 0],
-      ["dsh-tool-fail", "error", 1],
+      ["dsh-tool-ok", "ok", null],
+      ["dsh-tool-fail", "error", null],
     ]);
   });
 
@@ -248,6 +250,93 @@ describe("DeepSeek Harness adapter", () => {
         { ...envelope!, interface_version: interfaceVersion },
         { traceId: TRACE_ID, nextSequence: 0 },
       )).toEqual([]);
+    }
+  });
+
+  it("uses the resolved provider route for reasoning claims and refuses persistence drift", () => {
+    const payload = {
+      session_id: "provider-neutral-session",
+      session_header: { version: 0, id: "provider-neutral-session", parent_session: null, origin: "user" },
+      route: { provider: "anthropic", model: "claude-sonnet" },
+      event_id: "provider-neutral-session:0",
+      timestamp: 1_786_800_000_000,
+      event: {
+        type: "assistant/chunk",
+        seq: 0,
+        time: 1_786_800_000_000,
+        data: { turn: 0, step: 0, chunk: { type: "reasoning-delta", index: 0, text: "visible state" } },
+      },
+    };
+    const normalized = normalizeDeepSeekSessionEvent(payload, { traceId: TRACE_ID, capturedAt: FIXED });
+    expect(normalized.events[0]?.content[0]?.reasoning).toMatchObject({
+      representation: "opaque_reasoning_state",
+      provider_claim: "none",
+      visibility: "api_only",
+    });
+    expect(normalizeDeepSeekSessionEvent({
+      ...payload,
+      session_header: { version: 1, id: "provider-neutral-session" },
+    }, { traceId: TRACE_ID, capturedAt: FIXED }).events).toEqual([]);
+    expect(normalizeDeepSeekSessionEvent({
+      ...payload,
+      event: { type: "future/required", seq: 0, time: 1_786_800_000_000, data: {} },
+    }, { traceId: TRACE_ID, capturedAt: FIXED }).events).toEqual([]);
+  });
+
+  it("retains discontinuous rc.6 records as raw-only instead of reconstructing a partial branch", () => {
+    const values = fixtureObjects("deepseek.session.jsonl").slice(0, 2).map((value) => structuredClone(value));
+    const secondEvent = values[1]?.event;
+    if (typeof secondEvent !== "object" || secondEvent === null || Array.isArray(secondEvent)) {
+      throw new Error("fixture event missing");
+    }
+    secondEvent.seq = 2;
+    values[1]!.event_id = "dsh-session-1:2";
+    const normalized = normalizeDeepSeekSessionJsonl(values.map((value) => JSON.stringify(value)).join("\n"), {
+      traceId: TRACE_ID,
+      capturedAt: FIXED,
+    });
+    expect(normalized.raw).toHaveLength(2);
+    expect(normalized.events.map((event) => event.metadata.durable_event_type)).toEqual(["request/header"]);
+  });
+
+  it("projects every recognized rc.6 durable type or emits an explicit opaque marker", () => {
+    const dataFor = (type: string): Record<string, unknown> => {
+      if (type === "assistant/chunk") {
+        return { turn: 0, step: 0, chunk: { type: "block-start", index: 0, blockType: "text" } };
+      }
+      if (type === "assistant/message") {
+        return { turn: 0, step: 0, message: {
+          id: "assistant-empty", role: "assistant",
+          source: { kind: "model", provider: "deepseek-official", model: "deepseek-reasoner" },
+          content: [],
+        } };
+      }
+      if (type === "user/message") {
+        return { id: "user-empty", role: "user", source: { kind: "user" }, content: [] };
+      }
+      if (type === "tool/result") {
+        return { turn: 0, step: 0, message: {
+          id: "tool-result", role: "user", source: { kind: "tool", callId: "call-1" },
+          content: [{ type: "tool-result", toolCallId: "call-1", content: [] }],
+        } };
+      }
+      if (type === "subagent/descriptor") {
+        return { version: 2, mode: "one-shot", provider: "in-process" };
+      }
+      if (type === "turn/end") return { turn: 0, reason: { kind: "completed" } };
+      return { turn: 0, step: 0 };
+    };
+
+    for (const type of DEEPSEEK_HARNESS_DURABLE_EVENT_TYPES) {
+      const normalized = normalizeDeepSeekSessionEvent({
+        session_id: "catalog-session",
+        session_header: { version: 0, id: "catalog-session", parent_session: null, origin: "user" },
+        route: { provider: "deepseek-official", model: "deepseek-reasoner" },
+        event_id: `catalog-session:${type}`,
+        timestamp: 1_786_800_000_000,
+        event: { type, seq: 0, time: 1_786_800_000_000, data: dataFor(type) },
+      }, { traceId: TRACE_ID, capturedAt: FIXED });
+      expect(normalized.events.length, type).toBeGreaterThan(0);
     }
   });
 });

@@ -68,9 +68,23 @@ export const POLICY_REGISTRY: readonly PolicyRegistryEntry[] = [
     note: "Noncompetitive classifiers and similar narrow systems may be eligible after scope review; general-purpose competing model training requires written approval.",
   },
   {
+    id: "google-consumer-terms-2026-08",
+    provider: "google",
+    account_types: ["consumer"],
+    authority_url: "https://policies.google.com/terms",
+    reviewed_at: "2026-08-17T00:00:00.000Z",
+    accepted_snapshot_sha256: [],
+    defaults: {
+      automatic_capture: "unknown",
+      training_noncompetitive: "unknown",
+      training_competitive_distillation: "unknown",
+    },
+    note: "Enables a current Google Terms snapshot to identify the authority for a user-requested Gemini Takeout archive. It grants no default automatic-capture or training permission; Workspace and API contracts require their own scoped evidence.",
+  },
+  {
     id: "deepseek-terms-2026-03",
     provider: "deepseek",
-    account_types: ["api", "business", "enterprise"],
+    account_types: ["consumer", "api", "business", "enterprise"],
     authority_url: "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
     reviewed_at: "2026-08-16T00:00:00.000Z",
     accepted_snapshot_sha256: [],
@@ -79,7 +93,7 @@ export const POLICY_REGISTRY: readonly PolicyRegistryEntry[] = [
       training_noncompetitive: "allow",
       training_competitive_distillation: "allow",
     },
-    note: "Official API/harness outputs may enter distillation review when all other rights gates pass; this does not authorize automated capture of the DeepSeek website.",
+    note: "The authority match also permits a user-requested local archive under the archive gate. Only official API/harness outputs may enter default distillation review when every other gate passes; this never authorizes automated capture of the DeepSeek website.",
   },
   {
     id: "self-hosted-open-weights",

@@ -144,6 +144,8 @@ importers:
 
   plugins/deepseek-harness: {}
 
+  plugins/trajpack-gemini: {}
+
 packages:
 
   '@adobe/css-tools@4.5.0':

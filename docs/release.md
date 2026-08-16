@@ -13,13 +13,15 @@ pnpm test:pack
 `pnpm pack` for the CLI, its four internal runtime packages, and the pinned
 DeepSeek Harness plugin, installs those
 tarballs into a temporary project (preferring the local pnpm store), and runs
-the installed CLI's `--help`. It also starts the installed review server, verifies
+the installed CLI's `--help` plus the structured `doctor --json` report. It also starts the installed review server, verifies
 that its package-local `reviewer/index.html` and hashed assets are served, and
 checks every tarball for `engines.node >=24`, `THIRD_PARTY_NOTICES.md`, and the
 Apache-2.0 `LICENSE`, plus the absence of test/source-map artifacts. The
 unpacked Chromium release directory is separately checked for its required
 Manifest V3 files, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the same artifact
-hygiene.
+hygiene. Because the Gemini CLI extension is linked directly from the source
+checkout in v0.1, the same smoke gate validates its root manifest, documented
+hook vocabulary, forwarder, and README rather than claiming a registry package.
 
 The published `@trajpack/cli` package must contain `dist/`, `reviewer/`, and the
 third-party notice in both the CLI runtime and packaged reviewer directories.

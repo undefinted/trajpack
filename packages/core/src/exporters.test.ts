@@ -5,6 +5,7 @@ import { ParquetReader } from "@dsnp/parquetjs";
 import { describe, expect, it } from "vitest";
 import { exportApprovedBundle, toAtif, toHfExample, toHfExamples } from "./exporters.js";
 import * as publicCore from "./index.js";
+import { sha256 } from "./canonical.js";
 import { createApprovalScope, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
 import { fixtureBundle } from "./testing.js";
 
@@ -18,6 +19,26 @@ function reapprove(bundle: ReturnType<typeof fixtureBundle>): void {
 }
 
 describe("exporters", () => {
+  it("keeps partial assistant chunks out of the HF conversational loss view", () => {
+    const bundle = fixtureBundle("complete response");
+    const partial = structuredClone(bundle.events[0]!);
+    partial.event_id = "evt_partial_chunk";
+    partial.span_id = "abcdabcdabcdabcd";
+    partial.source_event_id = "provider-stream-chunk";
+    partial.sequence = 0;
+    partial.status = "partial";
+    partial.content[0]!.value = "complete";
+    partial.content[0]!.sha256 = sha256("complete");
+    bundle.events[0]!.sequence = 1;
+    bundle.events = [partial, bundle.events[0]!];
+
+    const example = toHfExample(bundle);
+    expect(example.messages).toHaveLength(1);
+    expect(example.messages[0]).toMatchObject({ content: "complete response" });
+    expect(example.assistant_loss_mask).toEqual([true]);
+    expect(example.source_event_ids).toContain("evt_partial_chunk");
+  });
+
   it("does not expose ungated format mappers from the public package surface", () => {
     expect(publicCore).not.toHaveProperty("toAtif");
     expect(publicCore).not.toHaveProperty("toHfExample");

@@ -1,0 +1,5 @@
+# dsh adds this package to the selected profile's ordered bundle list because
+# package.json declares dsh.bundle.
+- insert:
+    - id: trajpack-capture
+      name: '@trajpack/deepseek-harness-plugin'

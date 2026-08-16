@@ -431,7 +431,8 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
     }
     const payload = envelope.payload as Record<string, unknown>;
     const hookInterface = envelope.interface_version === "codex-hook/1"
-      || envelope.interface_version === "claude-hook/1";
+      || envelope.interface_version === "claude-hook/1"
+      || envelope.interface_version === "gemini-cli-hook/1";
     const claudeHook = options.host === "claude_code"
       && envelope.adapter === "claude_code"
       && envelope.interface_version === "claude-hook/1";

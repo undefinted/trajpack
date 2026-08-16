@@ -1,4 +1,4 @@
-import type { TrajectoryEvent } from "@trajpack/schema";
+import type { ReasoningMetadata, TrajectoryEvent } from "@trajpack/schema";
 
 import {
   PROVIDER_EXPOSED_REASONING,
@@ -17,366 +17,496 @@ import {
   type NormalizedCapture,
 } from "./common.js";
 
-const DEEPSEEK_SESSION_INTERFACE = "deepseek-harness@0.1.0-rc.6/session-event/0";
+export const DEEPSEEK_HARNESS_INTERFACE_VERSION = "deepseek-harness@0.1.0-rc.6/session-event/0";
+export const DEEPSEEK_HARNESS_SESSION_FORMAT_VERSION = 0;
 
 type JsonObject = Record<string, unknown>;
 
-function valueFrom(body: JsonObject, event: JsonObject, keys: readonly string[]): unknown {
-  for (const key of keys) {
-    if (body[key] !== undefined) return body[key];
-    if (event[key] !== undefined) return event[key];
-  }
-  return undefined;
+interface Capsule {
+  payload: JsonObject;
+  event: JsonObject;
+  data: JsonObject;
+  header: JsonObject;
+  route: JsonObject | null;
+  sessionId: string;
+  turnId: string | null;
+  stepId: string | null;
+  sourceEventId: string;
+  type: string;
 }
 
-function harnessStatus(value: unknown): TrajectoryEvent["status"] {
-  if (value === "error" || value === "failed" || value === "failure") return "error";
-  if (value === "cancelled" || value === "canceled" || value === "aborted") return "cancelled";
-  if (value === "started" || value === "running" || value === "partial" || value === "delta") return "partial";
-  return "ok";
+export const DEEPSEEK_HARNESS_DURABLE_EVENT_TYPES = [
+  "turn/start", "turn/end", "step/start", "step/end", "user/message",
+  "assistant/chunk", "assistant/message", "tool/call", "tool/result",
+  "request/header", "request/context", "session/end-seed", "todo/write",
+  "agent-preset/selected", "agent/inbox/spliced", "approval/asked", "approval/decided",
+  "approval/policy", "command/done", "command/run", "compaction/end", "compaction/prune",
+  "compaction/start", "compaction/summary", "feedback/record", "goal/change", "hook/invoked",
+  "hook/result", "llm/retry", "llm/retry-started", "permission/preset", "plan/mode",
+  "sandbox/mode", "schedule/change", "session/title", "session/title-llm-request",
+  "subagent/descriptor", "tool-workflow/agent-end", "tool-workflow/agent-start",
+  "tool-workflow/run-end", "tool-workflow/run-start", "tool/code-dispatch",
+  "tool/code-dispatch-start", "web/deepseek-search-llm-request",
+] as const;
+
+const DURABLE_EVENTS = new Set<string>(DEEPSEEK_HARNESS_DURABLE_EVENT_TYPES);
+
+function validNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function toolShape(callId: string | null, name: string | null, args: unknown, result: unknown, exitCode: unknown) {
+function capsule(payload: unknown): Capsule | null {
+  if (!isRecord(payload)) return null;
+  const header = nestedRecord(payload, "session_header");
+  const event = nestedRecord(payload, "event");
+  const data = event === null ? null : nestedRecord(event, "data");
+  const sessionId = firstString(payload, ["session_id"]);
+  const headerId = header === null ? null : firstString(header, ["id"]);
+  const type = event === null ? null : firstString(event, ["type"]);
+  if (
+    header === null || event === null || data === null || sessionId === null || headerId !== sessionId ||
+    header.version !== DEEPSEEK_HARNESS_SESSION_FORMAT_VERSION || type === null ||
+    !Number.isSafeInteger(event.seq) || (event.seq as number) < 0 || !validNumber(event.time) ||
+    (event.ignorable !== undefined && event.ignorable !== true)
+  ) return null;
+
+  const route = nestedRecord(payload, "route");
+  const turnId = firstString(data, ["turn"]);
+  const stepId = firstString(data, ["step"]);
   return {
-    call_id: callId,
-    name,
-    arguments: args ?? null,
-    result: result ?? null,
-    exit_code: typeof exitCode === "number" && Number.isInteger(exitCode) ? exitCode : null,
+    payload,
+    event,
+    data,
+    header,
+    route,
+    sessionId,
+    turnId,
+    stepId,
+    sourceEventId: firstString(payload, ["event_id"]) ?? `${sessionId}:${String(event.seq)}`,
+    type,
   };
 }
 
-function unwrap(payload: JsonObject): { event: JsonObject; body: JsonObject } {
-  const event = nestedRecord(payload, "event") ?? payload;
-  const body = nestedRecord(event, "data") ?? event;
-  return { event, body };
+function routeFromMessage(message: JsonObject, fallback: JsonObject | null): JsonObject | null {
+  const source = nestedRecord(message, "source");
+  return source?.kind === "model" ? source : fallback;
 }
 
-function assistantMessageEvents(
-  event: JsonObject,
-  body: JsonObject,
+function routeMetadata(route: JsonObject | null): Record<string, unknown> {
+  return {
+    provider_route: route === null ? null : firstString(route, ["provider"]),
+    model: route === null ? null : firstString(route, ["model"]),
+  };
+}
+
+function reasoningMetadata(route: JsonObject | null, sourceField: string): ReasoningMetadata {
+  const provider = route === null ? null : firstString(route, ["provider"]);
+  if (provider !== null && provider.toLowerCase().includes("deepseek")) {
+    return { ...PROVIDER_EXPOSED_REASONING, source_field: sourceField };
+  }
+  return {
+    representation: "opaque_reasoning_state",
+    provider_claim: "none",
+    source_field: sourceField,
+    visibility: "api_only",
+    include_in_loss: false,
+  };
+}
+
+function statusFromReason(value: unknown): TrajectoryEvent["status"] {
+  const reason = isRecord(value) ? firstString(value, ["kind"]) : firstString({ value }, ["value"]);
+  if (reason === "aborted" || reason === "interrupted") return "cancelled";
+  if (reason === "error" || reason === "blocked" || reason === "max-tokens") return "error";
+  return "ok";
+}
+
+function tool(callId: string | null, name: string | null, args: unknown, result: unknown) {
+  return { call_id: callId, name, arguments: args ?? null, result: result ?? null, exit_code: null };
+}
+
+function messageContentEvents(
+  info: Capsule,
+  message: JsonObject,
   raw: NormalizedCapture["raw"],
   options: NormalizeOptions,
-  sessionId: string | null,
-  turnId: string | null,
-  stepId: string | null,
+  usage: unknown,
 ): TrajectoryEvent[] {
-  const message = nestedRecord(body, "message") ?? body;
-  const content = message.content;
-  const blocks = Array.isArray(content) ? content : [{ type: "text", text: content ?? message.text ?? "" }];
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  const route = routeFromMessage(message, info.route);
   const events: TrajectoryEvent[] = [];
-  const sourceEventId = firstString(event, ["id", "event_id", "eventId"]);
-
-  for (const [index, candidate] of blocks.entries()) {
-    if (!isRecord(candidate)) continue;
-    const blockType = firstString(candidate, ["type"]) ?? "text";
+  for (const [index, value] of blocks.entries()) {
+    if (!isRecord(value)) continue;
+    const blockType = firstString(value, ["type"]);
     const common = {
+      ...routeMetadata(route),
+      durable_event_type: info.type,
+      harness_seq: info.event.seq,
       block_type: blockType,
-      dedupe_key: dedupeKey("dsh", sessionId, turnId, stepId, sourceEventId, index),
+      message_id: firstString(message, ["id"]),
+      dedupe_key: dedupeKey("dsh", info.sessionId, info.event.seq, index),
     };
-    if (blockType === "reasoning" || blockType === "reasoning_content" || blockType === "thinking") {
-      const reasoning = firstString(candidate, ["reasoning_content", "reasoning", "text", "thinking"]);
-      const reasoningMetadata = {
-        ...PROVIDER_EXPOSED_REASONING,
-        source_field: candidate.reasoning_content === undefined ? blockType : "reasoning_content",
-      };
+    const base = {
+      sourceEventId: info.sourceEventId,
+      sourceSessionId: info.sessionId,
+      sourceTurnId: info.turnId,
+      sourceStepId: info.stepId,
+      usage: index === 0 ? usageFrom(usage) : {},
+      metadata: common,
+    };
+    if (blockType === "reasoning") {
+      const text = firstString(value, ["text"]);
       events.push(createEvent(raw, index, {
+        ...base,
         eventType: "reasoning",
         actor: "assistant",
-        content: reasoning === null ? [] : [contentPart(reasoning, 0, { type: "reasoning", reasoning: reasoningMetadata })],
-        sourceEventId,
-        sourceSessionId: sessionId,
-        sourceTurnId: turnId,
-        sourceStepId: stepId,
-        usage: index === 0 ? usageFrom(message.usage ?? body.usage) : {},
-        metadata: common,
+        content: text === null ? [] : [contentPart(text, 0, {
+          type: "reasoning",
+          reasoning: reasoningMetadata(route, "message.content[].reasoning"),
+        })],
       }, options));
-      continue;
-    }
-    if (blockType === "tool_call" || blockType === "tool-call") {
-      const callId = firstString(candidate, ["id", "call_id", "tool_call_id"]);
-      const name = firstString(candidate, ["name", "tool_name"]);
-      const args = candidate.arguments ?? candidate.input ?? null;
+    } else if (blockType === "tool-call") {
+      const callId = firstString(value, ["id"]);
+      const name = firstString(value, ["name"]);
+      const args = value.arguments ?? null;
       events.push(createEvent(raw, index, {
+        ...base,
         eventType: "tool.call",
         actor: "assistant",
+        status: "partial",
         content: [contentPart(args, 0, { type: "tool_call" })],
-        sourceEventId,
-        sourceSessionId: sessionId,
-        sourceTurnId: turnId,
-        sourceStepId: stepId,
-        tool: toolShape(callId, name, args, null, null),
-        usage: index === 0 ? usageFrom(message.usage ?? body.usage) : {},
-        metadata: common,
+        tool: tool(callId, name, args, null),
       }, options));
-      continue;
+    } else if (blockType === "tool-result") {
+      const callId = firstString(value, ["toolCallId"]);
+      const result = value.content ?? null;
+      events.push(createEvent(raw, index, {
+        ...base,
+        eventType: "tool.result",
+        actor: "tool",
+        status: value.isError === true ? "error" : "ok",
+        content: [contentPart(result, 0, { type: "tool_result" })],
+        tool: tool(callId, null, null, result),
+      }, options));
+    } else if (blockType === "image") {
+      events.push(createEvent(raw, index, {
+        ...base,
+        eventType: "message",
+        actor: message.role === "user" ? "user" : "assistant",
+        content: [contentPart(value.attachment ?? value, 0, { type: "image_ref" })],
+      }, options));
+    } else if (blockType === "text") {
+      const text = firstString(value, ["text"]);
+      events.push(createEvent(raw, index, {
+        ...base,
+        eventType: "message",
+        actor: message.role === "user" ? "user" : "assistant",
+        content: text === null ? [] : [contentPart(text)],
+      }, options));
     }
-    const text = firstString(candidate, ["text", "content"]);
-    events.push(createEvent(raw, index, {
-      eventType: "message",
-      actor: "assistant",
-      content: text === null ? [] : [contentPart(text)],
-      sourceEventId,
-      sourceSessionId: sessionId,
-      sourceTurnId: turnId,
-      sourceStepId: stepId,
-      usage: index === 0 ? usageFrom(message.usage ?? body.usage) : {},
-      metadata: common,
-    }, options));
   }
   return events;
 }
 
-function chunkEvent(
-  event: JsonObject,
-  body: JsonObject,
+function chunkEvents(
+  info: Capsule,
   raw: NormalizedCapture["raw"],
   options: NormalizeOptions,
-  sessionId: string | null,
-  turnId: string | null,
-  stepId: string | null,
-): TrajectoryEvent {
-  const chunk = nestedRecord(body, "chunk") ?? nestedRecord(event, "chunk") ?? body;
-  const chunkType = firstString(chunk, ["type"]) ?? firstString(body, ["chunk_type", "chunkType"]) ?? "unknown";
-  const sourceEventId = firstString(event, ["id", "event_id", "eventId"]);
+): TrajectoryEvent[] {
+  const chunk = nestedRecord(info.data, "chunk");
+  if (chunk === null) return [];
+  const type = firstString(chunk, ["type"]);
   const common = {
-    chunk_type: chunkType,
-    dedupe_key: dedupeKey("dsh", sessionId, turnId, stepId, sourceEventId, chunkType, raw.sequence),
+    ...routeMetadata(info.route),
+    durable_event_type: info.type,
+    harness_seq: info.event.seq,
+    chunk_type: type,
+    chunk_index: chunk.index ?? null,
   };
-
-  if (chunkType === "reasoning-delta" || chunkType === "reasoning_delta" || chunkType === "reasoning") {
-    const reasoning = firstString(chunk, ["reasoning_content", "reasoning", "delta", "text", "content"]);
-    const reasoningMetadata = {
-      ...PROVIDER_EXPOSED_REASONING,
-      source_field: chunk.reasoning_content === undefined ? "reasoning-delta" : "reasoning_content",
-    };
-    return createEvent(raw, 0, {
+  const base = {
+    sourceEventId: info.sourceEventId,
+    sourceSessionId: info.sessionId,
+    sourceTurnId: info.turnId,
+    sourceStepId: info.stepId,
+    status: "partial" as const,
+    metadata: common,
+  };
+  if (type === "reasoning-delta") {
+    const text = firstString(chunk, ["text"]);
+    return [createEvent(raw, 0, {
+      ...base,
       eventType: "reasoning",
       actor: "assistant",
-      status: "partial",
-      content: reasoning === null ? [] : [contentPart(reasoning, 0, { type: "reasoning", reasoning: reasoningMetadata })],
-      sourceEventId,
-      sourceSessionId: sessionId,
-      sourceTurnId: turnId,
-      sourceStepId: stepId,
-      metadata: common,
-    }, options);
+      content: text === null ? [] : [contentPart(text, 0, {
+        type: "reasoning",
+        reasoning: reasoningMetadata(info.route, "chunk.reasoning-delta"),
+      })],
+    }, options)];
   }
-  if (chunkType === "tool-call-delta" || chunkType === "tool_call_delta") {
-    const callId = firstString(chunk, ["id", "call_id", "tool_call_id"]);
-    const name = firstString(chunk, ["name", "tool_name"]);
-    const args = chunk.arguments ?? chunk.input ?? chunk.delta ?? null;
-    return createEvent(raw, 0, {
+  if (type === "text-delta") {
+    const text = firstString(chunk, ["text"]);
+    return [createEvent(raw, 0, {
+      ...base,
+      eventType: "message",
+      actor: "assistant",
+      content: text === null ? [] : [contentPart(text)],
+    }, options)];
+  }
+  if (type === "tool-call-delta") {
+    const callId = firstString(chunk, ["id"]);
+    const name = firstString(chunk, ["name"]);
+    const args = chunk.argumentsDelta ?? null;
+    return [createEvent(raw, 0, {
+      ...base,
       eventType: "tool.call",
       actor: "assistant",
-      status: "partial",
       content: [contentPart(args, 0, { type: "tool_call" })],
-      sourceEventId,
-      sourceSessionId: sessionId,
-      sourceTurnId: turnId,
-      sourceStepId: stepId,
-      tool: toolShape(callId, name, args, null, null),
-      metadata: common,
-    }, options);
+      tool: tool(callId, name, args, null),
+    }, options)];
   }
-  const text = firstString(chunk, ["text", "content", "delta"]);
-  return createEvent(raw, 0, {
-    eventType: "message",
-    actor: "assistant",
-    status: "partial",
-    content: text === null ? [] : [contentPart(text)],
-    sourceEventId,
-    sourceSessionId: sessionId,
-    sourceTurnId: turnId,
-    sourceStepId: stepId,
-    metadata: common,
-  }, options);
+  if (type === "usage") {
+    return [createEvent(raw, 0, {
+      ...base,
+      eventType: "model.inference",
+      actor: "assistant",
+      usage: usageFrom(chunk.usage),
+    }, options)];
+  }
+  if (type === "finish") {
+    const reason = nestedRecord(chunk, "reason");
+    return [createEvent(raw, 0, {
+      ...base,
+      eventType: "evaluation",
+      actor: "environment",
+      status: statusFromReason(reason),
+      content: reason === null ? [] : [contentPart(reason)],
+    }, options)];
+  }
+  // block-start/end are already represented by deltas and assistant/message.
+  return [];
 }
 
 export function normalizeDeepSeekSessionEvent(payload: unknown, options: NormalizeOptions = {}): NormalizedCapture {
-  const raw = createRawEnvelope("deepseek_harness", payload, options, DEEPSEEK_SESSION_INTERFACE);
-  if (!isRecord(payload)) return { raw, events: [] };
-  const { event, body } = unwrap(payload);
-  const type = firstString(event, ["type", "event_type", "eventType"]) ?? "unknown";
-  const sessionId =
-    firstString(body, ["session_id", "sessionId"]) ??
-    firstString(event, ["session_id", "sessionId"]) ??
-    firstString(payload, ["session_id", "sessionId"]) ??
-    raw.session_id;
-  const turnId = firstString(body, ["turn_id", "turnId"]) ?? firstString(event, ["turn_id", "turnId"]) ?? raw.turn_id;
-  const stepId = firstString(body, ["step_id", "stepId"]) ?? firstString(event, ["step_id", "stepId"]);
-  const sourceEventId = firstString(event, ["id", "event_id", "eventId"]);
+  const raw = createRawEnvelope(
+    "deepseek_harness",
+    payload,
+    options,
+    DEEPSEEK_HARNESS_INTERFACE_VERSION,
+  );
+  if (options.interfaceVersion !== undefined && options.interfaceVersion !== DEEPSEEK_HARNESS_INTERFACE_VERSION) {
+    return { raw, events: [] };
+  }
+  const info = capsule(payload);
+  if (info === null) return { raw, events: [] };
+  if (!DURABLE_EVENTS.has(info.type)) return { raw, events: [] };
+
   const metadata = {
-    durable_event_type: type,
-    format_version: valueFrom(body, event, ["version", "format_version", "formatVersion"]) ?? 0,
-    dedupe_key: dedupeKey("dsh", sessionId, turnId, stepId, sourceEventId, type),
+    ...routeMetadata(info.route),
+    durable_event_type: info.type,
+    session_format_version: info.header.version,
+    harness_seq: info.event.seq,
+    source_event_ignorable: info.event.ignorable === true,
+    parent_session_id: firstString(info.header, ["parent_session"]),
+    session_origin: firstString(info.header, ["origin"]),
+    delegation_depth: info.header.delegation_depth ?? null,
+    agent_preset: firstString(info.header, ["agent_preset"]),
+    dedupe_key: dedupeKey("dsh", info.sessionId, info.event.seq),
   };
-  const make = (input: Parameters<typeof createEvent>[2]) => createEvent(raw, 0, {
+  const make = (index: number, input: Parameters<typeof createEvent>[2]) => createEvent(raw, index, {
     ...input,
-    sourceEventId,
-    sourceSessionId: sessionId,
-    sourceTurnId: turnId,
-    sourceStepId: input.sourceStepId ?? stepId,
+    sourceEventId: info.sourceEventId,
+    sourceSessionId: info.sessionId,
+    sourceTurnId: info.turnId,
+    sourceStepId: input.sourceStepId ?? info.stepId,
     metadata: { ...metadata, ...input.metadata },
   }, options);
-
-  if (type === "assistant/chunk") return { raw, events: [chunkEvent(event, body, raw, options, sessionId, turnId, stepId)] };
-  if (type === "assistant/message") return { raw, events: assistantMessageEvents(event, body, raw, options, sessionId, turnId, stepId) };
-
-  if (type === "user/message") {
-    const message = nestedRecord(body, "message") ?? body;
-    const content = message.content ?? message.text ?? body.prompt ?? "";
-    return { raw, events: [make({ eventType: "message", actor: "user", content: [contentPart(content)] })] };
-  }
-
-  if (type === "tool/call") {
-    const callId = firstString(body, ["call_id", "callId", "tool_call_id", "id"]);
-    const name = firstString(body, ["name", "tool_name", "toolName"]);
-    const args = valueFrom(body, event, ["arguments", "input", "params"]);
-    return { raw, events: [make({
-      eventType: "tool.call",
-      actor: "assistant",
-      status: harnessStatus(body.status ?? "partial"),
-      content: [contentPart(args ?? null, 0, { type: "tool_call" })],
-      tool: toolShape(callId, name, args, null, null),
-      metadata: {
-        retry: body.retry === true || body.is_retry === true ||
-          (typeof body.retry_count === "number" && body.retry_count > 0) ||
-          (typeof body.attempt === "number" && body.attempt > 1),
-        retry_count: body.retry_count ?? null,
-        attempt: body.attempt ?? null,
-        retry_of: body.retry_of ?? null,
-        dedupe_key: dedupeKey("dsh-tool", sessionId, callId, "call"),
-      },
-    })] };
-  }
-
-  if (type === "tool/result") {
-    const callId = firstString(body, ["call_id", "callId", "tool_call_id", "id"]);
-    const name = firstString(body, ["name", "tool_name", "toolName"]);
-    const result = valueFrom(body, event, ["result", "output", "error"]);
-    const exitCode = valueFrom(body, event, ["exit_code", "exitCode"]);
-    return { raw, events: [make({
-      eventType: "tool.result",
-      actor: "tool",
-      status: body.error !== undefined ? "error" : harnessStatus(body.status),
-      content: [contentPart(result ?? null, 0, { type: "tool_result" })],
-      tool: toolShape(callId, name, body.arguments ?? body.input, result, exitCode),
-      metadata: { dedupe_key: dedupeKey("dsh-tool", sessionId, callId, "result") },
-    })] };
-  }
-
-  if (type === "turn/start" || type === "step/start") {
-    return { raw, events: [make({
-      eventType: type === "turn/start" ? "agent.invoke" : "model.inference",
-      actor: type === "turn/start" ? "agent" : "assistant",
-      status: "partial",
-    })] };
-  }
-  if (type === "turn/end" || type === "step/end") {
-    return { raw, events: [make({
-      eventType: "evaluation",
-      actor: "environment",
-      status: harnessStatus(body.status),
-      usage: usageFrom(body.usage),
-      content: body.result === undefined ? [] : [contentPart(body.result)],
-    })] };
-  }
-  if (type === "step/error" || type === "turn/error" || type === "error") {
-    const error = valueFrom(body, event, ["error", "message", "reason"]);
-    return { raw, events: [make({
-      eventType: "error",
-      actor: "environment",
-      status: "error",
-      content: error === undefined ? [] : [contentPart(error, 0, { type: "stderr" })],
-    })] };
-  }
-  if (type === "approval/request") {
-    return { raw, events: [make({
-      eventType: "approval.request",
-      actor: "environment",
-      content: [contentPart(body.request ?? body)],
-    })] };
-  }
-  if (type === "approval/result" || type === "approval/decision") {
-    const decision = valueFrom(body, event, ["decision", "result"]);
-    const decisionText = typeof decision === "string" ? decision.toLowerCase() : null;
-    const denied = decisionText === "deny" || decisionText === "denied" ||
-      decisionText === "reject" || decisionText === "rejected" || decision === false;
-    return { raw, events: [make({
-      eventType: "approval.decision",
-      actor: "user",
-      status: denied ? "cancelled" : "ok",
-      content: [contentPart(decision ?? body)],
-      metadata: { approval_decision: decision ?? null },
-    })] };
-  }
-  if (type === "request/retry" || type === "step/retry" || type === "turn/retry" || type === "retry") {
-    return { raw, events: [make({
-      eventType: "model.inference",
-      actor: "assistant",
-      status: "partial",
-      content: body.reason === undefined ? [] : [contentPart(body.reason)],
-      metadata: {
-        retry: true,
-        retry_count: body.retry_count ?? null,
-        attempt: body.attempt ?? null,
-        retry_of: body.retry_of ?? body.request_id ?? null,
-      },
-    })] };
-  }
-  if (type.startsWith("compaction/") || type === "compaction") {
-    return { raw, events: [make({
-      eventType: "compaction",
-      actor: "system",
-      status: type.endsWith("start") ? "partial" : harnessStatus(body.status),
-      metadata: { phase: type.split("/")[1] ?? "unknown" },
-    })] };
-  }
-  if (type === "subagent/start" || type === "agent/start") {
-    return { raw, events: [make({
-      eventType: "agent.invoke",
-      actor: "agent",
-      status: "partial",
-      sourceStepId: firstString(body, ["agent_id", "agentId"]) ?? stepId,
-      metadata: { agent_type: body.agent_type ?? body.agentType ?? null },
-    })] };
-  }
-  if (type === "subagent/end" || type === "subagent/stop" || type === "agent/end") {
-    return { raw, events: [make({
-      eventType: "handoff",
-      actor: "agent",
-      status: harnessStatus(body.status),
-      content: body.result === undefined ? [] : [contentPart(body.result)],
-      sourceStepId: firstString(body, ["agent_id", "agentId"]) ?? stepId,
-      metadata: { agent_type: body.agent_type ?? body.agentType ?? null },
-    })] };
-  }
-
-  return { raw, events: [make({
-    eventType: "model.inference",
+  const opaqueDurableEvent = () => make(0, {
+    eventType: "evaluation",
     actor: "environment",
     status: "partial",
-    metadata: { unsupported_event_shape: true },
-  })] };
+    metadata: {
+      opaque_durable_event: true,
+      training_semantics_available: false,
+    },
+  });
+
+  if (info.type === "assistant/chunk") {
+    const events = chunkEvents(info, raw, options);
+    return { raw, events: events.length > 0 ? events : [opaqueDurableEvent()] };
+  }
+  if (info.type === "assistant/message") {
+    const message = nestedRecord(info.data, "message");
+    if (message === null) return { raw, events: [] };
+    const events = messageContentEvents(info, message, raw, options, info.data.usage);
+    return { raw, events: events.length > 0 ? events : [opaqueDurableEvent()] };
+  }
+  if (info.type === "user/message") {
+    const events = messageContentEvents(info, info.data, raw, options, null);
+    return { raw, events: events.length > 0 ? events : [opaqueDurableEvent()] };
+  }
+  if (info.type === "tool/call") {
+    const callId = firstString(info.data, ["callId"]);
+    const name = firstString(info.data, ["name"]);
+    const args = info.data.arguments ?? null;
+    return { raw, events: [make(0, {
+      eventType: "tool.call", actor: "assistant", status: "partial",
+      content: [contentPart(args, 0, { type: "tool_call" })],
+      tool: tool(callId, name, args, null),
+      metadata: { dedupe_key: dedupeKey("dsh-tool", info.sessionId, callId, "call") },
+    })] };
+  }
+  if (info.type === "tool/result") {
+    const message = nestedRecord(info.data, "message");
+    const blocks = message !== null && Array.isArray(message.content) ? message.content : [];
+    const resultBlock = blocks.find((value) => isRecord(value) && value.type === "tool-result");
+    const block = isRecord(resultBlock) ? resultBlock : null;
+    const callId = block === null
+      ? (message === null ? null : firstString(nestedRecord(message, "source") ?? {}, ["callId"]))
+      : firstString(block, ["toolCallId"]);
+    const result = block?.content ?? null;
+    const failed = info.data.error !== undefined || block?.isError === true;
+    return { raw, events: [make(0, {
+      eventType: "tool.result", actor: "tool", status: failed ? "error" : "ok",
+      content: [contentPart(result, 0, { type: "tool_result" })],
+      tool: tool(callId, null, null, result),
+      metadata: { error: info.data.error ?? null, tool_meta: info.data.meta ?? null,
+        dedupe_key: dedupeKey("dsh-tool", info.sessionId, callId, "result") },
+    })] };
+  }
+  if (info.type === "turn/start" || info.type === "step/start") {
+    return { raw, events: [make(0, {
+      eventType: info.type === "turn/start" ? "agent.invoke" : "model.inference",
+      actor: info.type === "turn/start" ? "agent" : "assistant",
+      status: "partial",
+    })] };
+  }
+  if (info.type === "turn/end") {
+    return { raw, events: [make(0, {
+      eventType: "evaluation", actor: "environment", status: statusFromReason(info.data.reason),
+      content: info.data.reason === undefined ? [] : [contentPart(info.data.reason)],
+      metadata: { turn_end_kind: isRecord(info.data.reason) ? firstString(info.data.reason, ["kind"]) : null },
+    })] };
+  }
+  if (info.type === "step/end") {
+    return { raw, events: [make(0, { eventType: "evaluation", actor: "environment" })] };
+  }
+  if (info.type === "approval/asked") {
+    return { raw, events: [make(0, {
+      eventType: "approval.request", actor: "environment",
+      content: [contentPart({ tool_name: info.data.toolName ?? null, reason: info.data.reason ?? null })],
+      metadata: { approval_id: info.data.id ?? null, call_id: info.data.callId ?? null },
+    })] };
+  }
+  if (info.type === "approval/decided") {
+    const outcome = info.data.outcome;
+    const outcomeKind = isRecord(outcome) ? firstString(outcome, ["kind", "decision"]) : firstString({ outcome }, ["outcome"]);
+    const denied = outcomeKind !== null && ["deny", "denied", "reject", "rejected", "abort", "cancel"].includes(outcomeKind.toLowerCase());
+    return { raw, events: [make(0, {
+      eventType: "approval.decision", actor: "user", status: denied ? "cancelled" : "ok",
+      content: [contentPart(outcome ?? null)],
+      metadata: { approval_id: info.data.id ?? null, approval_decision: outcomeKind ?? outcome ?? null },
+    })] };
+  }
+  if (info.type.startsWith("compaction/")) {
+    return { raw, events: [make(0, {
+      eventType: "compaction", actor: "system",
+      status: info.type === "compaction/start" ? "partial" : "ok",
+      content: info.type === "compaction/summary" ? [contentPart(info.data)] : [],
+      metadata: { phase: info.type.slice("compaction/".length) },
+    })] };
+  }
+  if (info.type === "llm/retry" || info.type === "llm/retry-started") {
+    return { raw, events: [make(0, {
+      eventType: "model.inference", actor: "assistant", status: "partial",
+      content: info.data.reason === undefined ? [] : [contentPart(info.data.reason)],
+      metadata: {
+        ...info.data,
+        retry: true,
+        retry_attempt: info.data.retry ?? null,
+        retry_phase: info.type.slice("llm/".length),
+      },
+    })] };
+  }
+  if (info.type === "request/header") {
+    const header = nestedRecord(info.data, "header");
+    const config = header === null ? null : nestedRecord(header, "config");
+    const tools = header !== null && Array.isArray(header.tools) ? header.tools : [];
+    return { raw, events: [make(0, {
+      eventType: "model.inference", actor: "assistant", status: "partial",
+      metadata: {
+        request_header_reason: info.data.reason ?? null,
+        provider_route: config === null ? null : firstString(config, ["provider"]),
+        model: config === null ? null : firstString(config, ["model"]),
+        reasoning_effort: config?.reasoningEffort ?? null,
+        tool_schema_count: tools.length,
+      },
+    })] };
+  }
+  if (info.type === "request/context") {
+    return { raw, events: [make(0, {
+      eventType: "model.inference", actor: "environment", status: "partial",
+      metadata: { provider_route: info.data.provider ?? null, model: info.data.model ?? null,
+        context_window: info.data.contextWindow ?? null },
+    })] };
+  }
+  if (info.type === "subagent/descriptor") {
+    if (info.data.version !== 2) return { raw, events: [] };
+    return { raw, events: [make(0, {
+      eventType: "agent.invoke", actor: "agent", status: "partial",
+      sourceStepId: info.sessionId,
+      content: info.data.label === undefined ? [] : [contentPart(info.data.label)],
+      metadata: { descriptor_version: 2, subagent_mode: info.data.mode ?? null,
+        subagent_provider: info.data.provider ?? null, agent_provider: info.data.agentProvider ?? null,
+        agent_model: info.data.agentModel ?? null },
+    })] };
+  }
+  if (info.type === "tool-workflow/agent-start" || info.type === "tool-workflow/agent-end") {
+    return { raw, events: [make(0, {
+      eventType: info.type.endsWith("start") ? "agent.invoke" : "handoff", actor: "agent",
+      status: info.type.endsWith("start") ? "partial" : "ok",
+      sourceStepId: firstString(info.data, ["agentId", "id"]) ?? info.stepId,
+      content: info.data.result === undefined ? [] : [contentPart(info.data.result)],
+    })] };
+  }
+  if (info.type === "feedback/record") {
+    return { raw, events: [make(0, { eventType: "feedback", actor: "user", content: [contentPart(info.data)] })] };
+  }
+  if (info.type === "todo/write" || info.type === "plan/mode" || info.type === "goal/change") {
+    return { raw, events: [make(0, { eventType: "plan", actor: "agent", content: [contentPart(info.data)] })] };
+  }
+
+  // A known rc.6 durable record with no faithful typed projection still needs
+  // a canonical marker so capture can retain its topology without inventing
+  // content or training semantics. Unknown required records were rejected
+  // before this point; the live capture publisher treats that empty projection
+  // as a hard compatibility failure instead of publishing a partial trace.
+  return { raw, events: [opaqueDurableEvent()] };
 }
 
 export function normalizeDeepSeekSessionJsonl(input: string, options: NormalizeOptions = {}): NormalizedBatch {
   const parsed = parseJsonLines(input);
-  const raw = [] as NormalizedBatch["raw"];
-  const events = [] as TrajectoryEvent[];
-  let sessionId = options.sessionId ?? null;
-  let turnId = options.turnId ?? null;
+  const raw: NormalizedBatch["raw"] = [];
+  const events: TrajectoryEvent[] = [];
+  const lastSeqBySession = new Map<string, number>();
+  const discontinuousSessions = new Set<string>();
   for (const [sequence, value] of parsed.values.entries()) {
-    const { event, body } = unwrap(value);
-    sessionId = firstString(body, ["session_id", "sessionId"]) ?? firstString(event, ["session_id", "sessionId"]) ?? sessionId;
-    turnId = firstString(body, ["turn_id", "turnId"]) ?? firstString(event, ["turn_id", "turnId"]) ?? turnId;
-    const nextOptions: NormalizeOptions = { ...options, sequence };
-    if (sessionId !== null) nextOptions.sessionId = sessionId;
-    if (turnId !== null) nextOptions.turnId = turnId;
-    const normalized = normalizeDeepSeekSessionEvent(value, nextOptions);
+    const info = capsule(value);
+    let refuseProjection = false;
+    if (info !== null) {
+      const sourceSeq = info.event.seq as number;
+      const previous = lastSeqBySession.get(info.sessionId);
+      // Session persistence v0 guarantees contiguous sequences. Refuse this and
+      // all later records from a discontinuous branch instead of reconstructing
+      // a misleading partial trajectory. Raw preservation remains lossless.
+      if (discontinuousSessions.has(info.sessionId) ||
+        (previous === undefined ? sourceSeq !== 0 : sourceSeq !== previous + 1)) {
+        discontinuousSessions.add(info.sessionId);
+        refuseProjection = true;
+      }
+      lastSeqBySession.set(info.sessionId, sourceSeq);
+    }
+    const normalized = normalizeDeepSeekSessionEvent(value, { ...options, sequence });
     raw.push(normalized.raw);
-    events.push(...normalized.events);
+    if (!refuseProjection) events.push(...normalized.events);
   }
   return { raw, events: renumberEvents(events), diagnostics: parsed.diagnostics };
 }

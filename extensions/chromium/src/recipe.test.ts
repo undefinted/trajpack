@@ -55,8 +55,13 @@ describe("authorized selector recipes", () => {
 
   it("rejects commercial AI origins even with a user-supplied recipe", async () => {
     await expect(fixture("https://chatgpt.com")).rejects.toThrow("official/manual export");
+    await expect(fixture("https://platform.openai.com")).rejects.toThrow("official/manual export");
     await expect(fixture("https://claude.ai")).rejects.toThrow("official/manual export");
+    await expect(fixture("https://console.anthropic.com")).rejects.toThrow("official/manual export");
     await expect(fixture("https://chat.deepseek.com")).rejects.toThrow("official/manual export");
+    await expect(fixture("https://gemini.google.com")).rejects.toThrow("official/manual export");
+    await expect(fixture("https://bard.google.com")).rejects.toThrow("official/manual export");
+    await expect(fixture("https://aistudio.google.com")).rejects.toThrow("official/manual export");
   });
 
   it("fails closed when the active tab origin differs or is incognito", async () => {

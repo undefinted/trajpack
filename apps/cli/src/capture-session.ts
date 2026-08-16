@@ -12,7 +12,7 @@ import {
   vaultPath,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { normalizeRawEnvelope } from "@trajpack/adapters";
+import { CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION, normalizeRawEnvelope } from "@trajpack/adapters";
 
 export type CaptureLimitReason =
   | "CAPTURE_EVENT_LIMIT_EXCEEDED"
@@ -219,13 +219,25 @@ export class CaptureSession {
       let nextSequence = 0;
       const eventIds = new Set<string>();
       for (const envelope of this.raw) {
-        for (const candidate of normalizeRawEnvelope(envelope, { traceId: this.manifest.trace_id, nextSequence })) {
+        const normalized = normalizeRawEnvelope(envelope, { traceId: this.manifest.trace_id, nextSequence });
+        if (normalized.length === 0
+          && !(envelope.adapter === "claude_code"
+            && envelope.interface_version === CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION)) {
+          throw new Error(`Unsupported or incomplete ${envelope.adapter} event on pinned interface ${envelope.interface_version}`);
+        }
+        for (const candidate of normalized) {
           const event = trajectoryEventSchema.parse(candidate);
           nextSequence = Math.max(nextSequence, event.sequence + 1);
           if (eventIds.has(event.event_id)) continue;
           eventIds.add(event.event_id);
           events.push(event);
         }
+      }
+      if (this.raw.length === 0) {
+        throw new Error("Capture produced no authoritative raw events; verify that the native plugin or structured stream is installed and enabled");
+      }
+      if (events.length === 0) {
+        throw new Error("Capture produced no supported normalized events; verify the pinned host and adapter interface versions");
       }
       events.sort((left, right) => left.sequence - right.sequence
         || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0));

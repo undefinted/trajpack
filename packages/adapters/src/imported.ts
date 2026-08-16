@@ -273,6 +273,8 @@ function messageEvents(
       metadata: {
         ...metadata,
         source_role: role,
+        source_role_inference: message.source_role_inference ?? null,
+        source_products: message.products ?? null,
         source_sequence: message.sequence ?? inputIndex,
         source_parent_message_id: firstString(message, ["parent_id", "parentId", "parent_message_id", "parentMessageId"]),
         dedupe_key: dedupeKey(raw.adapter, sessionId, messageId, role, text),
@@ -319,6 +321,54 @@ function claudeMessages(record: JsonObject): JsonObject[] {
       sequence: index,
     }];
   });
+}
+
+function geminiActivityMessages(record: JsonObject): JsonObject[] {
+  if (!Array.isArray(record.products)
+    || !record.products.some((product) => typeof product === "string" && /^gemini\s+apps$/iu.test(product.trim()))
+    || typeof record.time !== "string") {
+    return [];
+  }
+  const title = typeof record.title === "string" ? record.title.trim() : "";
+  const prompt = /^prompted\s+(.+)$/isu.exec(title)?.[1]?.trim() ?? null;
+  const idPrefix = dedupeKey("gemini-takeout", record.time, title, record.products);
+  const messages: JsonObject[] = [];
+  if (prompt !== null && prompt.length > 0) {
+    messages.push({
+      id: `${idPrefix}:prompt`,
+      role: "user",
+      text: prompt,
+      timestamp: record.time,
+      sequence: 0,
+      products: record.products,
+      source_role_inference: "english_takeout_prompt_prefix",
+    });
+  } else if (title.length > 0) {
+    messages.push({
+      id: `${idPrefix}:activity`,
+      role: "environment",
+      text: title,
+      timestamp: record.time,
+      sequence: 0,
+      products: record.products,
+      source_role_inference: "unresolved_activity_title",
+    });
+  }
+  const details = [record.description, record.subtitles, record.details]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+  if (details.length > 0) {
+    messages.push({
+      id: `${idPrefix}:details`,
+      role: "environment",
+      text: details.join("\n"),
+      timestamp: record.time,
+      sequence: messages.length,
+      products: record.products,
+      source_role_inference: "takeout_activity_metadata_not_assistant",
+    });
+  }
+  return messages;
 }
 
 export function normalizeAuthorizedDomCapture(payload: unknown, options: NormalizeOptions = {}): NormalizedCapture {
@@ -374,10 +424,16 @@ export function normalizeManualImport(payload: unknown, options: NormalizeOption
     raw.session_id;
   const officialChatGpt = chatGptMessages(record);
   const officialClaude = claudeMessages(record);
+  const officialGemini = importMetadata.import_format === "gemini_takeout_activity_json"
+    && importMetadata.import_source === "gemini"
+    ? geminiActivityMessages(record)
+    : [];
   const messages = officialChatGpt.length > 0
     ? officialChatGpt
     : officialClaude.length > 0
       ? officialClaude
+      : officialGemini.length > 0
+        ? officialGemini
       : Array.isArray(record.messages)
     ? record.messages
     : isRecord(record.message)

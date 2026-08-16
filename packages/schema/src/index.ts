@@ -8,6 +8,7 @@ export type DecisionStatus = z.infer<typeof decisionStatusSchema>;
 export const hostSchema = z.enum([
   "codex",
   "claude_code",
+  "gemini_cli",
   "deepseek_harness",
   "browser",
   "manual_import",
@@ -17,6 +18,7 @@ export type Host = z.infer<typeof hostSchema>;
 export const providerSchema = z.enum([
   "openai",
   "anthropic",
+  "google",
   "deepseek",
   "self_hosted",
   "other",

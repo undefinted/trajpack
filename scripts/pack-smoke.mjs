@@ -119,9 +119,15 @@ try {
   assert.ok((await stat(installedBin)).isFile(), "installed trajpack binary shim is missing");
   const help = run(installedBin, ["--help"], installDirectory);
   assert.match(help, /Usage: trajpack/);
-  for (const command of ["capture", "arm", "import", "review", "validate", "export", "delete"]) {
+  for (const command of ["capture", "arm", "import", "review", "doctor", "validate", "export", "delete"]) {
     assert.match(help, new RegExp(`\\b${command}\\b`), `CLI help omits ${command}`);
   }
+
+  const doctor = JSON.parse(run(installedBin, ["doctor", "--json"], installDirectory));
+  assert.equal(doctor.report_version, "doctor/0.1", "installed CLI doctor report version drifted");
+  const gemini = doctor.native_agents.find((host) => host.id === "gemini");
+  assert.equal(gemini?.plugin_directory, "plugins/trajpack-gemini", "installed CLI doctor omits the Gemini extension path");
+  assert.deepEqual(gemini?.expected_interfaces, ["gemini-cli-hook/1"]);
 
   const reviewModule = await import(pathToFileURL(join(cliRoot, "dist", "review-server.js")).href);
   const reviewerDist = await realpath(reviewModule.defaultReviewerDist());
@@ -164,7 +170,25 @@ try {
   }
   assert.equal(extensionFiles.some((path) => path.endsWith(".map") || path.includes(".test.")), false, "Chromium release artifact contains development files");
 
-  process.stdout.write(`Release pack smoke passed: ${installedFiles.length} CLI files, ${extensionFiles.length} extension files.\n`);
+  // Gemini CLI extensions are linked from the source checkout in v0.1. Keep
+  // their documented root manifest, hook catalog, and silent forwarder in the
+  // same release smoke gate as the packaged browser extension.
+  const geminiRoot = join(root, "plugins/trajpack-gemini");
+  const geminiManifest = JSON.parse(await readFile(join(geminiRoot, "gemini-extension.json"), "utf8"));
+  const geminiHooks = JSON.parse(await readFile(join(geminiRoot, "hooks/hooks.json"), "utf8"));
+  assert.deepEqual(
+    { name: geminiManifest.name, version: geminiManifest.version },
+    { name: "trajpack-gemini", version: "0.1.0" },
+  );
+  assert.deepEqual(Object.keys(geminiHooks.hooks).sort(), [
+    "AfterAgent", "AfterModel", "AfterTool", "BeforeAgent", "BeforeModel", "BeforeTool",
+    "BeforeToolSelection", "Notification", "PreCompress", "SessionEnd", "SessionStart",
+  ]);
+  for (const required of ["README.md", "gemini-extension.json", "hooks/hooks.json", "scripts/forward-hook.mjs"]) {
+    assert.ok((await stat(join(geminiRoot, ...required.split("/")))).isFile(), `Gemini CLI extension is missing ${required}`);
+  }
+
+  process.stdout.write(`Release pack smoke passed: ${installedFiles.length} CLI files, ${extensionFiles.length} Chromium files, Gemini CLI extension validated.\n`);
 } finally {
   await rm(scratch, { recursive: true, force: true });
 }

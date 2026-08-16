@@ -21,7 +21,7 @@ upload attempt. The receiver must consume the nonce once and validate the
 `chrome-extension://` Origin header.
 
 Load the unpacked extension from `build/` after running `pnpm build`.
-Commercial ChatGPT, Claude, and DeepSeek web origins are blocked; use their
+Commercial ChatGPT, Claude, DeepSeek, and Gemini web origins are blocked; use their
 official data export and `trajpack import` instead.
 
 `pnpm test:e2e` loads the packaged extension in installed Chrome and Edge with

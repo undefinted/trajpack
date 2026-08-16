@@ -1,0 +1,5 @@
+{
+  "name": "trajpack-gemini",
+  "version": "0.1.0",
+  "description": "Explicit, local-only Gemini CLI trajectory capture for Trajpack. Inert unless a capture wrapper or one-session arm is active."
+}
