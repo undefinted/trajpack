@@ -1,0 +1,30 @@
+{
+  "name": "trajpack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "dev": "pnpm --filter @trajpack/cli dev",
+    "trajpack": "node apps/cli/dist/index.js",
+    "audit:dependencies": "pnpm audit --prod",
+    "audit:static": "node scripts/security-audit.mjs",
+    "pretest:pack": "pnpm build",
+    "test:pack": "node scripts/pack-smoke.mjs",
+    "prepare:workspace": "pnpm --filter @trajpack/schema build && pnpm --filter @trajpack/core build && pnpm --filter @trajpack/adapters build && pnpm --filter @trajpack/importers build",
+    "test": "pnpm run prepare:workspace && pnpm -r --if-present test",
+    "typecheck": "pnpm run prepare:workspace && pnpm -r --if-present typecheck",
+    "clean": "pnpm -r --if-present clean"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

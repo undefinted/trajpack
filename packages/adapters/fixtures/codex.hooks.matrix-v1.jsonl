@@ -1,0 +1,5 @@
+{"session_id":"codex-matrix-session","turn_id":"codex-matrix-turn","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_use_id":"codex-protected","tool_input":{"command":"deploy"},"timestamp":"2026-08-16T05:01:00.000Z"}
+{"session_id":"codex-matrix-session","turn_id":"codex-matrix-turn","hook_event_name":"SubagentStart","agent_id":"codex-child","agent_type":"explorer","timestamp":"2026-08-16T05:01:01.000Z"}
+{"session_id":"codex-matrix-session","turn_id":"codex-matrix-turn","hook_event_name":"SubagentStop","agent_id":"codex-child","agent_type":"explorer","last_assistant_message":"Found the fixture boundary.","timestamp":"2026-08-16T05:01:02.000Z"}
+{"session_id":"codex-matrix-session","turn_id":"codex-matrix-turn","hook_event_name":"PreCompact","trigger":"auto","timestamp":"2026-08-16T05:01:03.000Z"}
+{"session_id":"codex-matrix-session","turn_id":"codex-matrix-turn","hook_event_name":"PostCompact","trigger":"auto","timestamp":"2026-08-16T05:01:04.000Z"}

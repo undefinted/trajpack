@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trajpack.dev/schema/selector-recipe-0.1.json",
+  "title": "trajpack authorized selector recipe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recipe_id",
+    "name",
+    "origin",
+    "version",
+    "authorization",
+    "selectors",
+    "role_map",
+    "expectations",
+    "fingerprint_probes",
+    "recipe_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": "selector-recipe/0.1" },
+    "recipe_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "origin": { "type": "string", "format": "uri" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "evidence_ref", "attested_by", "attested_at", "expires_at"],
+      "properties": {
+        "basis": { "enum": ["site_owner", "written_permission", "contract"] },
+        "evidence_ref": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "attested_by": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "attested_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "selectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "item", "content", "role_attribute"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "item": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "role_attribute": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_:][A-Za-z0-9_.:-]*$" }
+      }
+    },
+    "role_map": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "not": { "enum": ["__proto__", "constructor", "prototype"] } },
+      "additionalProperties": { "enum": ["user", "assistant", "system", "tool"] }
+    },
+    "expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_count", "min_items", "max_items", "content_nodes_per_item", "max_text_characters_per_item"],
+      "properties": {
+        "root_count": { "const": 1 },
+        "min_items": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "max_items": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "content_nodes_per_item": { "const": 1 },
+        "max_text_characters_per_item": { "type": "integer", "minimum": 1, "maximum": 250000 }
+      }
+    },
+    "fingerprint_probes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selector", "min_matches", "max_matches"],
+        "properties": {
+          "selector": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "min_matches": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "max_matches": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        }
+      }
+    },
+    "recipe_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

@@ -1,0 +1,29 @@
+{"method":"thread/started","params":{"thread":{"id":"app-thread-main","modelProvider":"openai","cwd":"/workspace/project"}}}
+{"method":"turn/started","params":{"threadId":"app-thread-main","turn":{"id":"app-turn-1","status":"inProgress","items":[]}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-user-1","type":"userMessage","content":[{"type":"text","text":"Fix the failing adapter and verify it."}]}}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-user-1","type":"userMessage","content":[{"type":"text","text":"Fix the failing adapter and verify it."}]}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-reason-1","type":"reasoning","summary":[],"content":[]}}}
+{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"app-thread-main","turnId":"app-turn-1","itemId":"app-reason-1","summaryIndex":0,"delta":"Inspect the adapter contract first."}}
+{"method":"item/reasoning/textDelta","params":{"threadId":"app-thread-main","turnId":"app-turn-1","itemId":"app-reason-1","delta":"Returned reasoning block without a provider CoT claim."}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-reason-1","type":"reasoning","summary":[{"text":"Inspect the adapter contract first."}],"content":[{"text":"Returned reasoning block without a provider CoT claim."}]}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-command-denied","type":"commandExecution","command":"pnpm test","cwd":"/workspace/project","status":"inProgress","commandActions":[]}}}
+{"method":"item/commandExecution/requestApproval","id":900,"params":{"threadId":"app-thread-main","turnId":"app-turn-1","itemId":"app-command-denied","reason":"Run the test suite","command":"pnpm test","cwd":"/workspace/project","availableDecisions":["accept","decline","cancel"]}}
+{"id":900,"result":{"decision":"decline"}}
+{"method":"serverRequest/resolved","params":{"threadId":"app-thread-main","requestId":"900"}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-command-denied","type":"commandExecution","command":"pnpm test","cwd":"/workspace/project","status":"declined","aggregatedOutput":"","exitCode":null}}}
+{"method":"error","params":{"threadId":"app-thread-main","turnId":"app-turn-1","error":{"message":"Response stream disconnected; retrying.","codexErrorInfo":{"type":"ResponseStreamDisconnected"},"additionalDetails":{"retryAttempt":1,"retryable":true}}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-command-retry","type":"commandExecution","command":"pnpm test","cwd":"/workspace/project","status":"inProgress","commandActions":[]}}}
+{"method":"item/commandExecution/outputDelta","params":{"threadId":"app-thread-main","turnId":"app-turn-1","itemId":"app-command-retry","stream":"stdout","delta":"29 tests passed\n"}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-command-retry","type":"commandExecution","command":"pnpm test","cwd":"/workspace/project","status":"completed","aggregatedOutput":"29 tests passed\n","exitCode":0,"durationMs":412}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-collab-1","type":"collabToolCall","tool":"spawnAgent","status":"inProgress","senderThreadId":"app-thread-main","newThreadId":"app-thread-child","prompt":"Inspect the fixture coverage."}}}
+{"method":"thread/started","params":{"thread":{"id":"app-thread-child","parentThreadId":"app-thread-main","modelProvider":"openai","cwd":"/workspace/project"}}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-collab-1","type":"collabToolCall","tool":"spawnAgent","status":"completed","senderThreadId":"app-thread-main","receiverThreadId":"app-thread-child","newThreadId":"app-thread-child","prompt":"Inspect the fixture coverage.","agentStatus":"completed"}}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-compact-1","type":"contextCompaction"}}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-compact-1","type":"contextCompaction"}}}
+{"method":"turn/plan/updated","params":{"threadId":"app-thread-main","turnId":"app-turn-1","explanation":"Verification order","plan":[{"step":"Normalize events","status":"completed"},{"step":"Run tests","status":"inProgress"}]}}
+{"method":"turn/diff/updated","params":{"threadId":"app-thread-main","turnId":"app-turn-1","diff":"diff --git a/adapter.ts b/adapter.ts\n+typed events\n"}}
+{"method":"item/started","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-message-1","type":"agentMessage","text":"","phase":"final_answer"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"app-thread-main","turnId":"app-turn-1","itemId":"app-message-1","delta":"Adapter verified."}}
+{"method":"item/completed","params":{"threadId":"app-thread-main","turnId":"app-turn-1","item":{"id":"app-message-1","type":"agentMessage","text":"Adapter verified.","phase":"final_answer"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"app-thread-main","turnId":"app-turn-1","usage":{"input_tokens":120,"output_tokens":45,"reasoning_tokens":18,"cache_read_tokens":12}}}
+{"method":"turn/completed","params":{"threadId":"app-thread-main","turn":{"id":"app-turn-1","status":"interrupted","items":[],"error":null,"usage":{"input_tokens":120,"output_tokens":45,"reasoning_tokens":18}}}}

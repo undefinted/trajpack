@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "trajpack Authorized DOM Capture",
+  "version": "0.1.0",
+  "description": "Explicitly capture visible conversation text from sites you own or are authorized to collect.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "incognito": "not_allowed",
+  "action": {
+    "default_title": "Capture an authorized trajectory",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:*"
+  }
+}

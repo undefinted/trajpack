@@ -1,0 +1,47 @@
+{
+  "id": "chatcmpl-deepseek-fixture-1",
+  "object": "chat.completion",
+  "created": 1786838400,
+  "model": "deepseek-reasoner",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "I should inspect the requested location before answering.",
+        "content": null,
+        "tool_calls": [
+          {
+            "index": 0,
+            "id": "call_fixture_1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Hangzhou\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    },
+    {
+      "index": 1,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "The alternate answer can be concise.",
+        "content": "It is sunny."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 24,
+    "completion_tokens": 18,
+    "total_tokens": 42,
+    "prompt_cache_hit_tokens": 8,
+    "prompt_cache_miss_tokens": 16,
+    "completion_tokens_details": {
+      "reasoning_tokens": 11
+    }
+  }
+}

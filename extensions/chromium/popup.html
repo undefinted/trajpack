@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>trajpack authorized capture</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>Authorized DOM capture</h1>
+      <p class="notice">Only use a recipe for a site you own or have explicit permission to collect. Commercial AI chat sites must be imported from their official export.</p>
+
+      <label for="recipe">Selector recipe JSON</label>
+      <textarea id="recipe" spellcheck="false" rows="14" placeholder="Paste a selector-recipe/0.1 document"></textarea>
+      <button id="hash-recipe" type="button">Calculate recipe integrity hash</button>
+
+      <label class="check"><input id="attestation" type="checkbox"> I attest that the recipe origin and authorization evidence are valid.</label>
+      <button id="capture" type="button">Capture visible text for preview</button>
+
+      <h2>Preview</h2>
+      <pre id="preview">No capture preview yet.</pre>
+
+      <label for="collector">Paired collector URL</label>
+      <input id="collector" type="url" placeholder="http://127.0.0.1:49152" autocomplete="off">
+      <label for="nonce">One-time pairing nonce</label>
+      <input id="nonce" type="password" autocomplete="off">
+      <button id="upload" type="button" disabled>Approve and upload once</button>
+      <p id="status" role="status" aria-live="polite">Nothing is captured until you click the capture button.</p>
+    </main>
+    <script type="module" src="dist/popup.js"></script>
+  </body>
+</html>

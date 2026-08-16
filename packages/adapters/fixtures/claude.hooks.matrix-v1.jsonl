@@ -1,0 +1,4 @@
+{"session_id":"claude-matrix-session","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_use_id":"claude-protected","tool_input":{"command":"deploy"},"decision":"deny","timestamp":"2026-08-16T06:01:00.000Z"}
+{"session_id":"claude-matrix-session","hook_event_name":"SubagentStart","agent_id":"claude-child","agent_type":"Explore","timestamp":"2026-08-16T06:01:01.000Z"}
+{"session_id":"claude-matrix-session","hook_event_name":"SubagentStop","agent_id":"claude-child","agent_type":"Explore","last_assistant_message":"Found the fixture boundary.","status":"success","timestamp":"2026-08-16T06:01:02.000Z"}
+{"session_id":"claude-matrix-session","hook_event_name":"PreCompact","trigger":"auto","timestamp":"2026-08-16T06:01:03.000Z"}

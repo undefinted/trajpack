@@ -1,0 +1,9 @@
+{
+  "name": "trajpack",
+  "version": "0.1.0",
+  "description": "Explicit, local-only Claude Code trajectory capture for Trajpack.",
+  "author": {
+    "name": "Trajpack contributors"
+  },
+  "license": "Apache-2.0"
+}

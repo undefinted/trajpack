@@ -1,0 +1,4 @@
+interface:
+  display_name: "Export agent trajectory"
+  short_description: "Capture and review one authorized agent session"
+  default_prompt: "Use $export-agent-trajectory to capture this authorized session into my local encrypted vault."

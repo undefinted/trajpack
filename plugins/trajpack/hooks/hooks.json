@@ -1,0 +1,148 @@
+{
+  "description": "Explicit, local-only Trajpack capture hooks. The command is a silent no-op unless a wrapper token or unexpired same-directory arm descriptor is present.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/forward-hook.mjs\"",
+            "commandWindows": "node \"$env:PLUGIN_ROOT\\scripts\\forward-hook.mjs\"",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

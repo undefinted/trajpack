@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"codex-session-1","timestamp":"2026-08-16T01:00:00.000Z"}
+{"type":"turn.started","turn_id":"codex-turn-1","timestamp":"2026-08-16T01:00:01.000Z"}
+{"type":"item.completed","turn_id":"codex-turn-1","item":{"id":"reason-1","type":"reasoning","summary":[{"text":"Inspect the repository, then verify the change."}],"status":"completed"},"timestamp":"2026-08-16T01:00:02.000Z"}
+{"type":"item.started","turn_id":"codex-turn-1","item":{"id":"call-ok","type":"command_execution","command":"pnpm test","status":"in_progress","exit_code":null},"timestamp":"2026-08-16T01:00:03.000Z"}
+{"type":"item.completed","turn_id":"codex-turn-1","item":{"id":"call-ok","type":"command_execution","command":"pnpm test","aggregated_output":"12 tests passed","status":"completed","exit_code":0},"timestamp":"2026-08-16T01:00:04.000Z"}
+{"type":"item.started","turn_id":"codex-turn-1","item":{"id":"call-fail","type":"command_execution","command":"pnpm lint","status":"in_progress","exit_code":null},"timestamp":"2026-08-16T01:00:05.000Z"}
+{"type":"item.completed","turn_id":"codex-turn-1","item":{"id":"call-fail","type":"command_execution","command":"pnpm lint","aggregated_output":"lint failed","status":"failed","exit_code":1},"timestamp":"2026-08-16T01:00:06.000Z"}
+{"type":"turn.completed","turn_id":"codex-turn-1","usage":{"input_tokens":120,"output_tokens":44},"timestamp":"2026-08-16T01:00:07.000Z"}

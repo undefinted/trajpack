@@ -1,0 +1,17 @@
+node_modules/
+dist/
+outputs/
+work/
+apps/cli/reviewer/
+extensions/chromium/build/
+coverage/
+.vite/
+*.log
+*.trajpack
+*.trajpack.tmp
+.trajpack/
+exports/
+test-results/
+playwright-report/
+.DS_Store
+Thumbs.db

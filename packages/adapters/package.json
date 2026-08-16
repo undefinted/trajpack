@@ -1,0 +1,36 @@
+{
+  "name": "@trajpack/adapters",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./codex": {
+      "types": "./dist/codex.d.ts",
+      "import": "./dist/codex.js"
+    },
+    "./claude": {
+      "types": "./dist/claude.d.ts",
+      "import": "./dist/claude.js"
+    },
+    "./deepseek": {
+      "types": "./dist/deepseek.d.ts",
+      "import": "./dist/deepseek.js"
+    }
+  },
+  "files": ["dist", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],
+  "scripts": {
+    "build": "node ../../scripts/clean-dist.mjs dist --with-notices && tsc -p tsconfig.json",
+    "clean": "node ../../scripts/clean-dist.mjs dist",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@trajpack/schema": "workspace:*"
+  }
+}

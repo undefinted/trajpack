@@ -1,0 +1,26 @@
+{
+  "name": "@trajpack/deepseek-harness-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "description": "Local-only DeepSeek Harness session-event forwarder for Trajpack",
+  "trajpack": {
+    "deepseekHarnessVersion": "0.1.0-rc.6",
+    "sessionFormatVersion": 0
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],
+  "scripts": {
+    "build": "node ../../scripts/clean-dist.mjs dist --with-notices && tsc -p tsconfig.json",
+    "clean": "node ../../scripts/clean-dist.mjs dist",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

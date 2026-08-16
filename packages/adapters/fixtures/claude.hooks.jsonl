@@ -1,0 +1,4 @@
+{"session_id":"claude-session-1","hook_event_name":"SubagentStart","agent_id":"agent-2","agent_type":"Explore","timestamp":"2026-08-16T02:01:00.000Z"}
+{"session_id":"claude-session-1","hook_event_name":"SubagentStop","agent_id":"agent-2","agent_type":"Explore","last_assistant_message":"Located the failing test.","timestamp":"2026-08-16T02:01:01.000Z"}
+{"session_id":"claude-session-1","hook_event_name":"PreCompact","trigger":"auto","timestamp":"2026-08-16T02:01:02.000Z"}
+{"session_id":"claude-session-1","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_use_id":"tool-hook-fail","tool_input":{"command":"pnpm lint"},"error":"lint failed","timestamp":"2026-08-16T02:01:03.000Z"}

@@ -1,0 +1,43 @@
+{
+  "name": "@trajpack/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "trajpack": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "reviewer",
+    "!dist/**/*.map",
+    "!dist/**/*.test.*",
+    "!dist/**/*.spec.*",
+    "!reviewer/**/*.map",
+    "!reviewer/**/*.test.*",
+    "!reviewer/**/*.spec.*"
+  ],
+  "scripts": {
+    "build": "node scripts/clean.mjs && node ../../scripts/clean-dist.mjs dist --with-notices && tsc -p tsconfig.json && node scripts/package-reviewer.mjs",
+    "clean": "node scripts/clean.mjs",
+    "dev": "tsx src/index.ts",
+    "prepack": "pnpm --filter @trajpack/reviewer build && pnpm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.2",
+    "@trajpack/adapters": "workspace:*",
+    "@trajpack/core": "workspace:*",
+    "@trajpack/importers": "workspace:*",
+    "@trajpack/schema": "workspace:*",
+    "commander": "^14.0.0",
+    "fastify": "^5.6.0"
+  },
+  "devDependencies": {
+    "@trajpack/reviewer": "workspace:*",
+    "fflate": "0.8.3"
+  }
+}

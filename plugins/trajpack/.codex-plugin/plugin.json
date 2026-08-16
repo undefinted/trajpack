@@ -1,0 +1,24 @@
+{
+  "name": "trajpack",
+  "version": "0.1.0",
+  "description": "Explicitly capture one authorized Codex trajectory into a local encrypted trajpack vault.",
+  "author": {
+    "name": "trajpack contributors"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["trajectory", "dataset", "observability", "privacy"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "trajpack",
+    "shortDescription": "Capture one authorized session to an encrypted vault.",
+    "longDescription": "Local-only, explicitly armed Codex trajectory capture with provenance, privacy scanning, rights gates, human review, and training-data export.",
+    "developerName": "trajpack contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Capture this authorized Codex session into my encrypted trajpack vault.",
+      "Explain whether this trace is eligible for model training.",
+      "Review and export an approved trajectory dataset."
+    ]
+  }
+}

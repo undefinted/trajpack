@@ -1,0 +1,25 @@
+{
+  "name": "@trajpack/importers",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],
+  "scripts": {
+    "build": "node ../../scripts/clean-dist.mjs dist --with-notices && tsc -p tsconfig.json",
+    "clean": "node ../../scripts/clean-dist.mjs dist",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@trajpack/schema": "workspace:*",
+    "fflate": "0.8.3"
+  }
+}

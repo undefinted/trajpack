@@ -1,0 +1,87 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  width: 440px;
+}
+
+main {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1rem;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.15rem;
+}
+
+h2 {
+  font-size: 1rem;
+}
+
+.notice {
+  border-left: 3px solid #d97706;
+  padding-left: 0.65rem;
+}
+
+textarea,
+input,
+button {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+}
+
+textarea,
+input {
+  padding: 0.45rem;
+}
+
+button {
+  cursor: pointer;
+  padding: 0.55rem;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.check input {
+  margin-top: 0.2rem;
+  width: auto;
+}
+
+pre {
+  border: 1px solid currentColor;
+  max-height: 220px;
+  min-height: 3rem;
+  overflow: auto;
+  padding: 0.5rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#status[data-kind="error"] {
+  color: #dc2626;
+}
+
+#status[data-kind="success"] {
+  color: #15803d;
+}

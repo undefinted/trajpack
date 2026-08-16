@@ -1,0 +1,20 @@
+{
+  "name": "@trajpack/chromium-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/package.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:e2e": "pnpm build && playwright test --config playwright.config.ts"
+  },
+  "dependencies": {
+    "@trajpack/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}
