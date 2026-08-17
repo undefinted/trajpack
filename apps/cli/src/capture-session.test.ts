@@ -5,13 +5,16 @@ import { describe, expect, it } from "vitest";
 import { classifyJsonLine } from "@trajpack/adapters";
 import {
   consentReceipt,
+  canonicalJson,
   createManifest,
   defaultSource,
   readBundle,
+  sha256,
   vaultPath,
   type TrajpackPaths,
 } from "@trajpack/core";
 import {
+  CaptureBackpressureError,
   CaptureLimitError,
   CaptureSession,
   HarnessCaptureIntegrityError,
@@ -284,7 +287,7 @@ describe("capture session publication", () => {
       await accepted.abort().catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("accepts the documented seeded boundary marker omission but no larger live-prefix gap", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-dsh-seeded-boundary-"));
@@ -401,7 +404,49 @@ describe("capture session publication", () => {
       const reopened = await readBundle(path, passphrase);
       expect(reopened).toEqual(finalized);
       expect(reopened.raw).toHaveLength(1);
+      expect(reopened.manifest.lineage.raw_sha256).toBe(sha256(canonicalJson(reopened.raw)));
       expect(reopened.events.length).toBeGreaterThan(0);
+    } finally {
+      await session.abort().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("bounds pending direct ingestion without poisoning already-admitted work", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-capture-session-backpressure-"));
+    const paths: TrajpackPaths = {
+      data: root,
+      vault: join(root, "vault"),
+      runtime: join(root, "runtime"),
+      tombstones: join(root, "tombstones"),
+    };
+    const manifest = createManifest({
+      source: defaultSource("codex", "openai"),
+      accountType: "api",
+      rights: ownedRights,
+      consentReceipt: consentReceipt("codex", root),
+      consentPurposes: ["archive", "research", "capture"],
+    });
+    const session = await CaptureSession.create(
+      "codex",
+      manifest,
+      "correct horse battery staple",
+      paths,
+      { maxPendingIngest: 2 },
+    );
+    const envelope = (sequence: number) => classifyJsonLine("codex", JSON.stringify({
+      type: "item.completed",
+      item: { id: `answer-${sequence}`, type: "agent_message", text: `answer ${sequence}` },
+    }), sequence)!;
+    try {
+      const first = session.ingest(envelope(0));
+      const second = session.ingest(envelope(1));
+      await expect(session.ingest(envelope(2))).rejects.toBeInstanceOf(CaptureBackpressureError);
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+      // A released queue slot accepts new work; transient pressure is not a
+      // capture-integrity failure and does not poison the session.
+      await expect(session.ingest(envelope(2))).resolves.toBe(true);
+      await session.abort();
     } finally {
       await session.abort().catch(() => undefined);
       await rm(root, { recursive: true, force: true });

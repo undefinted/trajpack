@@ -1,0 +1,159 @@
+{
+  "schema_version": "trajectory-utility-reference-summary/0.1",
+  "reference_id": "qwen2-0.5b-seed3407-2026-08-17-v5",
+  "status": "complete",
+  "claim_scope": "Single-seed, narrow synthetic calculator protocol smoke evidence; not a general proof of trajectory utility.",
+  "model": {
+    "id": "Qwen/Qwen2-0.5B-Instruct",
+    "revision": "c540970f9e29518b1d8f06ab8b24cba66ad77b6d",
+    "trust_remote_code": false,
+    "local_files_only": true
+  },
+  "seeds": {
+    "data": 20260817,
+    "paired_arm": 3407
+  },
+  "data": {
+    "license": "Apache-2.0",
+    "provenance": "Project-authored deterministic synthetic calculator tasks; no model-generated teacher data.",
+    "training_tasks_per_sft_arm": 96,
+    "held_out_tasks": 32,
+    "train_eval_task_overlap": 0,
+    "trajpack_dataset_examples_zod_validated": 224,
+    "input_sha256": {
+      "answer_only": "94d3953866987774bbd23fb28bff53e76ac60a40e6c3217e98dbcc9d3b7c639e",
+      "complete_trajectory": "cf323c771759102a2eafe6a5df445ee6273fa85c75822208209d7940bb2afbd9",
+      "evaluation": "4f3ebc5ac292ac5186862af0b730935c732d133073cc9f03f164a2311ba5c9c2"
+    }
+  },
+  "environment": {
+    "os": "Windows 11 AMD64",
+    "python": "3.12.3",
+    "torch": "2.5.1+cu121",
+    "cuda_runtime": "12.1",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "gpu_memory_bytes": 8585216000,
+    "transformers": "4.46.3",
+    "peft": "0.13.2",
+    "deterministic_algorithms": true
+  },
+  "integrity": {
+    "git_base_revision_at_run": "5809cdef63e0f3d578498aae13b566c8eb0366e3",
+    "experiment_source_tree_sha256": "3ed6f0d14132e617d8bf44ef8e979c4002d4bf1a464ba0e48dc2c3142abcc2ce",
+    "config_sha256": "466bfa032576d788d0d09022d2dc8b03be71fbeb8f4bb1311012d03c285a2006",
+    "full_results_sha256": "3dffb3e5f4f6a010c9eed0d9ab2c9ef31a74085c48c9ff23112e6a54766c240e",
+    "source_hash_independently_verified": true,
+    "artifact_hashes_verified": {
+      "matched": 10,
+      "total": 10
+    },
+    "raw_predictions_committed": false,
+    "adapter_weights_committed": false
+  },
+  "budget": {
+    "optimizer_steps_per_sft_arm": 60,
+    "micro_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "answer_only_seen_target_tokens": 4140,
+    "complete_trajectory_seen_target_tokens": 6806,
+    "complete_to_answer_token_ratio": 1.643961352657005,
+    "target_token_budget_matched": false
+  },
+  "arms": {
+    "base": {
+      "training": null,
+      "wall_seconds": 18.546013,
+      "peak_gpu_memory_allocated_bytes": 1034737152,
+      "peak_gpu_memory_reserved_bytes": 1080033280,
+      "evaluation_denominator": 32,
+      "counts": {
+        "direct_final_json_valid": 31,
+        "direct_final_accuracy": 0,
+        "tool_json_valid": 0,
+        "tool_json_exact": 0,
+        "tool_executable": 0,
+        "tool_outcome_correct": 0,
+        "final_accuracy": 0,
+        "end_to_end_success": 0
+      }
+    },
+    "answer_only_sft": {
+      "optimizer_steps": 60,
+      "supervised_samples": 96,
+      "seen_target_tokens": 4140,
+      "final_loss": 0.251285620033741,
+      "wall_seconds": 128.524828,
+      "training_seconds": 103.699339,
+      "peak_gpu_memory_allocated_bytes": 1646999552,
+      "peak_gpu_memory_reserved_bytes": 1933574144,
+      "adapter_tree_sha256": "1a47b546694dced7811ead1a67ecc40867acba5a0f4c7eb030099e26d3b219ce",
+      "evaluation_denominator": 32,
+      "counts": {
+        "direct_final_json_valid": 32,
+        "direct_final_accuracy": 2,
+        "tool_json_valid": 0,
+        "tool_json_exact": 0,
+        "tool_executable": 0,
+        "tool_outcome_correct": 0,
+        "final_accuracy": 2,
+        "end_to_end_success": 0
+      }
+    },
+    "complete_trajectory_sft": {
+      "optimizer_steps": 60,
+      "supervised_samples": 192,
+      "seen_target_tokens": 6806,
+      "final_loss": 0.004868959498708136,
+      "wall_seconds": 179.279009,
+      "training_seconds": 105.129929,
+      "peak_gpu_memory_allocated_bytes": 1902363136,
+      "peak_gpu_memory_reserved_bytes": 2917138432,
+      "adapter_tree_sha256": "4a5ebc081a53328d292c0c0a97038eac26fcd8cb4a51b54016e2092649d66e02",
+      "evaluation_denominator": 32,
+      "counts": {
+        "direct_final_json_valid": 0,
+        "direct_final_accuracy": 0,
+        "tool_json_valid": 32,
+        "tool_json_exact": 27,
+        "tool_executable": 32,
+        "tool_outcome_correct": 32,
+        "final_accuracy": 32,
+        "end_to_end_success": 32
+      }
+    }
+  },
+  "paired_complete_vs_answer_only": {
+    "final_accuracy": {
+      "complete_only": 30,
+      "answer_only_only": 0,
+      "both": 2,
+      "neither": 0
+    },
+    "tool_outcome_correct": {
+      "complete_only": 32,
+      "answer_only_only": 0,
+      "both": 0,
+      "neither": 0
+    },
+    "end_to_end_success": {
+      "complete_only": 32,
+      "answer_only_only": 0,
+      "both": 0,
+      "neither": 0
+    }
+  },
+  "total_arm_wall_seconds": 326.34985,
+  "limitations": [
+    "One model revision and one paired seed; no variance estimate across seeds.",
+    "Train and held-out examples are disjoint instances from the same five synthetic template families, not an out-of-distribution benchmark.",
+    "The complete arm saw 6806 target tokens versus 4140 for answer-only (+64.4%), so the observed delta cannot be attributed solely to trajectory structure.",
+    "This tests a strict calculator tool protocol, not coding agents, broad reasoning quality, RL, or hidden chain-of-thought recovery.",
+    "Exact expression was 27/32 while executable outcome was 32/32 because five valid alternative expressions were semantically correct."
+  ],
+  "next_preregistered_experiment": "Run multiple paired seeds with a target-token-matched complete-trajectory control before making a causal trajectory-structure claim.",
+  "engineering_incident": {
+    "excluded_run": "v3",
+    "failure": "CUDA OOM because a temporary return dictionary retained the preceding PEFT model across arms.",
+    "fix": "Return and destructure the trained model as a tuple so the old arm is collectible before loading the next arm; v5 completed with the fixed lifecycle."
+  }
+}

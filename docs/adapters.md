@@ -49,7 +49,10 @@ MiB; its Base64 representation stays within a separately bounded authenticated
 vault frame.
 
 Visible Claude thinking is classified as `provider_summary` or an opaque state,
-not raw chain-of-thought.
+not raw chain-of-thought. Provider `signature`, `signature_delta`, and
+`redacted_thinking.data` values remain encrypted raw evidence and never become
+canonical or training content. See the dedicated
+[Claude thinking-signature boundary](claude-thinking-signatures.md).
 
 ## Gemini CLI
 

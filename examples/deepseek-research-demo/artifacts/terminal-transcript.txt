@@ -1,0 +1,12 @@
+$ pnpm build
+[build output omitted from deterministic transcript]
+$ node scripts/demo-trajectory.mjs --clean
+[1/7] load pinned synthetic DeepSeek Harness rc.6 capsules
+[2/7] normalize, privacy-scan, and produce the review-ready trace
+[3/7] apply a purpose-scoped synthetic-data review approval
+[4/7] export exact deepseek_epoch_sft JSONL and native Parquet
+[5/7] derive content-free research metrics and TraceLab-shaped workload rows
+[6/7] prove sequence gaps fail closed
+[7/7] validate lineage, masks, labels, checksums, and reproducibility evidence
+PASS: 2 exact SFT epochs; JSONL/Parquet agree; gap fixture blocked.
+NOTICE: synthetic fixture only; no real model or hidden chain-of-thought.

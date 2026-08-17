@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatasetBuild, TraceBundle } from "@trajpack/schema";
@@ -14,6 +14,8 @@ import {
   explicitGroupId,
   exportApprovedDataset,
   inspectDatasetNearDuplicateFeatureSets,
+  MAX_DATASET_STAGING_JSONL_BYTES,
+  readDatasetJsonLines,
   splitForGroup,
   traceFallbackGroupId,
 } from "./datasets.js";
@@ -138,6 +140,24 @@ function buildFor(
 }
 
 describe("research dataset builds", () => {
+  it("streams staging JSONL above the former cap while keeping an injectable hard bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dataset-jsonl-bound-"));
+    const path = join(root, "rows.jsonl");
+    const bytes = Buffer.from(`${canonicalJson({ id: 1 })}\n${canonicalJson({ id: 2 })}\n`);
+    try {
+      await writeFile(path, bytes);
+      const rows: unknown[] = [];
+      for await (const row of readDatasetJsonLines(path, bytes.length)) rows.push(row);
+      expect(rows).toEqual([{ id: 1 }, { id: 2 }]);
+      await expect(async () => {
+        for await (const _row of readDatasetJsonLines(path, bytes.length - 1)) void _row;
+      }).rejects.toThrow("oversized dataset JSONL");
+      expect(MAX_DATASET_STAGING_JSONL_BYTES).toBe(Number.MAX_SAFE_INTEGER);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("assigns groups deterministically and keeps one group in one split", () => {
     const policy = {
       algorithm: "sha256-group-threshold-v1" as const,

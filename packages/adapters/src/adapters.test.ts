@@ -197,6 +197,44 @@ describe("Claude Code adapter", () => {
     expect(events.at(-1)?.status).toBe("error");
   });
 
+  it("keeps Claude thinking signatures opaque and out of canonical training content", () => {
+    const signature = "opaque-provider-signature-must-not-be-exported";
+    const redacted = "opaque-redacted-thinking-must-not-be-exported";
+    const input = [
+      JSON.stringify({
+        type: "assistant",
+        session_id: "claude-signature-session",
+        message: {
+          id: "signed-message",
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Provider-visible summary.", signature },
+            { type: "redacted_thinking", data: redacted },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "stream_event",
+        session_id: "claude-signature-session",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature },
+        },
+      }),
+    ].join("\n");
+    const normalized = normalizeClaudeStreamJson(input, { traceId: TRACE_ID, capturedAt: FIXED });
+    assertSchema(normalized.events);
+    const canonical = JSON.stringify(normalized.events);
+    expect(canonical).toContain("Provider-visible summary.");
+    expect(canonical).not.toContain(signature);
+    expect(canonical).not.toContain(redacted);
+    expect(normalized.events.filter((event) => event.event_type === "reasoning")).toHaveLength(2);
+    expect(normalized.events.every((event) =>
+      event.content.every((part) => part.reasoning?.include_in_loss !== true)
+    )).toBe(true);
+  });
+
   it("never normalizes or parses an opaque internal transcript artifact", () => {
     const payload = {
       bytes_base64: Buffer.from('{"type":"assistant","message":"must remain opaque"}\n').toString("base64"),

@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApprovalMode, DatasetExample, TraceBundle, TrajectoryEvent } from "@trajpack/schema";
 import { datasetExampleSchema, verifierConfirmationSchema, verifierEvidenceSchema } from "@trajpack/schema";
@@ -928,6 +928,83 @@ async function writeTrackedFile(directory: string, relativePath: string, value: 
   checksums[relativePath] = sha256(value);
 }
 
+const JSONL_WRITE_BATCH_BYTES = 1024 * 1024;
+
+async function writeAll(
+  handle: Awaited<ReturnType<typeof open>>,
+  value: Buffer,
+): Promise<void> {
+  let offset = 0;
+  while (offset < value.length) {
+    const result = await handle.write(value, offset, value.length - offset, null);
+    if (result.bytesWritten <= 0) throw new Error("Export write made no progress");
+    offset += result.bytesWritten;
+  }
+}
+
+/** Write canonical JSONL without constructing a second full-dataset string. */
+async function writeTrackedJsonLines(
+  directory: string,
+  relativePath: string,
+  rows: Iterable<unknown>,
+  files: string[],
+  checksums: Record<string, string>,
+): Promise<void> {
+  const path = join(directory, relativePath);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await open(path, "wx", 0o600);
+  const digest = createHash("sha256");
+  let pending: Buffer[] = [];
+  let pendingBytes = 0;
+  const flush = async (): Promise<void> => {
+    if (pendingBytes === 0) return;
+    const buffer = pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingBytes);
+    pending = [];
+    pendingBytes = 0;
+    await writeAll(handle, buffer);
+  };
+  try {
+    for (const row of rows) {
+      const encoded = Buffer.from(`${canonicalJson(row)}\n`, "utf8");
+      digest.update(encoded);
+      if (pendingBytes > 0 && pendingBytes + encoded.length > JSONL_WRITE_BATCH_BYTES) await flush();
+      pending.push(encoded);
+      pendingBytes += encoded.length;
+      if (pendingBytes >= JSONL_WRITE_BATCH_BYTES) await flush();
+    }
+    await flush();
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  files.push(path);
+  checksums[relativePath] = digest.digest("hex");
+}
+
+async function sha256RegularFile(path: string): Promise<string> {
+  const handle = await open(path, "r");
+  const digest = createHash("sha256");
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error(`Export artifact is not a regular file: ${path}`);
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let offset = 0;
+    while (offset < before.size) {
+      const result = await handle.read(buffer, 0, Math.min(buffer.length, before.size - offset), offset);
+      if (result.bytesRead <= 0) throw new Error(`Export artifact was truncated while hashing: ${path}`);
+      digest.update(buffer.subarray(0, result.bytesRead));
+      offset += result.bytesRead;
+    }
+    const after = await handle.stat();
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new Error(`Export artifact changed while hashing: ${path}`);
+    }
+    return digest.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
 function redactionReport(original: TraceBundle, selected: TraceBundle): Record<string, unknown> {
   const originalParts = original.events.flatMap((event) => event.content);
   const selectedParts = selected.events.flatMap((event) => event.content);
@@ -1023,7 +1100,7 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
 
   if (options.format === "canonical") {
     await writeTrackedFile(outputDirectory, "manifest.json", `${canonicalJson(selected.manifest)}\n`, files, checksums);
-    await writeTrackedFile(outputDirectory, "events.jsonl", `${selected.events.map(canonicalJson).join("\n")}\n`, files, checksums);
+    await writeTrackedJsonLines(outputDirectory, "events.jsonl", selected.events, files, checksums);
     const blobs = new Map<string, string>();
     for (const part of selected.events.flatMap((event) => event.content)) {
       if (part.value !== null) blobs.set(part.sha256, part.value);
@@ -1043,13 +1120,12 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     if (examples.length === 0 || examples.some((example) => example.messages.length === 0)) {
       throw new Error("HF/TRL export requires at least one non-empty topology-safe training view");
     }
-    await writeTrackedFile(outputDirectory, "dataset.jsonl", `${examples.map(canonicalJson).join("\n")}\n`, files, checksums);
+    await writeTrackedJsonLines(outputDirectory, "dataset.jsonl", examples, files, checksums);
     const parquetPath = join(outputDirectory, "dataset.parquet");
     await writeHfParquet(parquetPath, examples);
     await chmod(parquetPath, 0o600);
-    const parquet = await import("node:fs/promises").then(({ readFile }) => readFile(parquetPath));
     files.push(parquetPath);
-    checksums["dataset.parquet"] = sha256(parquet);
+    checksums["dataset.parquet"] = await sha256RegularFile(parquetPath);
     if (recipeResult !== null) {
       await writeTrackedFile(
         outputDirectory,

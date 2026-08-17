@@ -1,0 +1,63 @@
+{
+  "schema_version": "trajpack-utility-study/0.1",
+  "status": "template-not-an-experiment-result",
+  "research_question": "Does exact request-epoch SFT improve held-out environment-grounded task performance over the same base model and token budget?",
+  "dataset": {
+    "recipe": "deepseek_epoch_sft",
+    "train_split": "repo-and-time-disjoint",
+    "validation_split": "repo-and-time-disjoint",
+    "test_split": "frozen-repo-and-time-disjoint",
+    "dedupe": "exact-and-near-duplicate-before-split",
+    "required_provenance": [
+      "teacher model identity",
+      "request header and tool schemas",
+      "source rights and consent",
+      "privacy and quality reports",
+      "human approval scope"
+    ]
+  },
+  "arms": [
+    {
+      "name": "base",
+      "training": "none"
+    },
+    {
+      "name": "answer-only-sft",
+      "training": "same examples and optimizer budget with reasoning and tool arguments masked"
+    },
+    {
+      "name": "exact-epoch-sft",
+      "training": "deepseek_epoch_sft assistant-only targets"
+    }
+  ],
+  "controls": [
+    "same base checkpoint",
+    "same optimizer and update-token budget",
+    "same decoding parameters",
+    "three or more random seeds",
+    "frozen evaluator and tool sandbox",
+    "no test-set prompt or repository overlap"
+  ],
+  "primary_metrics": [
+    "task_success_rate",
+    "verified_pass_at_1",
+    "valid_tool_call_rate",
+    "environment_grounded_completion_rate"
+  ],
+  "secondary_metrics": [
+    "tokens_to_verified_success",
+    "tool_calls_to_verified_success",
+    "failure_recovery_rate",
+    "wall_clock_to_verified_success"
+  ],
+  "statistics": {
+    "unit": "held-out task",
+    "interval": "paired bootstrap 95% confidence interval",
+    "report": "absolute effect, relative effect, confidence interval, seeds, failures, and exclusions"
+  },
+  "non_claims": [
+    "A schema-valid export alone is not evidence that SFT improves a model.",
+    "Teacher brand, long reasoning, or a thinking signature is not a quality label.",
+    "No preference pair, step reward, or success label may be inferred without versioned evidence."
+  ]
+}

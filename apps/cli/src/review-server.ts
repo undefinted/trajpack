@@ -45,6 +45,7 @@ import {
   validateApprovalScope,
 } from "@trajpack/core";
 import { CaptureSession } from "./capture-session.js";
+import { BoundedWorkGate, type WorkRelease } from "./work-gate.js";
 
 const API = "/api/v1/review";
 const TRACE_ID = /^[a-f0-9]{32}$/;
@@ -61,6 +62,10 @@ const COMMERCIAL_WEB_CAPTURE_HOSTS = [
   "aistudio.google.com",
 ] as const;
 const DEFAULT_REVIEW_REDACTION = "[REDACTED BY REVIEWER]";
+export const DEFAULT_MAX_CONCURRENT_REVIEW_VAULT_REQUESTS = 2;
+export const DEFAULT_MAX_QUEUED_REVIEW_VAULT_REQUESTS = 16;
+export const MAX_CONFIGURABLE_REVIEW_VAULT_REQUESTS = 8;
+export const MAX_CONFIGURABLE_QUEUED_REVIEW_VAULT_REQUESTS = 128;
 
 interface StoredReview {
   disposition?: "include" | "exclude" | "redact";
@@ -78,6 +83,8 @@ interface ReviewServerOptions {
   outputRoot?: string;
   paths?: TrajpackPaths;
   reviewerDist?: string;
+  maxConcurrentVaultRequests?: number;
+  maxQueuedVaultRequests?: number;
 }
 
 export interface RunningReviewServer {
@@ -457,6 +464,24 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   let idleLockAt = Date.now() + idleMs;
   let idleTimer: NodeJS.Timeout;
   const locks = new Map<string, Promise<void>>();
+  const maxConcurrentVaultRequests = options.maxConcurrentVaultRequests
+    ?? DEFAULT_MAX_CONCURRENT_REVIEW_VAULT_REQUESTS;
+  const maxQueuedVaultRequests = options.maxQueuedVaultRequests
+    ?? DEFAULT_MAX_QUEUED_REVIEW_VAULT_REQUESTS;
+  if (!Number.isSafeInteger(maxConcurrentVaultRequests) || maxConcurrentVaultRequests < 1
+    || maxConcurrentVaultRequests > MAX_CONFIGURABLE_REVIEW_VAULT_REQUESTS) {
+    throw new Error(
+      `Reviewer maxConcurrentVaultRequests must be from 1 to ${MAX_CONFIGURABLE_REVIEW_VAULT_REQUESTS}`,
+    );
+  }
+  if (!Number.isSafeInteger(maxQueuedVaultRequests) || maxQueuedVaultRequests < 0
+    || maxQueuedVaultRequests > MAX_CONFIGURABLE_QUEUED_REVIEW_VAULT_REQUESTS) {
+    throw new Error(
+      `Reviewer maxQueuedVaultRequests must be from 0 to ${MAX_CONFIGURABLE_QUEUED_REVIEW_VAULT_REQUESTS}`,
+    );
+  }
+  const vaultWork = new BoundedWorkGate(maxConcurrentVaultRequests, maxQueuedVaultRequests);
+  const requestWorkReleases = new WeakMap<object, WorkRelease>();
 
   const resetIdle = () => {
     if (locked) return;
@@ -519,6 +544,49 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
     }
     resetIdle();
   });
+
+  const releaseVaultWork = (request: object): void => {
+    const release = requestWorkReleases.get(request);
+    if (!release) return;
+    requestWorkReleases.delete(request);
+    release();
+  };
+
+  // Argon2id and decrypted trace graphs are deliberately admitted before body
+  // parsing. Distinct trace ids may proceed concurrently, while a bounded FIFO
+  // queue applies backpressure instead of multiplying workstation memory.
+  app.addHook("onRequest", async (request, reply) => {
+    const path = request.url.split("?", 1)[0];
+    const guarded = path?.startsWith(`${API}/traces`)
+      || (path === "/v1/browser/captures" && request.method === "POST");
+    if (!guarded) return;
+    if (path === "/v1/browser/captures") {
+      const requestOrigin = request.headers.origin;
+      const suppliedNonce = request.headers["x-trajpack-pairing-nonce"] as string | undefined;
+      if (request.headers.host !== hostHeader || !extensionOrigin(requestOrigin)
+        || !browserPairingNonce || !equalSecret(suppliedNonce, browserPairingNonce)) {
+        await reply.code(403).send({ error: "pairing_rejected" });
+        return;
+      }
+    }
+    const abortController = new AbortController();
+    const abortQueuedWork = () => { abortController.abort(); };
+    request.raw.once("aborted", abortQueuedWork);
+    const release = await vaultWork.acquire(abortController.signal);
+    request.raw.removeListener("aborted", abortQueuedWork);
+    if (release === null) {
+      if (request.raw.aborted) return;
+      await reply.code(429).header("Retry-After", "1").send({
+        error: { code: "reviewer_busy", message: "Reviewer vault work queue is full" },
+      });
+      return;
+    }
+    requestWorkReleases.set(request, release);
+    if (request.raw.aborted) releaseVaultWork(request);
+  });
+  app.addHook("onResponse", async (request) => { releaseVaultWork(request); });
+  app.addHook("onError", async (request) => { releaseVaultWork(request); });
+  app.addHook("onRequestAbort", async (request) => { releaseVaultWork(request); });
 
   app.get("/", async (request, reply) => {
     const supplied = (request.query as { launch?: string }).launch;

@@ -10,7 +10,7 @@ import {
   classifyJsonLine,
 } from "@trajpack/adapters";
 import { canonicalJson, sha256 } from "@trajpack/core";
-import { CaptureLimitError, CaptureSession } from "./capture-session.js";
+import { CaptureBackpressureError, CaptureLimitError, CaptureSession } from "./capture-session.js";
 
 const MAX_CLAUDE_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_MAX_CAPTURE_EVENTS = 100_000;
@@ -390,6 +390,13 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
     totalRawBytes += bytes;
     return null;
   };
+  const releaseReservation = (value: unknown, additionalEvents = 1): void => {
+    // Only authenticated, structurally accepted retries/backpressure reach
+    // this path. Invalid attempts have their own hard counter and never reserve.
+    const bytes = Buffer.byteLength(canonicalJson(value), "utf8");
+    reservedEvents = Math.max(0, reservedEvents - additionalEvents);
+    totalRawBytes = Math.max(0, totalRawBytes - bytes);
+  };
 
   app.post("/v1/hooks/events", { bodyLimit: MAX_HOOK_HTTP_BODY_BYTES }, (request, reply) => trackRequest(async () => {
     const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -513,6 +520,10 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
     try {
       accepted = await options.session.ingest(envelope);
     } catch (error) {
+      if (error instanceof CaptureBackpressureError) {
+        releaseReservation(envelope);
+        return reply.code(429).send({ error: "collector_busy" });
+      }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)
         : exceedLimit("CAPTURE_STORAGE_FAILURE");
@@ -520,6 +531,7 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
         .send({ error: "capture_limit_exceeded", reason });
     }
     if (accepted) received += 1;
+    else releaseReservation(envelope);
 
     const isBoundClaudeSessionEnd =
       options.host === "claude_code" &&
@@ -547,6 +559,10 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
         try {
           opaqueAccepted = await options.session.ingest(opaque);
         } catch (error) {
+          if (error instanceof CaptureBackpressureError) {
+            releaseReservation(opaque);
+            return reply.code(429).send({ error: "collector_busy" });
+          }
           const reason = error instanceof CaptureLimitError
             ? exceedLimit(error.reason)
             : exceedLimit("CAPTURE_STORAGE_FAILURE");
@@ -554,6 +570,7 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
             .send({ error: "capture_limit_exceeded", reason });
         }
         if (opaqueAccepted) received += 1;
+        else releaseReservation(opaque);
       }
     }
     if (
@@ -603,12 +620,25 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
     }
     const limit = reserve(envelope);
     if (limit !== null) return reply.code(429).send({ error: "capture_limit_exceeded", reason: limit });
+    const previousPairedOrigin = pairedOrigin;
     pairedOrigin = origin;
     browserNonce = undefined;
     let accepted: boolean;
     try {
       accepted = await options.session.ingest(envelope);
     } catch (error) {
+      if (error instanceof CaptureBackpressureError) {
+        releaseReservation(envelope);
+        // This request atomically consumed the one-shot nonce immediately
+        // before ingestion. Transient local pressure is retryable, so restore
+        // exactly that capability; no other handler can consume it while it is
+        // undefined in the single-threaded admission section above.
+        if (browserNonce === undefined && pairedOrigin === origin) {
+          browserNonce = nonce;
+          pairedOrigin = previousPairedOrigin;
+        }
+        return reply.code(429).send({ error: "collector_busy" });
+      }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)
         : exceedLimit("CAPTURE_STORAGE_FAILURE");
@@ -616,6 +646,7 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
         .send({ error: "capture_limit_exceeded", reason });
     }
     if (accepted) received += 1;
+    else releaseReservation(envelope);
     return reply
       .header("Access-Control-Allow-Origin", origin)
       .header("Vary", "Origin")

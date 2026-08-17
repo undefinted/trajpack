@@ -34,9 +34,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - if: matrix.os == 'ubuntu-latest'
         run: python -m pip install --disable-pip-version-check numpy==1.26.4 pyarrow==25.0.1 datasets==5.0.1
+      - if: matrix.os == 'ubuntu-latest'
+        run: python -m unittest discover experiments/trajectory-utility/tests -v
       - run: pnpm build
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          python experiments/trajectory-utility/generate_data.py --out work/ci-trajectory-utility --train 16 --eval 8 --seed 20260817
+          node experiments/trajectory-utility/validate_with_trajpack.mjs work/ci-trajectory-utility/answer-only.train.jsonl work/ci-trajectory-utility/complete-trajectory.train.jsonl work/ci-trajectory-utility/held-out.eval.jsonl
       - run: pnpm -r --if-present typecheck
       - run: pnpm -r --if-present test
+      - run: node --test examples/deepseek-research-demo/demo.test.mjs
       - run: pnpm audit:static
       - run: pnpm audit --prod
       - run: pnpm test:pack

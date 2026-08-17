@@ -15,7 +15,7 @@ import {
   sha256,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { CaptureLimitError, CaptureSession } from "./capture-session.js";
+import { CaptureBackpressureError, CaptureLimitError, CaptureSession } from "./capture-session.js";
 import { startIngestServer } from "./ingest-server.js";
 import { startReviewServer } from "./review-server.js";
 
@@ -356,6 +356,45 @@ describe("loopback collectors", () => {
       });
       expect(accepted.statusCode).toBe(202);
       expect(ingest).toHaveBeenCalledTimes(1);
+      expect(running.limitViolation()).toBeNull();
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("does not charge idempotent retries or transient session backpressure to capture quotas", async () => {
+    const cwd = "C:\\owned\\repo";
+    const ingest = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockRejectedValueOnce(new CaptureBackpressureError(1))
+      .mockResolvedValueOnce(true);
+    const running = await startIngestServer({
+      host: "codex",
+      token: "capture-token",
+      session: { ingest } as unknown as CaptureSession,
+      expectedCwd: cwd,
+      maxEvents: 2,
+      maxTotalRawBytes: 1024 * 1024,
+    });
+    const headers = {
+      authorization: "Bearer capture-token",
+      "x-trajpack-host": "codex",
+      "x-trajpack-interface": "codex-hook/1",
+    };
+    const post = (hookEventName: string) => running.server.inject({
+      method: "POST",
+      url: "/v1/hooks/events",
+      headers,
+      payload: makeHookEnvelope("session-a", hookEventName, cwd, 0).payload,
+    });
+    try {
+      expect((await post("PostToolUse")).statusCode).toBe(202);
+      expect((await post("PostToolUse")).statusCode).toBe(200);
+      const busy = await post("PreToolUse");
+      expect(busy.statusCode).toBe(429);
+      expect(busy.json()).toEqual({ error: "collector_busy" });
+      expect((await post("Stop")).statusCode).toBe(202);
       expect(running.limitViolation()).toBeNull();
     } finally {
       await running.close();
@@ -984,6 +1023,39 @@ describe("loopback collectors", () => {
       expect(accepted.headers["access-control-allow-origin"]).toBe(extensionOrigin);
       expect((await running.server.inject({ method: "POST", url: "/v1/browser/captures", headers, payload: { envelope } })).statusCode).toBe(403);
       expect(ingest).toHaveBeenCalledTimes(1);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("restores the one-shot browser pairing capability after transient backpressure", async () => {
+    const envelope = makeBrowserEnvelope();
+    const ingest = vi.fn()
+      .mockRejectedValueOnce(new CaptureBackpressureError(1))
+      .mockResolvedValueOnce(true);
+    const running = await startIngestServer({
+      host: "browser",
+      token: "unused-token",
+      pairingNonce: "retryable-pairing-nonce-abcdefghijklmnop",
+      session: { ingest } as unknown as CaptureSession,
+    });
+    const headers = {
+      origin: extensionOrigin,
+      "x-trajpack-pairing-nonce": "retryable-pairing-nonce-abcdefghijklmnop",
+      "x-trajpack-recipe-sha256": (envelope.payload as { provenance: { selector_recipe_sha256: string } }).provenance.selector_recipe_sha256,
+    };
+    try {
+      const busy = await running.server.inject({
+        method: "POST", url: "/v1/browser/captures", headers, payload: { envelope },
+      });
+      expect(busy.statusCode).toBe(429);
+      expect(busy.json()).toEqual({ error: "collector_busy" });
+      const retried = await running.server.inject({
+        method: "POST", url: "/v1/browser/captures", headers, payload: { envelope },
+      });
+      expect(retried.statusCode).toBe(201);
+      expect(ingest).toHaveBeenCalledTimes(2);
+      expect(running.limitViolation()).toBeNull();
     } finally {
       await running.close();
     }

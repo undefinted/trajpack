@@ -16,7 +16,11 @@ import {
 import { runImport } from "./import-command.js";
 import { runDoctor } from "./doctor.js";
 import { runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
-import { startReviewServer } from "./review-server.js";
+import {
+  DEFAULT_MAX_CONCURRENT_REVIEW_VAULT_REQUESTS,
+  DEFAULT_MAX_QUEUED_REVIEW_VAULT_REQUESTS,
+  startReviewServer,
+} from "./review-server.js";
 import { safeCliDebugDiagnostic, safeCliErrorMessage } from "./safe-error.js";
 import { readPassphrase } from "./secret.js";
 import { runResearchAnalyze } from "./research-command.js";
@@ -106,11 +110,28 @@ program.command("review")
   .description("Open the loopback-only local review workbench")
   .option("--idle-minutes <minutes>", "vault idle lock timeout", "15")
   .option("--output-root <path>", "server-owned plaintext export root")
-  .action(async (options: { idleMinutes: string; outputRoot?: string }) => {
+  .option(
+    "--max-concurrent-vault-requests <count>",
+    "bounded concurrent Argon2/decrypted-review work",
+    String(DEFAULT_MAX_CONCURRENT_REVIEW_VAULT_REQUESTS),
+  )
+  .option(
+    "--max-queued-vault-requests <count>",
+    "bounded FIFO reviewer backlog before HTTP 429",
+    String(DEFAULT_MAX_QUEUED_REVIEW_VAULT_REQUESTS),
+  )
+  .action(async (options: {
+    idleMinutes: string;
+    outputRoot?: string;
+    maxConcurrentVaultRequests: string;
+    maxQueuedVaultRequests: string;
+  }) => {
     let passphrase = await readPassphrase();
     const server = await startReviewServer({
       passphrase,
       idleMinutes: Number(options.idleMinutes),
+      maxConcurrentVaultRequests: Number(options.maxConcurrentVaultRequests),
+      maxQueuedVaultRequests: Number(options.maxQueuedVaultRequests),
       ...(options.outputRoot ? { outputRoot: options.outputRoot } : {}),
     });
     passphrase = "";
