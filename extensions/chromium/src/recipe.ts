@@ -40,7 +40,17 @@ export interface AuthorizedSelectorRecipe {
   recipe_sha256: string;
 }
 
-const BLOCKED_COMMERCIAL_HOSTS = ["chat.openai.com", "chatgpt.com", "claude.ai", "deepseek.com"] as const;
+const BLOCKED_COMMERCIAL_HOSTS = [
+  "chat.openai.com",
+  "chatgpt.com",
+  "platform.openai.com",
+  "claude.ai",
+  "console.anthropic.com",
+  "deepseek.com",
+  "gemini.google.com",
+  "bard.google.com",
+  "aistudio.google.com",
+] as const;
 const ID_PATTERN = /^[A-Za-z0-9._-]+$/u;
 const ATTRIBUTE_PATTERN = /^[A-Za-z_:][A-Za-z0-9_.:-]*$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -95,7 +105,7 @@ function assertExactOrigin(value: string): string {
     throw new Error("origin must contain only scheme, host, and optional port (no trailing slash, path, query, or fragment)");
   }
   if (isBlockedCommercialOrigin(url.origin)) {
-    throw new Error("Commercial ChatGPT, Claude, and DeepSeek web origins require official/manual export import");
+    throw new Error("Commercial ChatGPT, Claude, DeepSeek, and Gemini web origins require official/manual export import");
   }
   return url.origin;
 }

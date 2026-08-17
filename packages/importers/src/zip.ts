@@ -345,6 +345,26 @@ function selectHtmlCandidate(entries: InspectedEntry[]): InspectedEntry[] {
   return candidates;
 }
 
+function selectGeminiActivityCandidate(
+  entries: InspectedEntry[],
+  explicitHint: boolean,
+): { selected: InspectedEntry[]; ignoredHtmlViewer: boolean } {
+  const candidates = entries.filter((entry) => {
+    if (entry.directory || entry.name.split("/").length > 8) return false;
+    const file = entryBasename(entry.name).toLowerCase();
+    if (file !== "myactivity.json" && file !== "myactivity.html") return false;
+    if (explicitHint) return true;
+    return entry.name.split("/").some((segment) => /^gemini\s+apps$/iu.test(segment.trim()));
+  });
+  const json = candidates.filter((entry) => entryBasename(entry.name).toLowerCase() === "myactivity.json");
+  const html = candidates.filter((entry) => entryBasename(entry.name).toLowerCase() === "myactivity.html");
+  if (json.length > 1 || html.length > 1) {
+    throw new Error("Ambiguous ZIP: multiple Gemini Apps MyActivity entries were found");
+  }
+  if (json.length === 1) return { selected: json, ignoredHtmlViewer: html.length === 1 };
+  return { selected: html, ignoredHtmlViewer: false };
+}
+
 function extractSelected(bytes: Uint8Array, selected: InspectedEntry[]): Map<string, Uint8Array> {
   const selectedByName = new Map(selected.map((entry) => [entry.name, entry]));
   const result = new Map<string, Uint8Array>();
@@ -402,8 +422,12 @@ function extractSelected(bytes: Uint8Array, selected: InspectedEntry[]): Map<str
 }
 
 function ensureOfficialFormat(format: ImportFormat): void {
-  if (format !== "chatgpt_official_json" && format !== "chatgpt_official_html" && format !== "claude_official_json") {
-    throw new Error("ZIP conversation entry does not match a supported official ChatGPT or Claude export shape");
+  if (format !== "chatgpt_official_json"
+    && format !== "chatgpt_official_html"
+    && format !== "claude_official_json"
+    && format !== "gemini_takeout_activity_json"
+    && format !== "gemini_takeout_activity_html") {
+    throw new Error("ZIP entry does not match a supported official ChatGPT, Claude, or Gemini export shape");
   }
 }
 
@@ -420,15 +444,19 @@ export function importOfficialZipArchive(input: Uint8Array, options: ImportOptio
   }
   const inspected = inspectZip(input, limits);
   const archiveSha256 = sha256Bytes(input);
-  let selected = selectStructuredCandidates(inspected.entries);
-  let ignoredHtmlViewer = false;
-  if (selected.length === 0) {
-    selected = selectHtmlCandidate(inspected.entries);
-  } else {
-    ignoredHtmlViewer = selectHtmlCandidate(inspected.entries).length === 1;
+  const gemini = selectGeminiActivityCandidate(inspected.entries, options.sourceHint === "gemini");
+  let selected = gemini.selected;
+  let ignoredHtmlViewer = gemini.ignoredHtmlViewer;
+  if (selected.length === 0 && options.sourceHint !== "gemini") {
+    selected = selectStructuredCandidates(inspected.entries);
+    if (selected.length === 0) {
+      selected = selectHtmlCandidate(inspected.entries);
+    } else {
+      ignoredHtmlViewer = selectHtmlCandidate(inspected.entries).length === 1;
+    }
   }
   if (selected.length === 0) {
-    throw new Error("Unsupported ZIP: no unambiguous official conversations.json, numbered shard, conversations.jsonl, or chat.html entry was found");
+    throw new Error("Unsupported ZIP: no unambiguous official conversation or Gemini Apps MyActivity entry was found");
   }
 
   const extracted = extractSelected(input, selected);
@@ -491,7 +519,7 @@ export function importOfficialZipArchive(input: Uint8Array, options: ImportOptio
   const warnings = [
     ...importedResults.flatMap(({ result }) => result.warnings),
     ...(ignoredHtmlViewer
-      ? ["The archive's chat.html viewer was ignored because validated structured conversation JSON was available."]
+      ? ["The archive's HTML viewer was ignored because validated structured JSON was available."]
       : []),
   ];
   return {

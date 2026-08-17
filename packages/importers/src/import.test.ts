@@ -61,6 +61,29 @@ describe("format detection and raw envelopes", () => {
     expect(result.envelopes[0]?.session_id).toBe("conversation-2");
   });
 
+  it("recognizes Google Takeout Gemini Apps activity without pretending it is a conversation graph", () => {
+    const activity = [{
+      header: "Gemini Apps",
+      title: "Prompted Explain deterministic data splits",
+      description: "Activity metadata and an exported response may appear here.",
+      time: "2026-08-15T12:00:00.000Z",
+      products: ["Gemini Apps"],
+    }];
+    const result = importToRawEnvelopes(JSON.stringify(activity), {
+      capturedAt,
+      filename: "MyActivity.json",
+    });
+    expect(result.detection.format).toBe("gemini_takeout_activity_json");
+    expect(result.provenance).toMatchObject({
+      import_method: "official_export",
+      source_product: "gemini",
+      source_authenticity: "unverified_user_supplied",
+    });
+    expect(result.warnings.join(" ")).toContain("activity log");
+    expect(detectImportFormat(JSON.stringify(activity), { filename: "activity.json" }).detection.format)
+      .toBe("generic_json");
+  });
+
   it("rejects source hints when the official shape is absent", () => {
     expect(() => importToRawEnvelopes("{}", { capturedAt, sourceHint: "claude" })).toThrow(
       "does not match the conservative claude official export shape",
@@ -142,5 +165,21 @@ describe("untrusted HTML import", () => {
     expect(JSON.stringify(result.envelopes[0]?.payload)).toContain("preview_is_not_visibility_evidence");
 
     expect(extractNonExecutingHtmlPreview("<script>never closed and never executed")).toBe("");
+  });
+
+  it("stores a marked Gemini Takeout activity page as inert text", () => {
+    const exported = [
+      "<!doctype html><html><head><title>My Activity</title></head><body>",
+      "<h1>Gemini Apps</h1><script>globalThis.__geminiOwned = true</script>",
+      "<p>Prompted safe import</p></body></html>",
+    ].join("");
+    const result = importToRawEnvelopes(exported, {
+      capturedAt,
+      filename: "MyActivity.html",
+      sourceHint: "gemini",
+    });
+    expect(result.detection.format).toBe("gemini_takeout_activity_html");
+    expect(JSON.stringify(result.envelopes[0]?.payload)).toContain("Prompted safe import");
+    expect((globalThis as Record<string, unknown>)["__geminiOwned"]).toBeUndefined();
   });
 });

@@ -2,6 +2,7 @@
 import { Command, Option } from "commander";
 import type { ExportFormat } from "@trajpack/core";
 import { runArm, runCapture } from "./capture-command.js";
+import { DEFAULT_MAX_CAPTURE_EVENTS, DEFAULT_MAX_CAPTURE_RAW_BYTES } from "./ingest-server.js";
 import {
   runDelete,
   runExport,
@@ -13,20 +14,26 @@ import {
   type TermsSnapshotOptions,
 } from "./commands.js";
 import { runImport } from "./import-command.js";
+import { runDoctor } from "./doctor.js";
+import { runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
 import { startReviewServer } from "./review-server.js";
+import { safeCliDebugDiagnostic, safeCliErrorMessage } from "./safe-error.js";
 import { readPassphrase } from "./secret.js";
 
 function addSourceOptions(command: Command): Command {
   return command
-    .addOption(new Option("--provider <provider>", "actual model provider").choices(["openai", "anthropic", "deepseek", "self_hosted", "other", "unknown"]).default("unknown"))
+    .addOption(new Option("--provider <provider>", "actual model provider").choices(["openai", "anthropic", "google", "deepseek", "self_hosted", "other", "unknown"]).default("unknown"))
     .addOption(new Option("--account-type <type>", "account or contract class").choices(["consumer", "api", "business", "enterprise", "managed_workspace", "self_hosted", "unknown"]).default("unknown"))
     .option("--model <id>", "exact model id")
-    .option("--model-digest <digest>", "model snapshot or weights digest")
+    .option("--model-digest <digest>", "claimed model snapshot/weights digest; not proof by itself")
+    .option("--model-artifact <path>", "locally hash an exact self-hosted model file or snapshot directory")
     .option("--interface-version <version>", "source interface version")
     .option("--origin <origin>", "authorized source origin")
-    .option("--terms <json>", "terms snapshot JSON file")
-    .option("--written-permission <reference>", "order form or written permission evidence reference")
-    .option("--permission-evidence <json>", "scoped permission evidence JSON file")
+    .option("--terms <json>", "one terms snapshot, or an array of snapshots, as JSON")
+    .option("--written-permission <reference>", "lineage-only permission reference; does not clear a gate")
+    .option("--permission-evidence <json>", "scoped permission metadata; requires --permission-document")
+    .option("--permission-document <path>", "retained permission document hashed and bound to its metadata")
+    .option("--permission-evidence-kind <kind>", "safe evidence kind used in the content-bound reference", "written-permission.v1")
     .addOption(new Option("--input-rights <basis>").choices(["owned", "licensed", "consented", "public_domain", "unknown"]).default("unknown"))
     .addOption(new Option("--third-party <state>").choices(["none", "present", "unknown"]).default("unknown"))
     .option("--source-license <expression>", "recognized SPDX expression (custom LicenseRef is archive-only in v1)", "NOASSERTION")
@@ -44,25 +51,38 @@ const program = new Command()
   .description("Local-first observable agent trajectory ETL and compliance router")
   .version("0.1.0")
   .enablePositionalOptions()
-  .showHelpAfterError();
+  .showHelpAfterError()
+  .addHelpText("after", `
+Research path:
+  capture/import -> policy explain -> review -> dataset plan -> export -> validate
+
+Training exporters fail closed on unknown rights, stale terms, unbound provenance,
+failed quality checks, or missing target-scoped human approval. See
+docs/research-workflow.md for an end-to-end reproducible workflow.`);
 
 addSourceOptions(
   program.command("capture")
     .description("Run one explicitly authorized host session under encrypted capture")
-    .argument("<host>", "codex, claude, or dsh")
+    .argument("<host>", "codex, claude, gemini, or dsh")
     .argument("[command...]", "host executable and arguments after --")
-    .option("--cwd <path>", "working directory"),
+    .option("--cwd <path>", "working directory")
+    .option("--max-events <count>", "hard limit across stdout and hook channels", String(DEFAULT_MAX_CAPTURE_EVENTS))
+    .option("--max-raw-bytes <bytes>", "hard raw-byte budget across stdout and hook channels", String(DEFAULT_MAX_CAPTURE_RAW_BYTES))
+    .option("--drain-ms <milliseconds>", "bounded grace period for in-flight asynchronous hooks", "500"),
 ).allowUnknownOption(true).passThroughOptions().action(async (host: string, command: string[], options) => {
   process.exitCode = await runCapture(host, command, options);
 });
 
 addSourceOptions(
   program.command("arm")
-    .description("Arm the next matching interactive Codex or Claude session")
-    .argument("<host>", "codex or claude")
+    .description("Arm the next matching interactive Codex, Claude, or Gemini CLI session")
+    .argument("<host>", "codex, claude, or gemini")
     .option("--next-session", "bind the first matching session")
     .requiredOption("--cwd <path>", "exact session working directory")
-    .option("--ttl <duration>", "30s, 10m, or 1h", "10m"),
+    .option("--ttl <duration>", "30s, 10m, or 1h", "10m")
+    .option("--max-events <count>", "hard captured-event limit", String(DEFAULT_MAX_CAPTURE_EVENTS))
+    .option("--max-raw-bytes <bytes>", "hard captured raw-byte limit", String(DEFAULT_MAX_CAPTURE_RAW_BYTES))
+    .option("--drain-ms <milliseconds>", "bounded grace period for in-flight asynchronous hooks", "500"),
 ).action(async (host: string, options) => runArm(host, options));
 
 addSourceOptions(
@@ -70,12 +90,16 @@ addSourceOptions(
     .description("Import a user-provided official/manual export into the encrypted vault")
     .argument("<input>", "JSON, JSONL, HTML, ZIP official export, or .trajpack vault")
     .addOption(new Option("--source-hint <source>", "fail-closed source shape hint")
-      .choices(["chatgpt", "claude", "deepseek-api", "generic"]))
+      .choices(["chatgpt", "claude", "gemini", "deepseek-api", "generic"]))
     .option("--max-bytes <bytes>", "explicit compressed input/file byte limit")
     .option("--max-archive-entries <count>", "explicit ZIP entry-count limit")
     .option("--max-archive-entry-bytes <bytes>", "explicit ZIP per-entry decoded byte limit")
     .option("--max-archive-uncompressed-bytes <bytes>", "explicit ZIP aggregate decoded byte limit"),
-).action(async (input: string, options) => { await runImport(input, options); });
+).addHelpText("after", `
+Offline API JSON and re-imported .trajpack files cross a trust boundary: recognized
+shape is not provider authentication. Training requires the applicable policy gate,
+content-bound provenance evidence, and a fresh human approval.`)
+  .action(async (input: string, options) => { await runImport(input, options); });
 
 program.command("review")
   .description("Open the loopback-only local review workbench")
@@ -106,10 +130,38 @@ program.command("review")
     await server.close();
   });
 
+program.command("doctor")
+  .description("Report native agent executables, pinned interfaces, and safe web import paths")
+  .option("--json", "emit a machine-readable compatibility report")
+  .action((options: { json?: boolean }) => runDoctor(options));
+
 program.command("validate")
-  .description("Validate an encrypted trace, canonical bundle, or HF/TRL JSONL")
-  .argument("<selection>")
+  .description("Validate a managed/encrypted trace, build, export directory, canonical bundle, or HF JSONL")
+  .argument("<selection>", "trace id or path to .trajpack, build JSON, export directory, canonical bundle, or JSONL")
+  .addHelpText("after", `
+Dataset-directory validation proves internal self-consistency and compiler support;
+it does not re-open managed vaults or attest current training authorization.`)
   .action(async (selection: string) => { if (!(await runValidate(selection))) process.exitCode = 2; });
+
+const dataset = program.command("dataset").description("Freeze and audit reproducible multi-trace research datasets");
+dataset.command("plan")
+  .description("Create a content-bound dataset build file from approved managed traces")
+  .argument("<trace-ids...>", "exact managed trace ids")
+  .requiredOption("--output <file>", "new dataset build JSON file")
+  .requiredOption("--name <name>", "portable dataset name")
+  .addOption(new Option("--mode <mode>").choices(["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"]).makeOptionMandatory())
+  .requiredOption("--seed <seed>", "deterministic split seed")
+  .option("--train <basis-points>", "train ratio in basis points", "8000")
+  .option("--validation <basis-points>", "validation ratio in basis points", "1000")
+  .option("--test <basis-points>", "test ratio in basis points", "1000")
+  .option("--group-map <json>", "private trace-id to repo/task-family alias map; aliases are hashed before storage")
+  .addOption(new Option("--quality-profile <profile>").choices(["sft_basic", "tool_agent_strict", "research_strict"]).default("research_strict"))
+  .option("--target-model-owner <name>")
+  .option("--target-product <name>")
+  .addHelpText("after", `
+For multi-trace research_strict builds, --group-map must cover every selected
+trace exactly once. The output parent must exist and the build file must be new.`)
+  .action(async (traceIds: string[], options: DatasetPlanOptions) => { await runDatasetPlan(traceIds, options); });
 
 const policy = program.command("policy").description("Explain and manage scoped policy evidence");
 policy.command("explain").argument("<selection>").action(runPolicyExplain);
@@ -125,7 +177,8 @@ policy.command("override")
   ]).makeOptionMandatory())
   .addOption(new Option("--status <status>").choices(["allow", "deny"]).makeOptionMandatory())
   .requiredOption("--reviewer <identity>")
-  .requiredOption("--evidence <reference>")
+  .requiredOption("--evidence-kind <kind>", "lowercase evidence category used in the content-bound reference")
+  .requiredOption("--evidence-file <path>", "regular local file to hash and bind to this override")
   .requiredOption("--expires <timestamp>")
   .requiredOption("--reason <text>")
   .option("--purpose <purpose...>")
@@ -133,6 +186,9 @@ policy.command("override")
   .option("--target-product <name>")
   .addOption(new Option("--competitive <state>").choices(["yes", "no", "unknown"]))
   .option("--yes", "confirm the exact override scope")
+  .addHelpText("after", `
+The CLI hashes --evidence-file; caller-authored digest references are not accepted.
+An override is trace/dimension/target scoped, expires, and resets review approval.`)
   .action((traceId: string, options: PolicyOverrideOptions) => runPolicyOverride(traceId, options));
 
 policy.command("snapshot")
@@ -147,11 +203,14 @@ policy.command("snapshot")
 
 program.command("export")
   .description("Explicitly write an approved plaintext export")
-  .argument("<selection>")
+  .argument("<selection>", "managed trace id or frozen dataset-build JSON path")
   .addOption(new Option("--format <format>").choices(["canonical", "atif", "hf-trl", "otlp"]).makeOptionMandatory())
   .requiredOption("--output <directory>")
   .option("--plaintext", "acknowledge that output leaves the encrypted vault")
   .addOption(new Option("--mode <mode>").choices(["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"]))
+  .addHelpText("after", `
+The output directory must not already exist. A dataset build freezes its mode;
+--mode may only repeat that value. Plaintext copies cannot be recalled by trajpack.`)
   .action((selection: string, options: { format: ExportFormat; output: string; plaintext?: boolean; mode?: "archive" | "training_noncompetitive" | "training_competitive_distillation" | "redistribution" }) => runExport(selection, options));
 
 program.command("delete")
@@ -161,8 +220,10 @@ program.command("delete")
   .action((traceId: string, options: { yes?: boolean }) => runDelete(traceId, Boolean(options.yes)));
 
 program.parseAsync().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeCliErrorMessage(error);
   process.stderr.write(`trajpack: ${message}\n`);
-  if (process.env.TRAJPACK_DEBUG === "1" && error instanceof Error) process.stderr.write(`${error.stack ?? ""}\n`);
+  if (process.env.TRAJPACK_DEBUG === "1") {
+    process.stderr.write(`trajpack-debug: ${safeCliDebugDiagnostic(error)}\n`);
+  }
   process.exitCode = 1;
 });

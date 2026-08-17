@@ -9,13 +9,18 @@
     "deepseekHarnessVersion": "0.1.0-rc.6",
     "sessionFormatVersion": 0
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],
+  "files": ["dist", "README.md", "cordis.patch.yml", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],
   "scripts": {
     "build": "node ../../scripts/clean-dist.mjs dist --with-notices && tsc -p tsconfig.json",
     "clean": "node ../../scripts/clean-dist.mjs dist",

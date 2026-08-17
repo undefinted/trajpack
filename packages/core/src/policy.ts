@@ -16,7 +16,7 @@ import { rawIntegrityReasons } from "./integrity.js";
 import { POLICY_REGISTRY, type PolicyRegistryEntry } from "./policy-registry.js";
 import { scanStructured, scanText } from "./redaction.js";
 
-export const POLICY_VERSION = "policy/2026-08-16.3";
+export const POLICY_VERSION = "policy/2026-08-16.4";
 
 export interface PolicyContext {
   source: Source;
@@ -61,6 +61,9 @@ function evaluatePermissionEvidence(
   const evidence = context.permissionEvidence;
   if (!evidence) return { evidence: null, reasonCodes: ["SCOPED_PERMISSION_REQUIRED"] };
   const reasons: string[] = [];
+  if (!isEvidenceArtifactReference(evidence.evidence_ref)) {
+    reasons.push("SCOPED_PERMISSION_EVIDENCE_REFERENCE_INVALID");
+  }
   if (!evidence.reviewer.trim()) reasons.push("SCOPED_PERMISSION_REVIEWER_MISSING");
   if (context.writtenPermissionRef !== undefined
     && context.writtenPermissionRef !== evidence.evidence_ref) reasons.push("SCOPED_PERMISSION_REFERENCE_MISMATCH");
@@ -287,29 +290,50 @@ function rightsAreTrainingClear(rights: TraceManifest["rights"]): boolean {
   return true;
 }
 
+function isLocallyObservedNativeSource(source: Source): boolean {
+  if (source.authenticity !== "locally_observed") return false;
+  return (source.host === "codex"
+      && (source.capture_method === "official_stream" || source.capture_method === "official_hook"))
+    || (source.host === "claude_code"
+      && (source.capture_method === "official_stream" || source.capture_method === "official_hook"))
+    || (source.host === "deepseek_harness" && source.capture_method === "instrumented_harness");
+}
+
 function isTrustedDeepSeekTrainingPath(source: Source): boolean {
-  return source.provider === "deepseek" && source.model_id !== null && (
-    (source.host === "deepseek_harness"
-      && source.product === "deepseek-harness"
-      && source.surface === "harness"
-      && source.capture_method === "instrumented_harness")
-    || (source.host === "manual_import"
-      && source.product === "deepseek-api-response"
-      && source.surface === "api"
-      && source.capture_method === "manual_copy"
-      && source.interface_version === "deepseek_api_response")
-  );
+  // `locally_observed` is only an assertion about this capture process tree. It
+  // is not a provider signature. Offline JSON and user-authored receipt strings
+  // therefore never enter the provider-default training path.
+  return source.provider === "deepseek"
+    && source.model_id !== null
+    && source.host === "deepseek_harness"
+    && source.product === "deepseek-harness"
+    && source.surface === "harness"
+    && source.capture_method === "instrumented_harness"
+    && /^native-request-header:sha256:[a-f0-9]{64}$/u.test(source.authenticity_evidence_ref ?? "")
+    && isLocallyObservedNativeSource(source);
 }
 
 function isTrustedSelfHostedPath(source: Source): boolean {
+  const digest = source.model_snapshot_or_weights_digest;
   return source.provider === "self_hosted"
     && source.host === "deepseek_harness"
     && source.product === "deepseek-harness"
     && source.surface === "harness"
     && source.capture_method === "instrumented_harness"
     && source.model_id !== null
-    && source.model_snapshot_or_weights_digest !== null
-    && /^sha256:[a-f0-9]{64}$/.test(source.model_snapshot_or_weights_digest);
+    && digest !== null
+    && /^sha256:[a-f0-9]{64}$/.test(digest)
+    && isLocallyObservedNativeSource(source)
+    && source.authenticity_evidence_ref === `local-model-artifact:${digest}`;
+}
+
+function sourceAuthenticitySupportsDefaultTraining(source: Source): boolean {
+  // Legal permission and teacher authenticity are independent. v1 has one
+  // provider-backed native path whose request/model can be correlated to a
+  // durable event: the pinned DeepSeek Harness request/header surface. Other
+  // hosts (and self-hosted weights) need a trace-scoped manual provenance
+  // decision even when a contract permits the intended training use.
+  return isTrustedDeepSeekTrainingPath(source);
 }
 
 function registryEntry(provider: Source["provider"], accountType: TraceManifest["account_contract"]["account_type"]): PolicyRegistryEntry | undefined {
@@ -405,8 +429,8 @@ export function evaluateDefaultEligibility(context: PolicyContext): Eligibility 
     noncompetitive = makeDecision("training_noncompetitive", "allow", ["DEEPSEEK_OUTPUT_TRAINING_ALLOWED"], context, ["sft", "evaluation"]);
     competitive = makeDecision("training_competitive_distillation", "allow", ["DEEPSEEK_DISTILLATION_ALLOWED"], context, ["sft", "distillation"]);
   } else if (isTrustedSelfHostedPath(context.source) && context.accountType === "self_hosted") {
-    noncompetitive = makeDecision("training_noncompetitive", "allow", ["SELF_HOSTED_LICENSE_CHAIN_RECORDED"], context, ["sft", "evaluation"]);
-    competitive = makeDecision("training_competitive_distillation", "allow", ["SELF_HOSTED_LICENSE_CHAIN_RECORDED"], context, ["sft", "distillation"]);
+    noncompetitive = makeDecision("training_noncompetitive", "unknown", ["SELF_HOSTED_RUNTIME_BINDING_REQUIRED"], context, ["sft", "evaluation"]);
+    competitive = makeDecision("training_competitive_distillation", "unknown", ["SELF_HOSTED_RUNTIME_BINDING_REQUIRED"], context, ["sft", "distillation"]);
   } else if (context.source.provider === "openai") {
     noncompetitive = makeDecision("training_noncompetitive", "unknown", ["OPENAI_PERMITTED_EXCEPTION_NOT_ESTABLISHED"], context, ["sft", "evaluation"]);
     competitive = makeDecision("training_competitive_distillation", "deny", ["OPENAI_COMPETITIVE_MODEL_TRAINING"], context, ["sft", "distillation"]);
@@ -425,7 +449,7 @@ export function evaluateDefaultEligibility(context: PolicyContext): Eligibility 
   if (context.consentActive) {
     const now = context.now ?? new Date();
     const noncompetitivePermission = evaluatePermissionEvidence(context, "training_noncompetitive", now).evidence;
-    if (noncompetitivePermission) {
+    if (noncompetitivePermission && sourceAuthenticitySupportsDefaultTraining(context.source)) {
       noncompetitive = makeDecision(
         "training_noncompetitive",
         "allow",
@@ -440,7 +464,7 @@ export function evaluateDefaultEligibility(context: PolicyContext): Eligibility 
       "training_competitive_distillation",
       now,
     ).evidence;
-    if (competitivePermission) {
+    if (competitivePermission && sourceAuthenticitySupportsDefaultTraining(context.source)) {
       competitive = makeDecision(
         "training_competitive_distillation",
         "allow",
@@ -538,8 +562,19 @@ function termsPinnedToRegistry(manifest: TraceManifest): boolean {
     && accepted.has(term.snapshot_sha256.toLowerCase()));
 }
 
+const EVIDENCE_ARTIFACT_REFERENCE_PATTERN = /^([a-z][a-z0-9]*(?:[._-][a-z0-9]+)*):sha256:[a-f0-9]{64}$/;
+const MAX_EVIDENCE_ARTIFACT_KIND_LENGTH = 64;
+
+export function isEvidenceArtifactReference(value: string | null): boolean {
+  if (value === null) return false;
+  const match = EVIDENCE_ARTIFACT_REFERENCE_PATTERN.exec(value);
+  return match !== null && match[1]!.length <= MAX_EVIDENCE_ARTIFACT_KIND_LENGTH;
+}
+
 function scopedManualDecision(decision: EligibilityDecision): boolean {
-  return decision.basis.startsWith("manual-override:") && Boolean(decision.reviewer && decision.evidence_ref);
+  return decision.basis.startsWith("manual-override:")
+    && Boolean(decision.reviewer?.trim())
+    && isEvidenceArtifactReference(decision.evidence_ref);
 }
 
 function manifestPrivacyAllowlisted(path: string): boolean {
@@ -669,6 +704,13 @@ export function evaluateGate(
       reasons.push("SCOPED_PERMISSION_DECISION_MISMATCH");
     }
   }
+  if (currentModeDecision.basis.startsWith("manual-override:")) {
+    if (!currentModeDecision.reviewer?.trim() || !currentModeDecision.evidence_ref) {
+      reasons.push("OVERRIDE_EVIDENCE_INCOMPLETE");
+    } else if (!isEvidenceArtifactReference(currentModeDecision.evidence_ref)) {
+      reasons.push("OVERRIDE_EVIDENCE_REFERENCE_INVALID");
+    }
+  }
   if (bundle.manifest.source.capture_method === "authorized_dom" && !authorizedSite) {
     reasons.push("SITE_AUTHORIZATION_REQUIRED");
   }
@@ -690,15 +732,32 @@ export function evaluateGate(
     const decision = bundle.manifest.eligibility[mode];
     if (!decision.target_model_owner || !decision.target_product) reasons.push("TRAINING_TARGET_UNKNOWN");
     if (decision.competitive_with_source === "unknown") reasons.push("COMPETITIVENESS_UNKNOWN");
-    if (decision.basis.startsWith("manual-override:") && (!decision.reviewer || !decision.evidence_ref)) {
-      reasons.push("OVERRIDE_EVIDENCE_INCOMPLETE");
+    if (mode === "training_noncompetitive" && decision.competitive_with_source !== "no") {
+      reasons.push("NONCOMPETITIVE_DECISION_REQUIRED");
+    }
+    if (mode === "training_competitive_distillation" && decision.competitive_with_source !== "yes") {
+      reasons.push("COMPETITIVE_DECISION_REQUIRED");
     }
     if (!scopedManualDecision(decision) && !scopedPermission && !termsPinnedToRegistry(bundle.manifest)) {
       reasons.push("TERMS_SNAPSHOT_UNPINNED");
     }
     if (!bundle.manifest.source.model_id) reasons.push("TEACHER_MODEL_UNKNOWN");
-    if (bundle.manifest.source.provider === "self_hosted" && !isTrustedSelfHostedPath(bundle.manifest.source)) {
-      reasons.push("SELF_HOSTED_PROVENANCE_UNVERIFIED");
+    if (!scopedManualDecision(decision)) {
+      if (bundle.manifest.source.authenticity === "request_receipt_verified"
+        || bundle.manifest.source.authenticity === "cryptographically_verified") {
+        // v1 has no trusted receipt/signature verifier. A schema-valid enum and
+        // an arbitrary evidence reference are metadata, not verification.
+        reasons.push("SOURCE_AUTHENTICITY_VERIFIER_UNAVAILABLE");
+      } else if (bundle.manifest.source.provider !== "self_hosted"
+        && !sourceAuthenticitySupportsDefaultTraining(bundle.manifest.source)
+        && !(bundle.manifest.source.authenticity === "user_authorized_observation" && authorizedSite)) {
+        reasons.push("TEACHER_SOURCE_AUTHENTICITY_UNVERIFIED");
+      }
+    }
+    if (bundle.manifest.source.provider === "self_hosted" && !scopedManualDecision(decision)) {
+      reasons.push(isTrustedSelfHostedPath(bundle.manifest.source)
+        ? "SELF_HOSTED_RUNTIME_BINDING_REQUIRED"
+        : "SELF_HOSTED_PROVENANCE_UNVERIFIED");
     }
   }
   if (mode === "automatic_capture" && !authorizedSite

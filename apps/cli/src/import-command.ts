@@ -54,7 +54,17 @@ async function importTrajpackVault(path: string, options: ImportCommandOptions):
       throw new Error(`Encrypted trajpack source ${label} is immutable; requested ${requested}, recorded ${String(recorded)}`);
     }
   }
-  const source = { ...imported.manifest.source };
+  // A vault passphrase authenticates encryption frames, not the producer's
+  // identity or its manifest assertions. Preserve descriptive provenance while
+  // deliberately removing any source-authenticity claim on this new trust
+  // boundary. The original encrypted vault remains the lineage parent.
+  const source = {
+    ...imported.manifest.source,
+    authenticity: imported.manifest.source.authenticity === "unknown"
+      ? "unknown" as const
+      : "user_supplied" as const,
+    authenticity_evidence_ref: null,
+  };
   const accountType = imported.manifest.account_contract.account_type;
   const rights = {
     source_license_expression: resolved.rights.source_license_expression === "NOASSERTION"
@@ -71,11 +81,12 @@ async function importTrajpackVault(path: string, options: ImportCommandOptions):
       : resolved.rights.third_party_content,
     rights_holder: options.rightsHolder ?? imported.manifest.rights.rights_holder,
   };
-  const permissionEvidence = resolved.permissionEvidence
-    ?? imported.manifest.account_contract.scoped_permission;
+  // Unsigned permission assertions inside an imported vault are equally
+  // untrusted. They must be supplied again through this import invocation so
+  // their exact provider/account/capture/target scope is revalidated.
+  const permissionEvidence = resolved.permissionEvidence;
   const writtenPermissionRef = options.writtenPermission
-    ?? resolved.permissionEvidence?.evidence_ref
-    ?? imported.manifest.account_contract.order_form_or_written_permission_ref;
+    ?? resolved.permissionEvidence?.evidence_ref;
   const manifest = createManifest({
     source,
     accountType,
@@ -84,7 +95,7 @@ async function importTrajpackVault(path: string, options: ImportCommandOptions):
     consentPurposes: [...new Set(["archive", "research", "import", ...(options.consentPurpose ?? [])])],
     terms: resolved.terms.length ? resolved.terms : imported.manifest.account_contract.terms,
     ...(permissionEvidence === undefined ? {} : { permissionEvidence }),
-    ...(writtenPermissionRef === null ? {} : { writtenPermissionRef }),
+    ...(writtenPermissionRef === undefined ? {} : { writtenPermissionRef }),
     ...(options.targetModelOwner === undefined ? {} : { targetModelOwner: options.targetModelOwner }),
     ...(options.targetProduct === undefined ? {} : { targetProduct: options.targetProduct }),
     ...(options.competitive === undefined ? {} : { competitive: options.competitive }),
@@ -100,7 +111,7 @@ async function importTrajpackVault(path: string, options: ImportCommandOptions):
   try {
     for (const envelope of imported.raw) await session.ingest(envelope);
     const bundle = await session.finalize();
-    process.stderr.write(`trajpack: re-normalized encrypted vault as trace ${bundle.manifest.trace_id}; human review reset to pending\n`);
+    process.stderr.write(`trajpack: re-normalized encrypted vault as trace ${bundle.manifest.trace_id}; source authenticity downgraded and human review reset to pending\n`);
     return bundle.manifest.trace_id;
   } catch (error) {
     await session.abort();
@@ -132,6 +143,9 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     ? "openai"
     : imported.detectedFormat === "claude_official_json"
       ? "anthropic"
+      : imported.detectedFormat === "gemini_takeout_activity_json"
+          || imported.detectedFormat === "gemini_takeout_activity_html"
+        ? "google"
       : imported.detectedFormat === "deepseek_api_response"
         ? "deepseek"
         : null;
@@ -146,6 +160,10 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     resolved.source.provider = "openai";
   } else if (resolved.source.provider === "unknown" && imported.detectedFormat === "claude_official_json") {
     resolved.source.provider = "anthropic";
+  } else if (resolved.source.provider === "unknown"
+    && (imported.detectedFormat === "gemini_takeout_activity_json"
+      || imported.detectedFormat === "gemini_takeout_activity_html")) {
+    resolved.source.provider = "google";
   } else if (
     resolved.source.provider === "unknown" &&
     imported.detectedFormat === "deepseek_api_response"
@@ -171,6 +189,12 @@ export async function runImport(input: string, options: ImportCommandOptions): P
     resolved.source.capture_method = "manual_copy";
     resolved.source.fidelity = "B";
     resolved.source.model_id = models[0]!;
+  } else if (imported.detectedFormat === "generic_json"
+    || imported.detectedFormat === "generic_jsonl"
+    || imported.detectedFormat === "generic_html") {
+    resolved.source.product = `manual-archive:${imported.detectedFormat}`;
+    resolved.source.capture_method = "manual_copy";
+    resolved.source.fidelity = "C";
   } else {
     resolved.source.product = `official-export:${imported.detectedFormat}`;
   }

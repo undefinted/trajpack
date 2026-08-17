@@ -8,6 +8,7 @@ export type DecisionStatus = z.infer<typeof decisionStatusSchema>;
 export const hostSchema = z.enum([
   "codex",
   "claude_code",
+  "gemini_cli",
   "deepseek_harness",
   "browser",
   "manual_import",
@@ -17,6 +18,7 @@ export type Host = z.infer<typeof hostSchema>;
 export const providerSchema = z.enum([
   "openai",
   "anthropic",
+  "google",
   "deepseek",
   "self_hosted",
   "other",
@@ -54,6 +56,24 @@ export const sourceSchema = z.object({
   model_snapshot_or_weights_digest: z.string().min(1).nullable().default(null),
   origin: z.string().min(1).nullable().default(null),
   fidelity: z.enum(["A", "B", "C"]),
+  authenticity: z.enum([
+    "cryptographically_verified",
+    "request_receipt_verified",
+    "locally_observed",
+    "user_supplied",
+    "user_authorized_observation",
+    "unknown",
+  ]).default("unknown"),
+  authenticity_evidence_ref: z.string().trim().min(1).nullable().default(null),
+}).superRefine((source, context) => {
+  if ((source.authenticity === "cryptographically_verified" || source.authenticity === "request_receipt_verified")
+    && source.authenticity_evidence_ref === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authenticity_evidence_ref"],
+      message: "Verified source authenticity requires a concrete evidence reference",
+    });
+  }
 });
 export type Source = z.infer<typeof sourceSchema>;
 
@@ -414,11 +434,274 @@ export const datasetExampleSchema = z.object({
   messages: z.array(z.record(z.string(), z.unknown())),
   tools: z.array(z.record(z.string(), z.unknown())).default([]),
   assistant_loss_mask: z.array(z.boolean()),
+  training_targets: z.array(z.object({
+    message_index: z.number().int().nonnegative(),
+    components: z.array(z.enum([
+      "answer_text",
+      "reasoning",
+      "tool_name",
+      "tool_arguments",
+      "plan",
+    ])).min(1),
+    loss_weight: z.number().positive().finite().default(1),
+    source_event_ids: z.array(z.string().min(1)).min(1),
+  })).default([]),
   reward: z.number().nullable().default(null),
   verifier: z.object({ name: z.string(), version: z.string() }).nullable().default(null),
   metadata: z.record(z.string(), z.unknown()).default({}),
+}).superRefine((example, context) => {
+  if (example.messages.length !== example.assistant_loss_mask.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["assistant_loss_mask"],
+      message: "Assistant loss mask must align one-to-one with messages",
+    });
+  }
+  const allowedRoles = new Set(["system", "developer", "user", "assistant", "tool"]);
+  const observedToolCalls = new Set<string>();
+  for (const [index, message] of example.messages.entries()) {
+    if (typeof message.role !== "string" || !allowedRoles.has(message.role)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["messages", index, "role"],
+        message: "Dataset messages require a recognized conversational role",
+      });
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (const [callIndex, call] of message.tool_calls.entries()) {
+        const id = call && typeof call === "object" && !Array.isArray(call)
+          ? (call as Record<string, unknown>).id
+          : undefined;
+        if (message.role !== "assistant" || typeof id !== "string" || id.length === 0 || observedToolCalls.has(id)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["messages", index, "tool_calls", callIndex],
+            message: "Tool calls require a unique id on an assistant message",
+          });
+        } else observedToolCalls.add(id);
+      }
+    }
+    if (message.role === "tool") {
+      if (typeof message.tool_call_id !== "string" || !observedToolCalls.has(message.tool_call_id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["messages", index, "tool_call_id"],
+          message: "Tool results must reference a preceding assistant tool call",
+        });
+      }
+    }
+  }
+  example.assistant_loss_mask.forEach((enabled, index) => {
+    if (enabled && example.messages[index]?.role !== "assistant") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assistant_loss_mask", index],
+        message: "Only assistant messages may be loss targets",
+      });
+    }
+  });
+  for (const [index, target] of example.training_targets.entries()) {
+    if (target.message_index >= example.messages.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["training_targets", index, "message_index"],
+        message: "Training target points beyond the message array",
+      });
+    }
+    if (example.messages[target.message_index]?.role !== "assistant"
+      || example.assistant_loss_mask[target.message_index] !== true) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["training_targets", index, "message_index"],
+        message: "Training targets must point to an enabled assistant loss message",
+      });
+    }
+  }
+  if ((example.reward === null) !== (example.verifier === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reward"],
+      message: "Reward and verifier provenance must be present together",
+    });
+  }
 });
 export type DatasetExample = z.infer<typeof datasetExampleSchema>;
+
+export const DATASET_BUILD_VERSION = "dataset-build/0.1" as const;
+export const DATASET_MANIFEST_VERSION = "dataset/0.1" as const;
+export const DATASET_VIEW_COMPILER_VERSION = "trace-full-view/0.2" as const;
+export const DATASET_QUALITY_COMPILER_VERSION = "trajectory-quality/0.1" as const;
+/**
+ * Freezes both exact canonical-view hashing and the privacy-preserving
+ * token/code/tool shingle/Jaccard near-duplicate pass. A change to normalization,
+ * shingling, thresholds, or resource limits requires a new compiler version.
+ */
+export const DATASET_DEDUPE_COMPILER_VERSION = "canonical-training-view+shingle-jaccard/0.3" as const;
+
+export const datasetCompilerVersionsSchema = z.object({
+  view: z.literal(DATASET_VIEW_COMPILER_VERSION),
+  quality: z.literal(DATASET_QUALITY_COMPILER_VERSION),
+  dedupe: z.literal(DATASET_DEDUPE_COMPILER_VERSION),
+}).strict();
+export type DatasetCompilerVersions = z.infer<typeof datasetCompilerVersionsSchema>;
+
+export const datasetSplitSchema = z.enum(["train", "validation", "test"]);
+export type DatasetSplit = z.infer<typeof datasetSplitSchema>;
+
+export const datasetTargetSchema = z.object({
+  model_owner: z.string().trim().min(1),
+  product: z.string().trim().min(1),
+}).strict();
+export type DatasetTarget = z.infer<typeof datasetTargetSchema>;
+
+export const datasetSplitPolicySchema = z.object({
+  algorithm: z.literal("sha256-group-threshold-v1"),
+  seed: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u),
+  ratios_bp: z.object({
+    train: z.number().int().min(0).max(10_000),
+    validation: z.number().int().min(0).max(10_000),
+    test: z.number().int().min(0).max(10_000),
+  }).strict(),
+}).strict().superRefine((policy, context) => {
+  if (policy.ratios_bp.train + policy.ratios_bp.validation + policy.ratios_bp.test !== 10_000) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ratios_bp"],
+      message: "Dataset split ratios must total 10000 basis points",
+    });
+  }
+});
+export type DatasetSplitPolicy = z.infer<typeof datasetSplitPolicySchema>;
+
+export const datasetBuildSchema = z.object({
+  record_type: z.literal("dataset_build"),
+  schema_version: z.literal(DATASET_BUILD_VERSION),
+  name: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u),
+  policy_version: z.string().min(1),
+  mode: approvalModeSchema,
+  target: datasetTargetSchema.nullable(),
+  // v0.1 intentionally exposes only the topology-preserving full trace view.
+  // Additional recipes need their own versioned compiler and golden fixtures.
+  view_recipe: z.literal("trace_full").default("trace_full"),
+  quality_profile: z.enum(["sft_basic", "tool_agent_strict", "research_strict"]).default("research_strict"),
+  compiler_versions: datasetCompilerVersionsSchema,
+  split_policy: datasetSplitPolicySchema,
+  traces: z.array(z.object({
+    trace_id: z.string().regex(/^[a-f0-9]{32}$/u),
+    split_group_id: z.string().regex(/^[a-f0-9]{64}$/u),
+    group_basis: z.enum(["explicit_hmac", "trace_fallback"]),
+    source_bundle_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    approval_scope_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    eligibility_decision_id: z.string().min(1),
+  }).strict()).min(1).max(10_000),
+}).strict().superRefine((build, context) => {
+  const training = build.mode === "training_noncompetitive" || build.mode === "training_competitive_distillation";
+  if (training !== (build.target !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target"],
+      message: training ? "Training dataset builds require an exact target" : "Archive and redistribution builds cannot declare a training target",
+    });
+  }
+  const traceIds = new Set<string>();
+  for (const [index, trace] of build.traces.entries()) {
+    if (traceIds.has(trace.trace_id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["traces", index, "trace_id"],
+        message: "A dataset build cannot contain a trace more than once",
+      });
+    }
+    traceIds.add(trace.trace_id);
+  }
+});
+export type DatasetBuild = z.infer<typeof datasetBuildSchema>;
+
+export const datasetManifestEntrySchema = z.object({
+  trace_id: z.string().regex(/^[a-f0-9]{32}$/u),
+  split: datasetSplitSchema,
+  split_group_id: z.string().regex(/^[a-f0-9]{64}$/u),
+  source_bundle_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  approval_scope_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  eligibility_decision_id: z.string().min(1),
+  selected_bundle_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  example_ids: z.array(z.string().min(1)),
+}).strict();
+export type DatasetManifestEntry = z.infer<typeof datasetManifestEntrySchema>;
+
+export const datasetArtifactPathSchema = z.string().min(1).superRefine((path, context) => {
+  const components = path.split("/");
+  if (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:/u.test(path)
+    || path.includes("\\") || /[\u0000-\u001f\u007f]/u.test(path)
+    || components.some((component) => component === "" || component === "." || component === "..")) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Dataset artifact paths must be normalized safe POSIX-relative paths",
+    });
+  }
+});
+
+export const datasetManifestSchema = z.object({
+  record_type: z.literal("dataset_manifest"),
+  schema_version: z.literal(DATASET_MANIFEST_VERSION),
+  dataset_id: z.string().regex(/^[a-f0-9]{64}$/u),
+  name: z.string().min(1),
+  created_at: z.string().datetime(),
+  format: z.enum(["canonical", "atif", "hf-trl", "otlp"]),
+  mapping_version: z.string().min(1),
+  mode: approvalModeSchema,
+  target: datasetTargetSchema.nullable(),
+  policy_version: z.string().min(1),
+  view_recipe: z.literal("trace_full"),
+  quality_profile: z.enum(["sft_basic", "tool_agent_strict", "research_strict"]),
+  compiler_versions: datasetCompilerVersionsSchema,
+  split_policy: datasetSplitPolicySchema,
+  entries: z.array(datasetManifestEntrySchema).min(1),
+  splits: z.record(datasetSplitSchema, z.object({
+    traces: z.number().int().nonnegative(),
+    examples: z.number().int().nonnegative(),
+  }).strict()),
+  artifacts: z.array(z.object({
+    path: datasetArtifactPathSchema,
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    bytes: z.number().int().nonnegative(),
+  }).strict()).default([]),
+}).strict().superRefine((manifest, context) => {
+  const traceIds = new Set<string>();
+  const exampleIds = new Set<string>();
+  for (const [entryIndex, entry] of manifest.entries.entries()) {
+    if (traceIds.has(entry.trace_id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["entries", entryIndex, "trace_id"],
+        message: "Dataset manifest trace ids must be unique",
+      });
+    }
+    traceIds.add(entry.trace_id);
+    for (const [exampleIndex, exampleId] of entry.example_ids.entries()) {
+      if (exampleIds.has(exampleId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["entries", entryIndex, "example_ids", exampleIndex],
+          message: "Dataset manifest example ids must be globally unique",
+        });
+      }
+      exampleIds.add(exampleId);
+    }
+  }
+  const artifactPaths = new Set<string>();
+  for (const [index, artifact] of manifest.artifacts.entries()) {
+    if (artifactPaths.has(artifact.path)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["artifacts", index, "path"],
+        message: "Dataset manifest artifact paths must be unique",
+      });
+    }
+    artifactPaths.add(artifact.path);
+  }
+});
+export type DatasetManifest = z.infer<typeof datasetManifestSchema>;
 
 export function assertTraceBundle(input: unknown): TraceBundle {
   return traceBundleSchema.parse(input);

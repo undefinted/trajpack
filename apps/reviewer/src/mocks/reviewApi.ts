@@ -120,6 +120,8 @@ const deepseekManifest: TraceManifest = {
     model_snapshot_or_weights_digest: null,
     origin: "local://deepseek-harness",
     fidelity: "A",
+    authenticity: "locally_observed",
+    authenticity_evidence_ref: null,
   },
   rights: ownedRights,
   eligibility: {
@@ -159,6 +161,8 @@ const claudeManifest: TraceManifest = {
     model_snapshot_or_weights_digest: null,
     origin: "local://claude-code",
     fidelity: "A",
+    authenticity: "locally_observed",
+    authenticity_evidence_ref: null,
   },
   rights: {
     ...ownedRights,

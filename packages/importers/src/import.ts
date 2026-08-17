@@ -40,7 +40,9 @@ function inferSessionId(record: unknown): string | null {
 
 function importedRecord(record: unknown, provenance: ImportProvenance): ImportedPayload {
   if (
-    (provenance.detected_format === "generic_html" || provenance.detected_format === "chatgpt_official_html") &&
+    (provenance.detected_format === "generic_html"
+      || provenance.detected_format === "chatgpt_official_html"
+      || provenance.detected_format === "gemini_takeout_activity_html") &&
     typeof record === "string"
   ) {
     return {
@@ -74,6 +76,8 @@ function importInput(
     ? "chatgpt"
     : detection.format === "claude_official_json"
       ? "claude"
+      : detection.format === "gemini_takeout_activity_json" || detection.format === "gemini_takeout_activity_html"
+        ? "gemini"
       : detection.format === "deepseek_api_response"
         ? "deepseek_api"
         : "generic";
@@ -111,9 +115,16 @@ function importInput(
     };
   });
 
-  const warnings = detection.format === "generic_html" || detection.format === "chatgpt_official_html"
-    ? ["HTML was stored as untrusted raw text and was never rendered; its preview is not proof of DOM visibility."]
-    : [];
+  const warnings = [
+    ...(detection.format === "generic_html"
+      || detection.format === "chatgpt_official_html"
+      || detection.format === "gemini_takeout_activity_html"
+      ? ["HTML was stored as untrusted raw text and was never rendered; its preview is not proof of DOM visibility."]
+      : []),
+    ...(detection.format === "gemini_takeout_activity_json" || detection.format === "gemini_takeout_activity_html"
+      ? ["Google Takeout Gemini Apps data is an activity log; it may be flat, localized, incomplete, and insufficient to reconstruct full multi-turn conversations."]
+      : []),
+  ];
 
   return { detection, provenance, envelopes, warnings };
 }

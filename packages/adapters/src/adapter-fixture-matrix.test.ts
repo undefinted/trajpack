@@ -167,21 +167,25 @@ describe("versioned native adapter acceptance fixtures", () => {
       .toMatchObject({
         representation: "provider_exposed_reasoning",
         provider_claim: "chain_of_thought",
-        source_field: "reasoning_content",
+        source_field: "chunk.reasoning-delta",
         visibility: "api_only",
       });
     expect(normalized.events.some((event) => event.event_type === "message" && event.status === "partial")).toBe(true);
     expect(normalized.events.some((event) => event.metadata.retry === true)).toBe(true);
     expect(normalized.events.find((event) => event.event_type === "approval.decision"))
-      .toMatchObject({ status: "cancelled", metadata: { approval_decision: "deny" } });
+      .toMatchObject({ status: "cancelled", metadata: { approval_decision: "rejected" } });
     expect(normalized.events.filter((event) => event.event_type === "compaction")).toHaveLength(2);
     expect(normalized.events.some((event) => event.status === "cancelled")).toBe(true);
 
     const invoke = normalized.events.find((event) =>
       event.event_type === "agent.invoke" && event.source_step_id === "dsh-child"
     );
-    const handoff = normalized.events.find((event) => event.event_type === "handoff");
     expect(invoke).toBeDefined();
-    expect(handoff?.source_step_id).toBe(invoke?.source_step_id);
+    expect(invoke?.metadata).toMatchObject({
+      parent_session_id: "dsh-matrix-session",
+      descriptor_version: 2,
+      subagent_mode: "continuable",
+    });
+    expect(normalized.events.some((event) => event.event_type === "handoff")).toBe(false);
   });
 });

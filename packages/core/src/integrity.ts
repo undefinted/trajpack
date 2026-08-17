@@ -4,12 +4,15 @@ import { canonicalJson, sha256 } from "./canonical.js";
 const PINNED_INTERFACES: Readonly<Record<Host, ReadonlySet<string>>> = {
   codex: new Set(["codex-exec-jsonl/1", "codex-hook/1", "codex-app-server-v2-jsonrpc/1"]),
   claude_code: new Set(["claude-stream-json/1", "claude-hook/1", "claude-transcript-opaque/1"]),
+  gemini_cli: new Set(["gemini-cli-hook/1"]),
   deepseek_harness: new Set(["deepseek-harness@0.1.0-rc.6/session-event/0"]),
   browser: new Set(["authorized-dom/0.1"]),
   manual_import: new Set([
     "chatgpt_official_json",
     "chatgpt_official_html",
     "claude_official_json",
+    "gemini_takeout_activity_json",
+    "gemini_takeout_activity_html",
     "deepseek_api_response",
     "generic_json",
     "generic_jsonl",

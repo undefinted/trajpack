@@ -20,6 +20,10 @@
     "./deepseek": {
       "types": "./dist/deepseek.d.ts",
       "import": "./dist/deepseek.js"
+    },
+    "./gemini": {
+      "types": "./dist/gemini.d.ts",
+      "import": "./dist/gemini.js"
     }
   },
   "files": ["dist", "!dist/**/*.map", "!dist/**/*.test.*", "!dist/**/*.spec.*"],

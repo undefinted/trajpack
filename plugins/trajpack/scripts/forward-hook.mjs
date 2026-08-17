@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 
 const HOST = "codex";
-const MAX_INPUT_BYTES = 16 * 1024 * 1024;
+const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 
 function loopbackUrl(value) {
   try {

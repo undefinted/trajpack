@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { Host } from "@trajpack/schema";
 import {
   canonicalJson,
@@ -13,21 +15,31 @@ import {
   sha256,
 } from "@trajpack/core";
 import { classifyJsonLine, DEEPSEEK_HARNESS_INTERFACE_VERSION } from "@trajpack/adapters";
-import { CaptureSession } from "./capture-session.js";
-import { startIngestServer } from "./ingest-server.js";
+import { CaptureLimitError, CaptureSession } from "./capture-session.js";
+import {
+  DEFAULT_MAX_CAPTURE_EVENTS,
+  DEFAULT_MAX_CAPTURE_RAW_BYTES,
+  MAX_CONFIGURABLE_CAPTURE_EVENTS,
+  MAX_CONFIGURABLE_CAPTURE_RAW_BYTES,
+  startIngestServer,
+} from "./ingest-server.js";
 import { readPassphrase } from "./secret.js";
 import { resolveSourceOptions, type SourceCliOptions } from "./source-options.js";
 
 const HOSTS: Record<string, Host> = {
   codex: "codex",
   claude: "claude_code",
+  gemini: "gemini_cli",
   dsh: "deepseek_harness",
 };
 
-const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", dsh: "dsh" };
+const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", gemini: "gemini", dsh: "dsh" };
 
 export interface CaptureCommandOptions extends SourceCliOptions {
   cwd?: string;
+  maxEvents?: string | number;
+  maxRawBytes?: string | number;
+  drainMs?: string | number;
 }
 
 export interface CollectorChildEnvironment {
@@ -112,22 +124,85 @@ export function authoritativeCaptureArguments(host: Host, supplied: string[]): s
   return args;
 }
 
-function splitLines(onLine: (line: string) => void): { push(chunk: Buffer): void; flush(): void } {
+export function splitUtf8Lines(
+  onLine: (line: string) => void,
+  limits: { maxLineBytes: number; maxTotalBytes: number },
+  onViolation: (reason: string) => void,
+): { push(chunk: Buffer): void; flush(): void } {
+  const decoder = new StringDecoder("utf8");
   let pending = "";
-  const drain = () => {
-    if (pending.trim()) onLine(pending.replace(/\r$/, ""));
+  let totalBytes = 0;
+  let violated = false;
+  const violate = (reason: string) => {
+    if (violated) return;
+    violated = true;
     pending = "";
+    onViolation(reason);
   };
-  return { push: (chunk: Buffer) => {
-    pending += chunk.toString("utf8");
+  const consume = (text: string) => {
+    if (violated) return;
+    pending += text;
     for (;;) {
       const newline = pending.indexOf("\n");
       if (newline < 0) break;
-      const line = pending.slice(0, newline).replace(/\r$/, "");
+      const encodedLine = pending.slice(0, newline);
       pending = pending.slice(newline + 1);
+      if (Buffer.byteLength(encodedLine, "utf8") > limits.maxLineBytes) {
+        violate("CAPTURE_STDOUT_LINE_LIMIT_EXCEEDED");
+        return;
+      }
+      const line = encodedLine.replace(/\r$/, "");
       if (line.trim()) onLine(line);
     }
-  }, flush: drain };
+    if (Buffer.byteLength(pending, "utf8") > limits.maxLineBytes) {
+      violate("CAPTURE_STDOUT_LINE_LIMIT_EXCEEDED");
+    }
+  };
+  return { push: (chunk: Buffer) => {
+    if (violated) return;
+    totalBytes += chunk.byteLength;
+    if (totalBytes > limits.maxTotalBytes) {
+      violate("CAPTURE_STDOUT_BYTE_LIMIT_EXCEEDED");
+      return;
+    }
+    consume(decoder.write(chunk));
+  }, flush: () => {
+    if (violated) return;
+    consume(decoder.end());
+    if (!violated && pending.trim()) onLine(pending.replace(/\r$/, ""));
+    pending = "";
+  } };
+}
+
+export async function consumeUtf8StreamWithBackpressure(
+  source: AsyncIterable<Buffer | string>,
+  splitter: { push(chunk: Buffer): void; flush(): void },
+  waitForIngest: () => Promise<unknown>,
+): Promise<void> {
+  for await (const chunk of source) {
+    splitter.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
+    // Do not request the next pipe chunk until every complete line from this
+    // chunk is durably appended to the encrypted temporary vault.
+    await waitForIngest();
+  }
+  splitter.flush();
+  await waitForIngest();
+}
+
+function captureLimit(value: string | number | undefined, fallback: number, maximum: number, label: string): number {
+  const parsed = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${label} must be an integer from 1 to ${maximum}`);
+  }
+  return parsed;
+}
+
+function captureDrainMs(value: string | number | undefined): number {
+  const parsed = value === undefined ? 500 : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 5_000) {
+    throw new Error("--drain-ms must be an integer from 0 to 5000");
+  }
+  return parsed;
 }
 
 async function writeArmDescriptor(path: string, contents: string): Promise<void> {
@@ -161,10 +236,25 @@ async function ensurePrivateRuntimeDirectory(path: string): Promise<void> {
   }
 }
 
+export function armRuntimeDirectory(host: Host): string {
+  // Gemini's extension sandbox documents HOME as a safe inherited variable,
+  // but may filter LOCALAPPDATA/XDG_RUNTIME_DIR. A home-relative capability
+  // path keeps the wrapper and extension aligned without persistent settings.
+  return host === "gemini_cli"
+    ? join(homedir(), ".trajpack", "runtime")
+    : defaultPaths().runtime;
+}
+
 export async function runCapture(hostName: string, words: string[], options: CaptureCommandOptions): Promise<number> {
   const host = HOSTS[hostName];
   if (!host) throw new Error(`Unsupported host: ${hostName}`);
   const cwd = resolve(options.cwd ?? process.cwd());
+  const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
+  const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
+  const drainMs = captureDrainMs(options.drainMs);
+  if (maxEvents < 2 || maxRawBytes < 2) {
+    throw new Error("Wrapper capture budgets must be at least 2 so stdout and hook channels each fail closed independently");
+  }
   const executable = words[0] ?? DEFAULT_COMMAND[hostName];
   if (!executable) throw new Error(`No executable is configured for host ${hostName}`);
   const args = authoritativeCaptureArguments(host, words.slice(1));
@@ -190,14 +280,65 @@ export async function runCapture(hostName: string, words: string[], options: Cap
   const preflight = evaluateGate({ manifest, raw: [], events: [] }, "automatic_capture");
   if (!preflight.allowed) throw new Error(`Capture blocked by policy: ${preflight.reasonCodes.join(", ")}`);
   let passphrase = await readPassphrase();
-  const session = await CaptureSession.create(host, manifest, passphrase);
+  const session = await CaptureSession.create(host, manifest, passphrase, undefined, {
+    maxRawEvents: maxEvents,
+    maxRawBytes,
+  });
   passphrase = "";
   const token = randomBytes(32).toString("base64url");
-  const server = await startIngestServer({ host, token, session, expectedCwd: cwd });
+  let child: ChildProcess | undefined;
+  let captureViolation: string | null = null;
+  const violate = (reason: string) => {
+    if (captureViolation !== null) return;
+    captureViolation = reason;
+    child?.kill();
+  };
+  // Wrapper stdout and plugin hooks share the configured capture budget in two
+  // conservative channel allocations so their combined worst case remains
+  // below the encrypted vault read bound.
+  const stdoutMaxEvents = Math.max(1, Math.floor(maxEvents / 2));
+  const hookMaxEvents = Math.max(1, maxEvents - stdoutMaxEvents);
+  const equalHookBytes = Math.max(1, maxRawBytes - Math.floor(maxRawBytes / 2));
+  // A 64 MiB opaque Claude transcript expands to roughly 86 MiB as Base64.
+  // Preserve enough hook budget for that documented artifact while keeping
+  // the aggregate wrapper budget unchanged.
+  const hookMaxBytes = host === "claude_code"
+    ? Math.min(maxRawBytes - 1, Math.max(equalHookBytes, 96 * 1024 * 1024))
+    : equalHookBytes;
+  const stdoutMaxBytes = Math.max(1, maxRawBytes - hookMaxBytes);
+  const server = await startIngestServer({
+    host,
+    token,
+    session,
+    expectedCwd: cwd,
+    maxEvents: hookMaxEvents,
+    maxTotalRawBytes: hookMaxBytes,
+    onLimitExceeded: violate,
+  });
+  // Gemini CLI intentionally sanitizes extension environments. Use the same
+  // private, cwd-bound descriptor as one-shot arm so the extension can obtain
+  // the ephemeral collector capability without a persistent setting or
+  // keychain secret. The descriptor is removed when this wrapper exits.
+  const wrapperDescriptor = host === "gemini_cli"
+    ? join(armRuntimeDirectory(host), `arm-${host}.json`)
+    : null;
+  let wrapperDescriptorWritten = false;
   let rawSequence = 0;
   let ingestQueue: Promise<unknown> = Promise.resolve();
   try {
-    const child = spawn(executable, args, {
+    if (wrapperDescriptor !== null) {
+      await ensurePrivateRuntimeDirectory(armRuntimeDirectory(host));
+      await writeArmDescriptor(wrapperDescriptor, `${canonicalJson({
+        version: 1,
+        host,
+        url: `${server.url}/v1/hooks/events`,
+        token,
+        cwd,
+        expires_at: new Date(Date.now() + 12 * 60 * 60 * 1_000).toISOString(),
+      })}\n`);
+      wrapperDescriptorWritten = true;
+    }
+    const spawned = spawn(executable, args, {
       cwd,
       env: captureChildEnvironment(process.env, {
         url: `${server.url}/v1/hooks/events`,
@@ -208,22 +349,47 @@ export async function runCapture(hostName: string, words: string[], options: Cap
       windowsHide: true,
       shell: false,
     }) as ChildProcess;
-    const parse = splitLines((line) => {
-      const envelope = classifyJsonLine(host, line, rawSequence++);
-      if (envelope) ingestQueue = ingestQueue.then(() => session.ingest(envelope));
-    });
+    child = spawned;
+    const parse = splitUtf8Lines((line) => {
+      const envelope = classifyJsonLine(host, line, rawSequence);
+      if (!envelope) return;
+      if (rawSequence >= stdoutMaxEvents) {
+        violate("CAPTURE_STDOUT_EVENT_LIMIT_EXCEEDED");
+        return;
+      }
+      rawSequence += 1;
+      ingestQueue = ingestQueue
+        .then(() => session.ingest(envelope))
+        .catch((error: unknown) => {
+          if (error instanceof CaptureLimitError) violate(error.reason);
+          throw error;
+        });
+    }, { maxLineBytes: 20 * 1024 * 1024, maxTotalBytes: stdoutMaxBytes }, violate);
     let suppressedStderrBytes = 0;
-    child.stdout?.on("data", (chunk: Buffer) => {
-      parse.push(chunk);
+    const stdoutTask = (spawned.stdout
+      ? consumeUtf8StreamWithBackpressure(spawned.stdout, parse, () => ingestQueue)
+      : Promise.resolve()).catch((error: unknown) => {
+      if (error instanceof CaptureLimitError) violate(error.reason);
+      else violate("CAPTURE_STORAGE_FAILURE");
+      throw error;
     });
-    child.stderr?.on("data", (chunk: Buffer) => { suppressedStderrBytes += chunk.length; });
-    const exitCode = await new Promise<number>((resolveExit, reject) => {
-      child.once("error", reject);
-      child.once("close", (code: number | null, signal: NodeJS.Signals | null) => resolveExit(code ?? (signal ? 1 : 0)));
+    spawned.stderr?.on("data", (chunk: Buffer) => { suppressedStderrBytes += chunk.length; });
+    const exitTask = new Promise<number>((resolveExit, reject) => {
+      spawned.once("error", reject);
+      spawned.once("close", (code: number | null, signal: NodeJS.Signals | null) => resolveExit(code ?? (signal ? 1 : 0)));
     });
-    parse.flush();
-    await ingestQueue;
+    const [exitResult, stdoutResult] = await Promise.allSettled([exitTask, stdoutTask]);
+    if (stdoutResult.status === "rejected") {
+      if (stdoutResult.reason instanceof CaptureLimitError) violate(stdoutResult.reason.reason);
+      else violate("CAPTURE_STORAGE_FAILURE");
+      throw stdoutResult.reason;
+    }
+    if (exitResult.status === "rejected") throw exitResult.reason;
+    const exitCode = exitResult.value;
+    if (drainMs > 0) await new Promise<void>((resolveDrain) => setTimeout(resolveDrain, drainMs));
     await server.close();
+    captureViolation ??= server.limitViolation();
+    if (captureViolation !== null) throw new Error(`Capture aborted by hard limit: ${captureViolation}`);
     const bundle = await session.finalize();
     if (suppressedStderrBytes > 0) {
       process.stderr.write(`trajpack: suppressed ${suppressedStderrBytes} bytes of host stderr to avoid plaintext logging\n`);
@@ -234,6 +400,10 @@ export async function runCapture(hostName: string, words: string[], options: Cap
     await server.close().catch(() => undefined);
     await session.abort();
     throw error;
+  } finally {
+    if (wrapperDescriptorWritten && wrapperDescriptor !== null) {
+      await rm(wrapperDescriptor, { force: true });
+    }
   }
 }
 
@@ -249,13 +419,21 @@ export interface ArmCommandOptions extends SourceCliOptions {
   nextSession?: boolean;
   cwd?: string;
   ttl?: string;
+  maxEvents?: string | number;
+  maxRawBytes?: string | number;
+  drainMs?: string | number;
 }
 
 export async function runArm(hostName: string, options: ArmCommandOptions): Promise<void> {
   if (!options.nextSession) throw new Error("v1 requires --next-session");
   const host = HOSTS[hostName];
-  if (host !== "codex" && host !== "claude_code") throw new Error("arm supports codex or claude");
+  if (host !== "codex" && host !== "claude_code" && host !== "gemini_cli") {
+    throw new Error("arm supports codex, claude, or gemini");
+  }
   const cwd = resolve(options.cwd ?? process.cwd());
+  const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
+  const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
+  const drainMs = captureDrainMs(options.drainMs);
   const resolved = await resolveSourceOptions(host, options);
   resolved.source.capture_method = "official_hook";
   resolved.source.fidelity = "B";
@@ -278,14 +456,17 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
   const preflight = evaluateGate({ manifest, raw: [], events: [] }, "automatic_capture");
   if (!preflight.allowed) throw new Error(`Capture blocked by policy: ${preflight.reasonCodes.join(", ")}`);
   let passphrase = await readPassphrase();
-  const session = await CaptureSession.create(host, manifest, passphrase);
+  const session = await CaptureSession.create(host, manifest, passphrase, undefined, {
+    maxRawEvents: maxEvents,
+    maxRawBytes,
+  });
   passphrase = "";
   const token = randomBytes(32).toString("base64url");
   let ended = false;
   let endCapture!: () => void;
   const finished = new Promise<void>((resolveFinished) => { endCapture = resolveFinished; });
-  const paths = defaultPaths();
-  const descriptor = join(paths.runtime, `arm-${host}.json`);
+  const descriptorRuntime = armRuntimeDirectory(host);
+  const descriptor = join(descriptorRuntime, `arm-${host}.json`);
   const ttl = parseTtl(options.ttl ?? "10m");
   let server: Awaited<ReturnType<typeof startIngestServer>> | undefined;
   let descriptorWritten = false;
@@ -299,8 +480,11 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
       expectedCwd: cwd,
       bindNextSession: true,
       onSessionEnd: () => { ended = true; endCapture(); },
+      maxEvents,
+      maxTotalRawBytes: maxRawBytes,
+      onLimitExceeded: () => endCapture(),
     });
-    await ensurePrivateRuntimeDirectory(paths.runtime);
+    await ensurePrivateRuntimeDirectory(descriptorRuntime);
     await writeArmDescriptor(descriptor, `${canonicalJson({
       version: 1,
       host,
@@ -315,6 +499,13 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     await finished;
+    if (drainMs > 0) await new Promise<void>((resolveDrain) => setTimeout(resolveDrain, drainMs));
+    // Seal the listener first and wait for requests already in flight. Only
+    // then is the hard-limit state stable enough to decide whether publishing
+    // the vault is allowed.
+    await server.close();
+    const limitViolation = server.limitViolation();
+    if (limitViolation !== null) throw new Error(`Capture aborted by hard limit: ${limitViolation}`);
     const bundle = await session.finalize();
     process.stderr.write(`trajpack: encrypted trace ${bundle.manifest.trace_id}; ended=${ended}; review=${bundle.manifest.review.automated_checks}\n`);
   } catch (error) {

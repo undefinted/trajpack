@@ -4,19 +4,23 @@ import { canonicalJson, sha256 } from "./canonical.js";
 
 export function fixtureBundle(text = "hello"): TraceBundle {
   const created = "2026-08-16T00:00:00.000Z";
-  const allow = (name: string) => ({
+  const allow = (name: string, competitiveWithSource: "yes" | "no" = "no") => ({
     status: "allow" as const,
     purposes: [name],
     reason_codes: ["TEST_FIXTURE"],
-    basis: "test",
+    basis: name === "sft" || name === "distillation"
+      ? `manual-override:policy/2026-08-16.4:fixture-${name}`
+      : "test",
     target_model_owner: "owner",
     target_product: "open-model",
-    competitive_with_source: "no" as const,
+    competitive_with_source: competitiveWithSource,
     decision_id: `decision_${name}`,
     decided_at: created,
     expires_at: "2099-01-01T00:00:00.000Z",
     reviewer: "fixture",
-    evidence_ref: "fixture",
+    evidence_ref: name === "sft" || name === "distillation"
+      ? `fixture:sha256:${sha256(`fixture-${name}`)}`
+      : "fixture",
   });
   const bundle: TraceBundle = {
     manifest: {
@@ -36,6 +40,8 @@ export function fixtureBundle(text = "hello"): TraceBundle {
         model_snapshot_or_weights_digest: `sha256:${"f".repeat(64)}`,
         origin: null,
         fidelity: "A",
+        authenticity: "locally_observed",
+        authenticity_evidence_ref: `local-model-artifact:sha256:${"f".repeat(64)}`,
       },
       account_contract: {
         account_type: "self_hosted",
@@ -63,7 +69,7 @@ export function fixtureBundle(text = "hello"): TraceBundle {
         local_archive: allow("archive"),
         automatic_capture: allow("capture"),
         training_noncompetitive: allow("sft"),
-        training_competitive_distillation: allow("distillation"),
+        training_competitive_distillation: allow("distillation", "yes"),
         redistribution: allow("release"),
       },
       privacy: {

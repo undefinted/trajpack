@@ -16,6 +16,8 @@ import {
   termsSnapshotSchema,
 } from "@trajpack/schema";
 import { defaultSource } from "@trajpack/core";
+import { observeModelArtifact } from "./model-artifact.js";
+import { createEvidenceArtifactReference } from "./evidence-artifact.js";
 
 const MAX_SOURCE_METADATA_BYTES = 1024 * 1024;
 
@@ -52,11 +54,14 @@ export interface SourceCliOptions {
   accountType?: string;
   model?: string;
   modelDigest?: string;
+  modelArtifact?: string;
   interfaceVersion?: string;
   origin?: string;
   terms?: string;
   writtenPermission?: string;
   permissionEvidence?: string;
+  permissionDocument?: string;
+  permissionEvidenceKind?: string;
   inputRights?: Rights["input_rights_basis"];
   thirdParty?: Rights["third_party_content"];
   sourceLicense?: string;
@@ -86,6 +91,18 @@ export async function resolveSourceOptions(host: Host, options: SourceCliOptions
   source.model_snapshot_or_weights_digest = options.modelDigest ?? null;
   source.interface_version = options.interfaceVersion ?? source.interface_version;
   source.origin = options.origin ?? null;
+  if (options.modelArtifact !== undefined) {
+    if (host !== "deepseek_harness" || provider !== "self_hosted" || accountType !== "self_hosted") {
+      throw new Error("--model-artifact requires DeepSeek Harness with --provider self_hosted --account-type self_hosted");
+    }
+    if (source.model_id === null) throw new Error("--model-artifact requires an exact --model identifier");
+    const observed = await observeModelArtifact(options.modelArtifact);
+    if (options.modelDigest !== undefined && options.modelDigest !== observed.digest) {
+      throw new Error(`--model-digest does not match the locally observed artifact (${observed.digest})`);
+    }
+    source.model_snapshot_or_weights_digest = observed.digest;
+    source.authenticity_evidence_ref = `local-model-artifact:${observed.digest}`;
+  }
   const rights: Rights = rightsSchema.parse({
     source_license_expression: options.sourceLicense ?? "NOASSERTION",
     model_license_chain: options.modelLicense ?? [],
@@ -102,12 +119,31 @@ export async function resolveSourceOptions(host: Host, options: SourceCliOptions
   }
   let permissionEvidence: PermissionEvidence | undefined;
   if (options.permissionEvidence) {
+    if (!options.permissionDocument) {
+      throw new Error("--permission-evidence requires --permission-document so its legal basis is content-bound");
+    }
+    const evidenceReference = await createEvidenceArtifactReference(
+      options.permissionEvidenceKind ?? "written-permission.v1",
+      options.permissionDocument,
+    );
     const parsed = await readBoundedJson(options.permissionEvidence, "--permission-evidence JSON");
-    permissionEvidence = permissionEvidenceSchema.parse(parsed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("--permission-evidence JSON must contain one scoped permission object");
+    }
+    const claimedReference = (parsed as Record<string, unknown>).evidence_ref;
+    if (claimedReference !== undefined && claimedReference !== evidenceReference) {
+      throw new Error("permission evidence_ref does not match --permission-document bytes");
+    }
+    permissionEvidence = permissionEvidenceSchema.parse({
+      ...(parsed as Record<string, unknown>),
+      evidence_ref: evidenceReference,
+    });
     if (options.writtenPermission !== undefined
       && options.writtenPermission !== permissionEvidence.evidence_ref) {
       throw new Error("--written-permission must match permission evidence_ref");
     }
+  } else if (options.permissionDocument !== undefined) {
+    throw new Error("--permission-document requires --permission-evidence metadata");
   }
   return {
     source,
