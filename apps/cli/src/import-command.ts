@@ -1,5 +1,5 @@
 import { extname, resolve } from "node:path";
-import type { Host } from "@trajpack/schema";
+import type { Host, Provider, RawEnvelope } from "@trajpack/schema";
 import { consentReceipt, createManifest, evaluateGate, readBundle } from "@trajpack/core";
 import { importFile, type ImportOptions, type ImportSourceHint } from "@trajpack/importers";
 import { CaptureSession } from "./capture-session.js";
@@ -12,6 +12,13 @@ export interface ImportCommandOptions extends SourceCliOptions {
   maxArchiveEntries?: number | string;
   maxArchiveEntryBytes?: number | string;
   maxArchiveUncompressedBytes?: number | string;
+}
+
+const MAX_IMPORT_RAW_EVENTS = 250_000;
+const MAX_IMPORT_RAW_BYTES = 192 * 1024 * 1024;
+
+function importCaptureLimits() {
+  return { maxRawEvents: MAX_IMPORT_RAW_EVENTS, maxRawBytes: MAX_IMPORT_RAW_BYTES };
 }
 
 function optionalPositiveInteger(value: number | string | undefined, name: string): number | undefined {
@@ -31,6 +38,36 @@ function detectedApiModels(envelopes: Awaited<ReturnType<typeof importFile>>["en
     if (typeof model === "string" && model.trim()) models.add(model.trim());
   }
   return [...models].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+}
+
+function providerFromHarnessRoute(route: string): Provider {
+  const value = route.toLowerCase();
+  if (value.includes("deepseek")) return "deepseek";
+  if (value.includes("openai")) return "openai";
+  if (value.includes("anthropic") || value.includes("claude")) return "anthropic";
+  if (value.includes("google") || value.includes("gemini")) return "google";
+  if (value.includes("self-host") || value.includes("local") || value.includes("ollama")) return "self_hosted";
+  return "other";
+}
+
+function detectedHarnessTeacher(envelopes: readonly RawEnvelope[]): { provider: Provider; model: string } {
+  const routes = new Map<string, { provider: Provider; model: string }>();
+  for (const envelope of envelopes) {
+    if (envelope.adapter !== "deepseek_harness" || !envelope.payload
+      || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) continue;
+    const payload = envelope.payload as Record<string, unknown>;
+    const route = payload.route;
+    if (!route || typeof route !== "object" || Array.isArray(route)) continue;
+    const providerRoute = (route as Record<string, unknown>).provider;
+    const model = (route as Record<string, unknown>).model;
+    if (typeof providerRoute !== "string" || typeof model !== "string" || !model.trim()) continue;
+    const provider = providerFromHarnessRoute(providerRoute);
+    routes.set(`${provider}\0${model.trim()}`, { provider, model: model.trim() });
+  }
+  if (routes.size !== 1) {
+    throw new Error("DeepSeek Harness persistence import requires one consistent observed provider/model route");
+  }
+  return [...routes.values()][0]!;
 }
 
 async function importTrajpackVault(path: string, options: ImportCommandOptions): Promise<string> {
@@ -107,7 +144,7 @@ async function importTrajpackVault(path: string, options: ImportCommandOptions):
   manifest.lineage.parent_trace_ids = [imported.manifest.trace_id];
   const preflight = evaluateGate({ manifest, raw: [], events: [] }, "archive");
   if (!preflight.allowed) throw new Error(`Import blocked by policy: ${preflight.reasonCodes.join(", ")}`);
-  const session = await CaptureSession.create(host, manifest, passphrase);
+  const session = await CaptureSession.create(host, manifest, passphrase, undefined, importCaptureLimits());
   try {
     for (const envelope of imported.raw) await session.ingest(envelope);
     const bundle = await session.finalize();
@@ -136,7 +173,8 @@ export async function runImport(input: string, options: ImportCommandOptions): P
   if (maxArchiveEntryBytes !== undefined) importOptions.maxArchiveEntryBytes = maxArchiveEntryBytes;
   if (maxArchiveUncompressedBytes !== undefined) importOptions.maxArchiveUncompressedBytes = maxArchiveUncompressedBytes;
   const imported = await importFile(path, importOptions);
-  const host: Host = "manual_import";
+  const harnessPersistence = imported.detectedFormat === "deepseek_harness_session_jsonl";
+  const host: Host = harnessPersistence ? "deepseek_harness" : "manual_import";
   const resolved = await resolveSourceOptions(host, options);
   const detectedProvider = imported.detectedFormat === "chatgpt_official_json"
       || imported.detectedFormat === "chatgpt_official_html"
@@ -148,6 +186,8 @@ export async function runImport(input: string, options: ImportCommandOptions): P
         ? "google"
       : imported.detectedFormat === "deepseek_api_response"
         ? "deepseek"
+        : harnessPersistence
+          ? detectedHarnessTeacher(imported.envelopes).provider
         : null;
   if (detectedProvider !== null && resolved.source.provider !== "unknown"
     && resolved.source.provider !== detectedProvider) {
@@ -177,8 +217,24 @@ export async function runImport(input: string, options: ImportCommandOptions): P
   ) {
     resolved.accountType = "api";
   }
-  resolved.source.interface_version = imported.detectedFormat;
-  if (imported.detectedFormat === "deepseek_api_response") {
+  resolved.source.interface_version = harnessPersistence
+    ? "deepseek-harness@0.1.0-rc.6/session-event/0"
+    : imported.detectedFormat;
+  if (harnessPersistence) {
+    const observed = detectedHarnessTeacher(imported.envelopes);
+    resolved.source.provider = observed.provider;
+    resolved.provider = observed.provider;
+    if (options.model !== undefined && options.model !== observed.model) {
+      throw new Error(`Harness request model ${observed.model} conflicts with --model ${options.model}`);
+    }
+    resolved.source.product = "deepseek-harness-persistence-import";
+    resolved.source.surface = "harness";
+    resolved.source.capture_method = "official_export";
+    resolved.source.fidelity = "B";
+    resolved.source.authenticity = "user_supplied";
+    resolved.source.authenticity_evidence_ref = null;
+    resolved.source.model_id = observed.model;
+  } else if (imported.detectedFormat === "deepseek_api_response") {
     const models = detectedApiModels(imported.envelopes);
     if (models.length !== 1) throw new Error("DeepSeek API import requires one consistent response model identifier");
     if (options.model !== undefined && options.model !== models[0]) {
@@ -215,7 +271,7 @@ export async function runImport(input: string, options: ImportCommandOptions): P
   const preflight = evaluateGate({ manifest, raw: [], events: [] }, "archive");
   if (!preflight.allowed) throw new Error(`Import blocked by policy: ${preflight.reasonCodes.join(", ")}`);
   const passphrase = await readPassphrase();
-  const session = await CaptureSession.create(host, manifest, passphrase);
+  const session = await CaptureSession.create(host, manifest, passphrase, undefined, importCaptureLimits());
   try {
     for (const envelope of imported.envelopes) await session.ingest(envelope);
     const bundle = await session.finalize();

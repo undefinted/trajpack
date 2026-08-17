@@ -7,6 +7,7 @@ import {
   CURRENT_DATASET_COMPILER_VERSIONS,
   approvalFingerprint,
   canonicalJson,
+  createApprovalScope,
   exportApprovedDataset,
   explicitGroupId,
   sha256,
@@ -219,6 +220,13 @@ describe("dataset directory validation", () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-dataset-validate-hf-"));
     temporaryDirectories.push(root);
     const bundle = fixtureBundle("HF validator fixture content");
+    bundle.manifest.source.host = "manual_import";
+    bundle.manifest.review.approval_scope = createApprovalScope(bundle, [
+      "archive",
+      "training_noncompetitive",
+      "training_competitive_distillation",
+      "redistribution",
+    ]);
     const scope = bundle.manifest.review.approval_scope!;
     const build: DatasetBuild = {
       record_type: "dataset_build",

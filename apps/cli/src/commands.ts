@@ -33,6 +33,7 @@ import {
   splitForGroup,
   stableId,
   type ExportFormat,
+  type TrainingViewRecipe,
   type TrainingMode,
   validateHfParquetFile,
   validateApprovalScope,
@@ -815,12 +816,16 @@ export interface ExportCommandOptions {
   output: string;
   plaintext?: boolean;
   mode?: "archive" | TrainingMode | "redistribution";
+  recipe?: TrainingViewRecipe;
 }
 
 export async function runExport(selection: string, options: ExportCommandOptions): Promise<void> {
   if (!options.plaintext) throw new Error("Plaintext export requires --plaintext and an explicit output directory");
   const output = resolve(options.output);
   if (!/^[a-f0-9]{32}$/.test(selection)) {
+    if (options.recipe !== undefined) {
+      throw new Error("Versioned training recipes currently require a single managed trace; batch recipe builds are planned separately");
+    }
     const build = await readDatasetBuildFile(selection);
     if (options.mode !== undefined && options.mode !== build.mode) {
       throw new Error(`Dataset build is frozen to ${build.mode}; --mode cannot change it`);
@@ -846,6 +851,7 @@ export async function runExport(selection: string, options: ExportCommandOptions
     format: options.format,
     outputDirectory: output,
     ...(options.mode === undefined ? {} : { mode: options.mode }),
+    ...(options.recipe === undefined ? {} : { trainingRecipe: options.recipe }),
   });
   process.stdout.write(`${JSON.stringify({
     trace_id: bundle.manifest.trace_id,

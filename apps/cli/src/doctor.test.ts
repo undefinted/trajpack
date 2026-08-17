@@ -19,8 +19,13 @@ describe("trajpack doctor", () => {
       ["dsh", "version_mismatch"],
     ]);
     expect(report.web_and_imports.every((entry) => entry.automatic_commercial_dom_capture === false)).toBe(true);
+    expect(report.web_and_imports).toContainEqual(expect.objectContaining({
+      product: "DeepSeek Harness session",
+      fidelity: "B",
+    }));
     expect(report.native_agents.every((entry) => entry.plugin_installation === "not_verified")).toBe(true);
     expect(report.boundaries.join(" ")).toContain("does not prove");
+    expect(report.boundaries.join(" ")).toContain("not provider authentication");
     expect(formatDoctorReport(report)).toContain("official/manual import only");
   });
 });

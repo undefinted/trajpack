@@ -40,6 +40,55 @@ A missing header, conflicting header, or a legal permission document cannot be
 treated as teacher-source proof. This local observation detects configuration
 drift but is not a provider signature.
 
+DeepSeek Harness is the lead research integration, while the canonical schema
+remains adapter-neutral. The native plugin is pinned to upstream
+`0.1.0-rc.6` and subscribes to typed durable events rather than a web or terminal
+UI. It preserves the raw `session/event` payload in an encrypted capsule,
+including `request/header`, turn/step events, reasoning/text chunks, native tool
+calls/results, retry/compaction records, approvals, and subagent activity when
+the Harness exposes them. This is lossless with respect to the subscribed
+durable event payload, not a claim that unexposed model state or hidden Chain of
+Thought was captured.
+
+The live capture integrity contract is deliberately strict:
+
+- the plugin records the upstream `firstLiveSeq` boundary and source session;
+- source sequence numbers must be contiguous from that boundary;
+- an exact repeated event is idempotent, but a same-sequence content conflict
+  aborts/quarantines capture;
+- the observed `request/header` route must reconcile with declared
+  provider/model provenance;
+- per-session forwarding is ordered, non-2xx delivery is an error, and
+  flush/session disposal drains queued delivery;
+- the collector encrypts immediately and no plaintext fallback spool is used.
+
+Run the plugin through the wrapper so the short-lived collector capability is
+scoped to the process tree:
+
+```bash
+trajpack capture dsh -- dsh <arguments>
+```
+
+For an existing Harness artifact, the separate persistence importer accepts
+only the official **unpacked, uncompressed v0 session JSONL** layout: one session
+header followed by contiguous unpacked event rows.
+
+```bash
+trajpack import ./sessions/session.jsonl \
+  --source-hint dsh-session \
+  --provider <actual-model-provider> \
+  --account-type <account-class> \
+  --terms ./evidence/provider-terms.snapshot.json
+```
+
+That import has fidelity B and `user_supplied` authenticity. It validates the
+shape and event sequence but does not cryptographically authenticate the
+producer. Packed/chunk rows, zstd-compressed persistence, unknown versions, and
+sequence gaps fail closed. Use native capture or create an explicitly unpacked,
+uncompressed artifact with the pinned Harness version; trajpack does not guess
+how to decode unknown storage layouts. See the focused
+[DeepSeek Harness research path](deepseek-research.md).
+
 For self-hosted weights, use `--model-artifact` so trajpack hashes the actual
 file or snapshot directory. That proves which local bytes were observed, not
 which bytes the Harness process loaded. Retain a run configuration, container
@@ -121,10 +170,61 @@ Planning runs the same per-trace quality warning gates as export. A strict plan
 therefore fails immediately on missing repo/test/verifier evidence rather than
 creating a build that can never be exported.
 
-`trace_full` is the only v0.1 view recipe. The HF compiler still separates
-source sessions and parent-linked message branches within that recipe. Other
-recipes (turn-level, recovery-only, tool-policy) are intentionally not exposed
-until they have versioned topology fixtures.
+`trace_full` remains the frozen multi-trace build recipe in v0.1 for sources
+whose topology can be projected unambiguously. The HF compiler separates source
+sessions and parent-linked message branches within that view. DeepSeek Harness
+is intentionally excluded from `trace_full` HF/TRL export: its request epochs,
+surface replacement, route changes, and three-layer tool lifecycle require an
+explicit versioned recipe. Approved **single traces** can use one of seven
+versioned training-view recipes; those recipes are not yet accepted by
+`dataset plan`, so they cannot be silently mixed into a multi-trace build.
+
+| Single-trace recipe | Training semantics | Required evidence |
+| --- | --- | --- |
+| `answer_sft` | Supervise completed assistant answer text. | Completed, privacy-cleared assistant/agent message. |
+| `reasoning_sft` | Supervise observable reasoning explicitly opted into this view. | Complete `provider_exposed_reasoning`, visible source field, and provider `chain_of_thought` claim. Partial-only streams, summaries, opaque and unavailable states are excluded. |
+| `tool_use_sft` | Supervise native function name and arguments, preserving proven parallel calls. | Stable call IDs and an observed result for every call. Results are evidence, not inferred rewards. |
+| `deepseek_epoch_sft` | Supervise a completed Harness assistant output against its exact request epoch. | Complete sequence-zero rc.6 raw log; raw integrity; exact reviewed canonical alignment; matching provider/model; request header, system, native tools, and compaction-aware model-visible surface; reconstructable output. |
+| `failure_recovery` | Supervise an observed recovery action after failure. | Failed tool result, explicit retry marker, recovery action, and observed successful result; no synthetic success label. |
+| `subagent_handoff` | Supervise a completed delegated response. | Correlated `agent.invoke`/`handoff` events and privacy-cleared delegated context. |
+| `pointwise_reward_rl_ready` | Export a response with verified scalar-reward evidence for downstream reward-model/RL research. | Finite numeric reward, versioned verifier evidence, matching reviewer confirmation, and a preceding completed response. This is not a DPO pair or step reward. |
+
+Example:
+
+```bash
+trajpack export <trace-id> \
+  --format hf-trl \
+  --recipe deepseek_epoch_sft \
+  --mode training_competitive_distillation \
+  --output ./exports/dsh-exact-epoch-ablation \
+  --plaintext
+
+trajpack validate ./exports/dsh-exact-epoch-ablation
+```
+
+The exporter writes the recipe/compiler versions, source/target/evidence event
+IDs, component-level loss targets, exclusions, and compilation digest to
+`training-view-report.json`. If no candidate passes the recipe contract, export
+fails instead of producing an empty or weakly labelled dataset. The public core
+entry point does not expose the recipe compiler as a policy bypass; managed
+export rechecks training eligibility and approval scope first.
+
+For DeepSeek Harness, distinguish the cross-adapter recipes from the exact
+recipe. The generic views validate the approved teacher route but do not replay
+the Harness surface. They block a target if an earlier `surfaceOp: replace`
+means the model-visible prefix cannot be obtained by simple canonical ordering,
+and direct the researcher to `deepseek_epoch_sft`. That exact recipe runs the
+pinned `dsh-epoch/0.1` replay over integrity-bound rc.6 raw capsules, applies
+append/replace surface operations, selects the latest request header, and binds
+provider, model, system, native tools, input surface, and output back to the
+reviewed canonical events and content hashes.
+
+Resumed partial capture is not repairable by selecting the exact recipe:
+`firstLiveSeq > 0` blocks every training view because the pre-existing context
+is absent. Recapture or import a complete sequence-zero log. The exact recipe
+also rejects missing request headers, provider/model route mismatch,
+raw/canonical drift or review exclusion, non-`passed` exact content, unsupported
+required records, invalid surface replacements, and incomplete request epochs.
 
 ## 4. Export transactionally
 
@@ -251,6 +351,28 @@ message-level `assistant_loss_mask` or component-level `training_targets` as
 token masks. If a template lacks markers, stop and define a versioned
 tokenization/masking pass rather than silently changing the supervision target.
 
+## 7. Derive content-free research analytics
+
+After approval, derive workload and training-yield statistics without exporting
+prompt, reasoning, tool, file, code, or patch content:
+
+```bash
+trajpack analyze <trace-id> [<trace-id> ...] --format summary
+trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
+```
+
+`summary` emits deterministic aggregate research metrics. `tracelab-jsonl`
+emits a deliberately lossy, content-free row projection for workload-analysis
+tools. It is inspired by [TraceLab](https://github.com/uw-syfi/TraceLab), but
+TraceLab is not a runtime dependency and the projection is never a training
+source. It cannot reconstruct the canonical trajectory.
+
+The product boundary is intentional: TraceLab studies agent-serving workload
+behavior, whereas trajpack retains the governed canonical evidence needed to
+derive auditable SFT and verifier-backed pointwise-reward views. Rights,
+redactions, content, topology, review state, and lineage stay in trajpack's
+encrypted/canonical layers; the TraceLab-shaped output is analytics-only.
+
 ## Failure-oriented checklist
 
 | Symptom or reason | What to inspect | Safe action |
@@ -269,6 +391,17 @@ tokenization/masking pass rather than silently changing the supervision target.
   included; the current detector intentionally favors reproducibility and
   privacy-safe audit output over semantic recall.
 - Tokenizer-aware truncation, packing, and context-window recipes are not in v1.
+- DeepSeek Harness persistence import supports only unpacked, uncompressed v0
+  JSONL. Packed/chunked and zstd persistence are rejected rather than decoded
+  heuristically.
+- Generic DeepSeek Harness recipes block resumed context and targets after a
+  surface replacement rather than guessing the model-visible input. Use a
+  complete sequence-zero trace with `deepseek_epoch_sft` for exact request-epoch
+  reconstruction; a resumed partial trace is rejected by that recipe as well.
+- `reasoning_sft` cannot recover hidden reasoning and accepts only complete
+  provider-exposed reasoning. `pointwise_reward_rl_ready` is verified scalar-reward
+  evidence for downstream reward-model/RL research; pair construction, RL
+  optimization, and trainers remain out of scope.
 - Reviewer/verifier evidence is hash-bound but not yet signed with an
   independent laboratory key.
 - A single-user consent receipt cannot model every multi-participant or

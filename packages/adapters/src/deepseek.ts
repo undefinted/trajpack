@@ -11,6 +11,7 @@ import {
   nestedRecord,
   parseJsonLines,
   renumberEvents,
+  sha256,
   usageFrom,
   type NormalizeOptions,
   type NormalizedBatch,
@@ -99,9 +100,23 @@ function routeMetadata(route: JsonObject | null): Record<string, unknown> {
   };
 }
 
+function surfaceMetadata(event: JsonObject): Record<string, unknown> {
+  const sourceEventSeqs = Array.isArray(event.sourceEventSeqs)
+    ? event.sourceEventSeqs.filter((value): value is number => Number.isSafeInteger(value) && value >= 0)
+    : null;
+  return {
+    surface_op: event.surfaceOp ?? null,
+    source_event_seqs: sourceEventSeqs,
+  };
+}
+
 function reasoningMetadata(route: JsonObject | null, sourceField: string): ReasoningMetadata {
   const provider = route === null ? null : firstString(route, ["provider"]);
-  if (provider !== null && provider.toLowerCase().includes("deepseek")) {
+  const normalizedProvider = provider?.toLowerCase() ?? null;
+  // Provider labels are a closed routing contract, not a fuzzy brand search.
+  // A proxy name such as `openai-deepseek-proxy` must not upgrade opaque
+  // reasoning into DeepSeek provider-exposed supervision.
+  if (normalizedProvider === "deepseek" || normalizedProvider?.startsWith("deepseek-") === true) {
     return { ...PROVIDER_EXPOSED_REASONING, source_field: sourceField };
   }
   return {
@@ -139,6 +154,7 @@ function messageContentEvents(
     const blockType = firstString(value, ["type"]);
     const common = {
       ...routeMetadata(route),
+      ...surfaceMetadata(info.event),
       durable_event_type: info.type,
       harness_seq: info.event.seq,
       block_type: blockType,
@@ -297,10 +313,10 @@ export function normalizeDeepSeekSessionEvent(payload: unknown, options: Normali
   }
   const info = capsule(payload);
   if (info === null) return { raw, events: [] };
-  if (!DURABLE_EVENTS.has(info.type)) return { raw, events: [] };
 
   const metadata = {
     ...routeMetadata(info.route),
+    ...surfaceMetadata(info.event),
     durable_event_type: info.type,
     session_format_version: info.header.version,
     harness_seq: info.event.seq,
@@ -328,6 +344,15 @@ export function normalizeDeepSeekSessionEvent(payload: unknown, options: Normali
       training_semantics_available: false,
     },
   });
+
+  // The rc.6 SessionEventMap is merge-extensible. An extension may add a
+  // durable informational record only when it explicitly marks it ignorable;
+  // retain that record as opaque canonical evidence so a valid capture is not
+  // destroyed. Unknown required records still return no projection and make
+  // CaptureSession fail closed at finalization.
+  if (!DURABLE_EVENTS.has(info.type)) {
+    return { raw, events: info.event.ignorable === true ? [opaqueDurableEvent()] : [] };
+  }
 
   if (info.type === "assistant/chunk") {
     const events = chunkEvents(info, raw, options);
@@ -430,14 +455,36 @@ export function normalizeDeepSeekSessionEvent(payload: unknown, options: Normali
     const header = nestedRecord(info.data, "header");
     const config = header === null ? null : nestedRecord(header, "config");
     const tools = header !== null && Array.isArray(header.tools) ? header.tools : [];
+    const requestContent: TrajectoryEvent["content"] = [];
+    const contentRoles: Array<{ ordinal: number; role: "system" | "tool_schema" }> = [];
+    if (typeof header?.system === "string") {
+      requestContent.push(contentPart(header.system, requestContent.length, {
+        type: "text",
+        mimeType: "text/plain; role=system",
+      }));
+      contentRoles.push({ ordinal: requestContent.length - 1, role: "system" });
+    }
+    for (const toolSchema of tools) {
+      if (!isRecord(toolSchema)) continue;
+      requestContent.push(contentPart(toolSchema, requestContent.length, {
+        type: "file_ref",
+        mimeType: "application/vnd.trajpack.tool-schema+json",
+      }));
+      contentRoles.push({ ordinal: requestContent.length - 1, role: "tool_schema" });
+    }
     return { raw, events: [make(0, {
       eventType: "model.inference", actor: "assistant", status: "partial",
+      content: requestContent,
       metadata: {
         request_header_reason: info.data.reason ?? null,
         provider_route: config === null ? null : firstString(config, ["provider"]),
         model: config === null ? null : firstString(config, ["model"]),
         reasoning_effort: config?.reasoningEffort ?? null,
         tool_schema_count: tools.length,
+        request_config: config,
+        adapter_defaults: header === null ? null : nestedRecord(header, "adapterDefaults"),
+        request_content_roles: contentRoles,
+        request_header_sha256: header === null ? null : sha256(header),
       },
     })] };
   }

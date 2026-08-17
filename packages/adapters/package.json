@@ -21,6 +21,10 @@
       "types": "./dist/deepseek.d.ts",
       "import": "./dist/deepseek.js"
     },
+    "./deepseek-epoch": {
+      "types": "./dist/deepseek-epoch.d.ts",
+      "import": "./dist/deepseek-epoch.js"
+    },
     "./gemini": {
       "types": "./dist/gemini.d.ts",
       "import": "./dist/gemini.js"

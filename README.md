@@ -31,6 +31,7 @@
 
 ## Why trajpack
 
+- **DeepSeek Harness-first, adapter-open.** The pinned Harness plugin treats its typed, append-only durable event log as the primary research surface, while the canonical schema remains provider-neutral.
 - **Preserves trajectories, not just answers.** Messages, parallel tool calls, results, patches, approvals, failures, retries, compaction, verification, and subagent edges remain linked.
 - **Separates evidence from training views.** Append-only raw envelopes remain encrypted; normalized and dataset views are deterministic, versioned derivatives.
 - **Makes policy executable.** Archive, capture, noncompetitive training, competitive distillation, and redistribution are five independent decisions.
@@ -48,7 +49,8 @@
 | **[Claude Code headless](https://code.claude.com/docs/en/headless)** | Wrapper enforces `--print --output-format stream-json --verbose` | ✅ Native | Visible thinking is a provider summary or opaque state, never asserted to be raw CoT. |
 | **Claude Code interactive** | One-shot `arm` + lifecycle/tool/subagent hooks | 🟡 Constrained | An authenticated transcript may be retained only as an encrypted opaque artifact; its private JSONL schema is not parsed. |
 | **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | Plugin using the documented hook surface through `capture gemini` or one-shot `arm gemini` | ✅ Native hooks | Pinned to `gemini-cli-hook/1`; only observable hook payloads are retained, with no hidden-thinking claim. |
-| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | Native `session/event` plugin for DeepSeek AI's official Developer Preview | ✅ Native preview (A−) | Exactly fixture-tested against Harness `0.1.0-rc.6`; unknown persistence versions are refused. |
+| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | Native typed `session/event` plugin for DeepSeek AI's official Developer Preview | ✅ Native preview (A−) | Pinned and fixture-tested against Harness `0.1.0-rc.6`; exact request-epoch SFT is available, while gaps, resumed partial context, conflicting duplicates, route conflicts, and unknown interfaces fail closed. |
+| **Saved Harness session** | Official unpacked session JSONL via `--source-hint dsh-session` | ✅ Import (B) | Accepts only uncompressed, unpacked persistence v0. The artifact is marked `user_supplied`; packed rows and zstd input are refused. |
 | **Saved DeepSeek API response** | Offline JSON/streaming-JSONL import | ✅ Import | Shape validation is not provider authentication; imported artifacts remain user-supplied until separately evidenced. |
 | **ChatGPT web** | User-downloaded official ZIP/JSON/HTML export | 🟡 Archive/import | No live-page selector, network interception, cookie access, or automatic web capture. |
 | **Claude web** | User-downloaded official `conversations.json`/ZIP export | 🟡 Archive/import | No live-page selector or automatic web capture. |
@@ -126,7 +128,23 @@ pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source 
 
 Run `pnpm trajpack doctor` (or `doctor --json`) to probe host executables and report the expected plugin directories, pinned interfaces, and safe web-import routes before collecting real data. It deliberately reports plugin installation as `not_verified`; confirm installation with each host's own list/validate command.
 
-Capture is intentionally blocked until source, account, current terms or scoped permission, consent, and required rights metadata satisfy the `automatic_capture` gate. The most direct distillation research path is a legitimately licensed self-hosted model running through the pinned DeepSeek Harness, with the actual model artifact hashed locally and a retained runtime-binding receipt. See the complete [research workflow](docs/research-workflow.md).
+Capture is intentionally blocked until source, account, current terms or scoped permission, consent, and required rights metadata satisfy the `automatic_capture` gate. The most direct distillation research path is a legitimately licensed self-hosted model running through the pinned DeepSeek Harness, with the actual model artifact hashed locally and a retained runtime-binding receipt.
+
+### DeepSeek Harness-first path
+
+Harness is the lead integration because its typed, append-only durable event surface can preserve `request/header`, turns, reasoning/text chunks, native tool calls/results, compaction, retries, approvals, and subagent activity without scraping a UI. The `0.1.0-rc.6` plugin records the live-session boundary, validates strictly contiguous source sequence numbers, treats only byte-identical duplicates as idempotent, reconciles the observed provider/model route, and drains per-session delivery queues on flush/disposal. Raw payloads enter the encrypted vault; no plaintext fallback spool is created.
+
+If a live plugin was not installed for an earlier run, import an official **unpacked and uncompressed** Harness persistence log explicitly:
+
+```bash
+pnpm trajpack import ./sessions/session.jsonl \
+  --source-hint dsh-session \
+  --provider <actual-model-provider> \
+  --account-type <account-class> \
+  --terms ./evidence/provider-terms.snapshot.json
+```
+
+This is a fidelity-B, `user_supplied` route: shape and sequence validation do not authenticate who produced the file. Packed persistence rows, zstd-compressed files, version drift, and sequence gaps fail closed. See the [DeepSeek Harness research path](docs/deepseek-research.md) and the complete [research workflow](docs/research-workflow.md).
 
 ## Research dataset workflow
 
@@ -146,6 +164,21 @@ The reproducible order is:
 capture/import → policy explain → evidence-backed override when required
 → review and approve → dataset plan → export → validate → train/evaluate elsewhere
 ```
+
+For an approved single trace, a versioned HF/TRL recipe can derive a narrowly scoped training view without changing the encrypted evidence layer:
+
+```bash
+pnpm trajpack export <trace-id> \
+  --format hf-trl \
+  --recipe deepseek_epoch_sft \
+  --mode training_competitive_distillation \
+  --output ./exports/dsh-exact-epoch-study \
+  --plaintext
+```
+
+The seven recipes are `answer_sft`, `reasoning_sft`, `tool_use_sft`, `deepseek_epoch_sft`, `failure_recovery`, `subagent_handoff`, and `pointwise_reward_rl_ready`. For a complete pinned Harness trace, `deepseek_epoch_sft` is the highest-fidelity path: it replays the rc.6 raw durable log into request epochs and requires the provider/model route, request header, system prompt, native tools, compaction-aware model-visible surface, and completed output to align exactly with review-included, privacy-passed canonical projections. `reasoning_sft` accepts only complete `provider_exposed_reasoning`; summaries, opaque states, unavailable reasoning, and partial-only streams are excluded. `pointwise_reward_rl_ready` emits verified scalar-reward evidence with versioned verifier provenance and reviewer confirmation for downstream reward-model/RL research—it does not fabricate a chosen/rejected DPO pair, a step reward, or a success label. Recipe export is single-trace in v0.1. Frozen multi-trace builds use the audited `trace_full` view only for sources whose topology can be represented unambiguously; DeepSeek Harness HF/TRL export requires an explicit versioned recipe and intentionally rejects `trace_full`.
+
+Cross-adapter recipes deliberately do not guess Harness context. On a Harness trace, a resumed session with `firstLiveSeq > 0` blocks every training recipe; recapture or import a complete sequence-zero log. A prior `surfaceOp: replace` blocks the generic target recipe and directs a complete trace to `deepseek_epoch_sft`, whose epoch replay applies the replacement. Missing `request/header`, provider/model mismatch, raw/canonical drift, or an unreconstructable epoch also fail closed.
 
 For a multi-trace research build, define private repository/task-family aliases, freeze the reviewed inputs, export to a new plaintext directory, and validate it:
 
@@ -180,6 +213,17 @@ pnpm trajpack validate ./exports/paper-ablation-1
 | `otlp` | Trace viewers and evaluation interoperability | Resource spans using the project's pinned development mapping, with content digests by default. |
 
 Every dataset export also carries a dataset card, source/model/authenticity and quality statistics, policy version, rights/license summary, redaction report, deduplication audit, lineage, checksums, and a `COMPLETE` marker. Exported data does **not** inherit the repository's Apache-2.0 license.
+
+### Content-free workload analytics
+
+```bash
+pnpm trajpack analyze <trace-id> [<trace-id> ...] --format summary
+pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
+```
+
+`analyze` derives deterministic workload and training-yield metrics from approved managed traces. The `tracelab-jsonl` projection is intentionally content-free and lossy: it is useful for systems-style workload analysis, but it never replaces the encrypted canonical trajectory or becomes a training source.
+
+[TraceLab](https://github.com/uw-syfi/TraceLab) is an analytics inspiration, not a runtime dependency. TraceLab focuses on studying agent-serving workloads; trajpack focuses on governed, reviewable transformation from observable evidence into versioned SFT or verifier-backed pointwise-RL views. Canonical content, rights, redactions, topology, and lineage remain under trajpack governance, while the TraceLab-shaped projection contains aggregate/digest-level workload fields only.
 
 ### Load with Hugging Face Datasets and TRL
 
@@ -234,12 +278,13 @@ trajpack arm <codex|claude|gemini> --next-session --cwd <path> --ttl 10m
 trajpack import <official-export-or-trajpack>
 trajpack review
 trajpack doctor [--json]
+trajpack analyze <trace-ids...> --format summary|tracelab-jsonl
 trajpack validate <trace-or-dataset>
 trajpack dataset plan <trace-ids...> --output <build.json> ...
 trajpack policy explain <trace>
 trajpack policy snapshot ...
 trajpack policy override <trace> ...
-trajpack export <selection> --format canonical|atif|hf-trl|otlp
+trajpack export <selection> --format canonical|atif|hf-trl|otlp [--recipe <versioned-recipe>]
 trajpack delete <trace-id> --yes
 ```
 
@@ -252,6 +297,9 @@ Run `pnpm trajpack <command> --help` for the exact required options. Unknown sou
 - The current Gemini CLI hook surface may lack a provider tool-call ID; trajpack records a deterministic synthetic pairing key, so identical concurrent calls are a documented fidelity limit.
 - Codex App Server support is an offline pinned mapper, not a live App Server proxy.
 - The official DeepSeek AI Harness is a Developer Preview; trajpack pins `0.1.0-rc.6` rather than assuming upstream format stability.
+- Harness persistence import currently accepts only unpacked, uncompressed v0 JSONL. Packed/chunked rows and zstd-compressed persistence fail closed; use native plugin capture or produce an explicitly unpacked artifact.
+- Generic Harness training recipes block resumed partial context and targets after a surface replacement instead of guessing the teacher-visible prefix. Use a complete sequence-zero trace with `deepseek_epoch_sft` for exact compaction-aware request reconstruction.
+- No recipe recovers hidden CoT. `reasoning_sft` requires complete provider-exposed reasoning, and `pointwise_reward_rl_ready` is verified scalar-reward evidence for downstream reward-model/RL research rather than a DPO preference pair or an RL trainer.
 - A local collector capability authenticates the capture process tree, not the provider or an adversarial tool subprocess.
 - Offline response shape, a local model hash, reviewer identity, and exported checksums are evidence—not vendor signatures or proof of current authorization.
 - Secret/PII scanning is conservative pattern matching, not proof of anonymization or license cleanliness.

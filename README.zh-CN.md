@@ -31,6 +31,7 @@
 
 ## 为什么使用 trajpack
 
+- **DeepSeek Harness 优先、适配器开放。** 固定版本的 Harness 插件把类型化、append-only 的 durable event log 作为首要科研采集面，同时保持 canonical schema 与提供商无关。
 - **保留完整轨迹，而不只是最终答案。** 消息、并行工具调用、结果、patch、审批、失败、重试、compaction、验证和子 Agent 边都会保持关联。
 - **把证据层与训练视图分开。** Append-only 原始 envelope 保持加密；规范化视图和数据集视图都是确定性、版本化的派生结果。
 - **将政策变成可执行关卡。** 本地归档、自动采集、非竞争训练、竞争性蒸馏和再分发是五个相互独立的决定。
@@ -48,7 +49,8 @@
 | **[Claude Code headless](https://code.claude.com/docs/en/headless)** | 包装器强制加入 `--print --output-format stream-json --verbose` | ✅ 原生 | 可见 thinking 只会分类为 provider summary 或 opaque state，不会声称是原始 CoT。 |
 | **Claude Code 交互会话** | 一次性 `arm` + 生命周期、工具和子 Agent hooks | 🟡 受限 | 通过绑定验证的 transcript 只能作为加密 opaque artifact 保存；不解析其私有 JSONL schema。 |
 | **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | 通过 `capture gemini` 或一次性 `arm gemini` 接入基于官方文档化 hook 的插件 | ✅ 原生 hooks | 固定接口为 `gemini-cli-hook/1`；只保留可观察 hook payload，不声称恢复隐藏 thinking。 |
-| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | 面向 DeepSeek AI 官方 Developer Preview 的原生 `session/event` 插件 | ✅ 原生预览（A−） | 仅对 Harness `0.1.0-rc.6` 做过 fixture 测试；未知 persistence 版本会被拒绝。 |
+| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | 面向 DeepSeek AI 官方 Developer Preview 的原生类型化 `session/event` 插件 | ✅ 原生预览（A−） | 固定并通过 Harness `0.1.0-rc.6` fixture 测试；已支持精确 request-epoch SFT，而序列缺口、resumed partial context、冲突重复、路由冲突和未知接口都会 fail closed。 |
+| **已保存的 Harness session** | 使用 `--source-hint dsh-session` 导入官方 unpacked session JSONL | ✅ 导入（B） | 只接受未压缩、未打包的 persistence v0。Artifact 标记为 `user_supplied`；packed row 与 zstd 输入会被拒绝。 |
 | **已保存的 DeepSeek API 响应** | 离线导入 JSON/流式 JSONL | ✅ 导入 | 结构验证不等于提供商认证；在单独提供证据前，导入内容仍属于 user-supplied。 |
 | **ChatGPT 网页版** | 用户主动下载的官方 ZIP/JSON/HTML 导出 | 🟡 归档/导入 | 没有实时网页 selector、网络拦截、cookie 访问或自动网页采集。 |
 | **Claude 网页版** | 用户主动下载的官方 `conversations.json`/ZIP 导出 | 🟡 归档/导入 | 没有实时网页 selector 或自动网页采集。 |
@@ -126,7 +128,23 @@ pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source 
 
 采集真实数据前，运行 `pnpm trajpack doctor`（或 `doctor --json`）可以探测宿主可执行文件，并报告预期插件目录、固定接口和安全网页导入路径。它会刻意把插件安装状态报告为 `not_verified`；请再使用各宿主自己的 list/validate 命令确认安装。
 
-在来源、账号、当前条款或限定范围的许可、同意记录和必要的权利元数据满足 `automatic_capture` gate 之前，采集会被主动阻断。当前最直接的蒸馏科研路径，是在固定版本的 DeepSeek Harness 中运行来源合法的自托管模型：由 trajpack 本地计算真实模型 artifact 哈希，并保留运行时绑定 receipt。完整步骤见[科研工作流](docs/research-workflow.md)。
+在来源、账号、当前条款或限定范围的许可、同意记录和必要的权利元数据满足 `automatic_capture` gate 之前，采集会被主动阻断。当前最直接的蒸馏科研路径，是在固定版本的 DeepSeek Harness 中运行来源合法的自托管模型：由 trajpack 本地计算真实模型 artifact 哈希，并保留运行时绑定 receipt。
+
+### DeepSeek Harness-first 路径
+
+Harness 是首要集成，因为它的类型化、append-only durable event surface 能够保留 `request/header`、turn、reasoning/text chunk、原生 tool call/result、compaction、retry、approval 和子 Agent 活动，无需抓取 UI。`0.1.0-rc.6` 插件会记录 live-session 边界，严格验证连续 source sequence，只把字节完全相同的重复事件视为幂等，并核对实际观察到的 provider/model route；在 flush/disposal 时还会排空每个 session 的投递队列。Raw payload 直接进入加密 vault，不生成明文 fallback spool。
+
+如果早期运行没有安装实时插件，可以显式导入官方**未打包且未压缩**的 Harness persistence log：
+
+```bash
+pnpm trajpack import ./sessions/session.jsonl \
+  --source-hint dsh-session \
+  --provider <actual-model-provider> \
+  --account-type <account-class> \
+  --terms ./evidence/provider-terms.snapshot.json
+```
+
+这是 fidelity-B、`user_supplied` 路径：结构和序列验证不能认证文件由谁生成。Packed persistence row、zstd 压缩文件、版本漂移和序列缺口都会 fail closed。详见 [DeepSeek Harness 科研路径](docs/deepseek-research.md)和完整的[科研工作流](docs/research-workflow.md)。
 
 ## 科研数据集工作流
 
@@ -146,6 +164,21 @@ flowchart LR
 capture/import → policy explain → 必要时执行基于证据的 override
 → review 并批准 → dataset plan → export → validate → 在外部训练/评测
 ```
+
+对于已经批准的单个 trace，可以使用版本化 HF/TRL recipe 派生目标明确的训练视图，而不改变加密证据层：
+
+```bash
+pnpm trajpack export <trace-id> \
+  --format hf-trl \
+  --recipe deepseek_epoch_sft \
+  --mode training_competitive_distillation \
+  --output ./exports/dsh-exact-epoch-study \
+  --plaintext
+```
+
+七种 recipe 分别为 `answer_sft`、`reasoning_sft`、`tool_use_sft`、`deepseek_epoch_sft`、`failure_recovery`、`subagent_handoff` 和 `pointwise_reward_rl_ready`。对于完整且固定版本的 Harness trace，`deepseek_epoch_sft` 是 fidelity 最高的路径：它把 rc.6 raw durable log 重放为 request epoch，并要求 provider/model route、request header、system prompt、原生 tool、compaction-aware 的模型可见 surface 和完整 output 与经过审阅纳入、隐私检查通过的 canonical projection 精确对齐。`reasoning_sft` 只接受完整的 `provider_exposed_reasoning`；summary、opaque state、unavailable reasoning 和只有 partial stream 的数据都会被排除。`pointwise_reward_rl_ready` 输出带版本化 verifier provenance 和 reviewer 确认的标量 reward 证据，供下游 reward-model/RL 科研使用；它不会伪造 chosen/rejected DPO pair、step reward 或 success label。v0.1 的 recipe 导出仅支持单 trace。冻结的多 trace build 只对拓扑能够无歧义表达的来源使用经审计的 `trace_full` 视图；DeepSeek Harness 的 HF/TRL 导出必须显式选择版本化 recipe，并会有意拒绝 `trace_full`。
+
+跨适配器通用 recipe 不会猜测 Harness context。对于 Harness trace，`firstLiveSeq > 0` 的 resumed session 会阻断全部训练 recipe；必须重新采集或导入从 sequence zero 开始的完整 log。目标之前存在 `surfaceOp: replace` 时，通用 recipe 会阻断，并引导完整 trace 使用 `deepseek_epoch_sft` 重放 replacement。缺少 `request/header`、provider/model 不一致、raw/canonical 漂移或 epoch 无法重建时也会 fail closed。
 
 构建多 trace 科研数据集时，需要定义私有的仓库/任务族别名，冻结已经审阅的输入，导出到新的明文目录并完成验证：
 
@@ -180,6 +213,17 @@ pnpm trajpack validate ./exports/paper-ablation-1
 | `otlp` | Trace viewer 与评测系统互通 | 使用项目固定的开发版映射生成 resource spans，默认只携带内容摘要。 |
 
 每次数据集导出还会附带 dataset card、来源/模型/真实性与质量统计、政策版本、权利/许可证摘要、redaction 报告、去重审计、lineage、checksums 和 `COMPLETE` 标记。导出的数据**不会**自动继承仓库的 Apache-2.0 许可证。
+
+### 不含内容的 workload 分析
+
+```bash
+pnpm trajpack analyze <trace-id> [<trace-id> ...] --format summary
+pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
+```
+
+`analyze` 从已经批准的受管 trace 中确定性派生 workload 与 training-yield 指标。`tracelab-jsonl` 投影刻意不包含内容且有信息损失：它适合系统 workload 分析，但不会取代加密 canonical 轨迹，也不会成为训练来源。
+
+[TraceLab](https://github.com/uw-syfi/TraceLab) 是分析设计的借鉴对象，不是运行时依赖。TraceLab 侧重研究 Agent serving workload；trajpack 侧重把可观察证据经过治理和审阅，转换为版本化 SFT 或 verifier-backed pointwise-RL 视图。Canonical 内容、权利、redaction、拓扑和 lineage 始终留在 trajpack 的治理边界内，TraceLab-shaped 投影只携带聚合或摘要级 workload 字段。
 
 ### 使用 Hugging Face Datasets 和 TRL 加载
 
@@ -234,12 +278,13 @@ trajpack arm <codex|claude|gemini> --next-session --cwd <path> --ttl 10m
 trajpack import <official-export-or-trajpack>
 trajpack review
 trajpack doctor [--json]
+trajpack analyze <trace-ids...> --format summary|tracelab-jsonl
 trajpack validate <trace-or-dataset>
 trajpack dataset plan <trace-ids...> --output <build.json> ...
 trajpack policy explain <trace>
 trajpack policy snapshot ...
 trajpack policy override <trace> ...
-trajpack export <selection> --format canonical|atif|hf-trl|otlp
+trajpack export <selection> --format canonical|atif|hf-trl|otlp [--recipe <versioned-recipe>]
 trajpack delete <trace-id> --yes
 ```
 
@@ -252,6 +297,9 @@ trajpack delete <trace-id> --yes
 - 当前 Gemini CLI hook 可能不提供厂商 tool-call ID；trajpack 会记录确定性合成配对键，因此完全相同的并发调用属于已知 fidelity 边界。
 - Codex App Server 支持属于离线固定版本 mapper，不是实时 App Server proxy。
 - DeepSeek Harness 是 DeepSeek AI 官方 Developer Preview；trajpack 固定支持 `0.1.0-rc.6`，不会假设上游格式已经稳定。
+- Harness persistence 导入目前只接受未打包、未压缩的 v0 JSONL。Packed/chunked row 和 zstd 压缩 persistence 会 fail closed；请使用原生插件采集，或显式生成 unpacked artifact。
+- Harness 通用训练 recipe 遇到 resumed partial context 或目标之前的 surface replacement 时会阻断，不会猜测 teacher-visible prefix。请使用完整的 sequence-zero trace 和 `deepseek_epoch_sft` 进行 compaction-aware 的精确 request 重建。
+- 任何 recipe 都不会恢复隐藏 CoT。`reasoning_sft` 要求完整的 provider-exposed reasoning；`pointwise_reward_rl_ready` 是供下游 reward-model/RL 科研使用的已验证标量 reward 证据，不是 DPO preference pair 或 RL trainer。
 - 本地 collector capability 只能认证采集进程树，不能认证提供商或对抗恶意工具子进程。
 - 离线响应结构、本地模型哈希、reviewer 身份和导出 checksum 都只是证据，不是厂商签名或当前授权证明。
 - Secret/PII 扫描是保守的模式匹配，无法证明数据已完全匿名或许可证完全干净。

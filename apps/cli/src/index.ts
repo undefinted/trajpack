@@ -19,6 +19,7 @@ import { runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
 import { startReviewServer } from "./review-server.js";
 import { safeCliDebugDiagnostic, safeCliErrorMessage } from "./safe-error.js";
 import { readPassphrase } from "./secret.js";
+import { runResearchAnalyze } from "./research-command.js";
 
 function addSourceOptions(command: Command): Command {
   return command
@@ -90,7 +91,7 @@ addSourceOptions(
     .description("Import a user-provided official/manual export into the encrypted vault")
     .argument("<input>", "JSON, JSONL, HTML, ZIP official export, or .trajpack vault")
     .addOption(new Option("--source-hint <source>", "fail-closed source shape hint")
-      .choices(["chatgpt", "claude", "gemini", "deepseek-api", "generic"]))
+      .choices(["chatgpt", "claude", "gemini", "deepseek-api", "dsh-session", "generic"]))
     .option("--max-bytes <bytes>", "explicit compressed input/file byte limit")
     .option("--max-archive-entries <count>", "explicit ZIP entry-count limit")
     .option("--max-archive-entry-bytes <bytes>", "explicit ZIP per-entry decoded byte limit")
@@ -134,6 +135,15 @@ program.command("doctor")
   .description("Report native agent executables, pinned interfaces, and safe web import paths")
   .option("--json", "emit a machine-readable compatibility report")
   .action((options: { json?: boolean }) => runDoctor(options));
+
+program.command("analyze")
+  .description("Derive content-free workload and training-yield research metrics from approved traces")
+  .argument("<trace-ids...>", "one or more exact managed trace ids")
+  .addOption(new Option("--format <format>").choices(["summary", "tracelab-jsonl"]).default("summary"))
+  .addHelpText("after", `
+The TraceLab-shaped JSONL view is intentionally lossy and content-free. It is
+for workload/DuckDB research, never canonical reconstruction or training.`)
+  .action((traceIds: string[], options: { format: "summary" | "tracelab-jsonl" }) => runResearchAnalyze(traceIds, options));
 
 program.command("validate")
   .description("Validate a managed/encrypted trace, build, export directory, canonical bundle, or HF JSONL")
@@ -207,11 +217,19 @@ program.command("export")
   .addOption(new Option("--format <format>").choices(["canonical", "atif", "hf-trl", "otlp"]).makeOptionMandatory())
   .requiredOption("--output <directory>")
   .option("--plaintext", "acknowledge that output leaves the encrypted vault")
+  .addOption(new Option("--recipe <recipe>", "versioned single-trace HF/TRL training view")
+    .choices(["answer_sft", "reasoning_sft", "tool_use_sft", "deepseek_epoch_sft", "failure_recovery", "subagent_handoff", "pointwise_reward_rl_ready"]))
   .addOption(new Option("--mode <mode>").choices(["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"]))
   .addHelpText("after", `
 The output directory must not already exist. A dataset build freezes its mode;
 --mode may only repeat that value. Plaintext copies cannot be recalled by trajpack.`)
-  .action((selection: string, options: { format: ExportFormat; output: string; plaintext?: boolean; mode?: "archive" | "training_noncompetitive" | "training_competitive_distillation" | "redistribution" }) => runExport(selection, options));
+  .action((selection: string, options: {
+    format: ExportFormat;
+    output: string;
+    plaintext?: boolean;
+    mode?: "archive" | "training_noncompetitive" | "training_competitive_distillation" | "redistribution";
+    recipe?: "answer_sft" | "reasoning_sft" | "tool_use_sft" | "deepseek_epoch_sft" | "failure_recovery" | "subagent_handoff" | "pointwise_reward_rl_ready";
+  }) => runExport(selection, options));
 
 program.command("delete")
   .description("Delete one exact encrypted trace and create a lineage tombstone")

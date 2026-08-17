@@ -141,11 +141,13 @@ export function collectDoctorReport(
       { product: "Claude.ai", supported_path: "official ZIP/JSON export import", fidelity: "B", automatic_commercial_dom_capture: false },
       { product: "Gemini Apps", supported_path: "Google Takeout Gemini Apps MyActivity JSON/HTML import", fidelity: "B", automatic_commercial_dom_capture: false },
       { product: "DeepSeek", supported_path: "DeepSeek API JSON/JSONL or user-created manual archive", fidelity: "B", automatic_commercial_dom_capture: false },
+      { product: "DeepSeek Harness session", supported_path: "explicit --source-hint dsh-session for unpacked, uncompressed persistence v0 JSONL", fidelity: "B", automatic_commercial_dom_capture: false },
       { product: "Authorized site", supported_path: "click-driven selector recipe and visible DOM preview", fidelity: "C", automatic_commercial_dom_capture: false },
     ],
     boundaries: [
       "Executable detection does not prove that a host plugin is installed or that provider/model claims are authentic.",
       "Commercial ChatGPT, Claude, Gemini, and DeepSeek web origins have no built-in DOM selector preset.",
+      "A recognized API or Harness persistence shape is user-supplied evidence, not provider authentication.",
       "Visible reasoning is classified as provider-exposed reasoning, summary, generated rationale, opaque state, or unavailable; never hidden chain of thought.",
     ],
   };

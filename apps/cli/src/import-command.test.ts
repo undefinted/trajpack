@@ -84,6 +84,8 @@ describe("import command integration", () => {
         }),
       }),
       "test-passphrase-long-enough",
+      undefined,
+      { maxRawEvents: 250_000, maxRawBytes: 192 * 1024 * 1024 },
     );
   });
 
@@ -150,6 +152,8 @@ describe("import command integration", () => {
         }),
       }),
       "test-passphrase-long-enough",
+      undefined,
+      { maxRawEvents: 250_000, maxRawBytes: 192 * 1024 * 1024 },
     );
   });
 
@@ -206,6 +210,8 @@ describe("import command integration", () => {
         }),
       }),
       "test-passphrase-long-enough",
+      undefined,
+      { maxRawEvents: 250_000, maxRawBytes: 192 * 1024 * 1024 },
     );
     expect(capture.ingest).toHaveBeenCalledTimes(1);
     expect(capture.ingest).toHaveBeenCalledWith(expect.objectContaining({
@@ -273,6 +279,8 @@ describe("import command integration", () => {
         }),
       }),
       "test-passphrase-long-enough",
+      undefined,
+      { maxRawEvents: 250_000, maxRawBytes: 192 * 1024 * 1024 },
     );
   });
 

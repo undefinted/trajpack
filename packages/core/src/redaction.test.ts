@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "./canonical.js";
 import { fixtureBundle } from "./testing.js";
-import { redactText, sanitizeBundle, scanStructured, scanText } from "./redaction.js";
+import { redactStructured, redactText, sanitizeBundle, scanStructured, scanText } from "./redaction.js";
 
 describe("redaction", () => {
   it("redacts credentials without returning their value", () => {
@@ -72,6 +72,19 @@ describe("redaction", () => {
       nested: { accessKeyId: "[REDACTED:cloud_credential]" },
       trajpack_structured_redaction: expect.any(Object),
     });
+  });
+
+  it("does not mistake validated integrity digests for phone numbers", () => {
+    const digest = "1".repeat(64);
+    const value = {
+      raw_payload_sha256: digest,
+      request_header_sha256: digest,
+      dedupe_key: digest,
+      nested: { event_sha256: digest },
+    };
+    expect(scanStructured(value)).toEqual([]);
+    expect(redactStructured(value)).toEqual({ value, findings: [] });
+    expect(scanStructured({ raw_payload_sha256: "123 456 7890" })).not.toEqual([]);
   });
 
   it("detects secret assignments in plaintext env/config content", () => {

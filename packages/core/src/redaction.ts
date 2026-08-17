@@ -95,6 +95,18 @@ function alreadyRedacted(value: unknown): boolean {
   return typeof value === "string" && /^\[REDACTED:[a-z_]+\]$/.test(value);
 }
 
+/**
+ * Content-addresses and integrity keys are deliberate lineage. A random
+ * hexadecimal digest can accidentally match the phone detector, so exempt
+ * only an exact lowercase SHA-256 value under a narrowly named digest key.
+ * Invalid or non-digest values continue through the privacy scanner.
+ */
+export function isSafeIntegrityDigest(path: string, value: unknown): boolean {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) return false;
+  const leaf = normalizedLeaf(path);
+  return leaf === "dedupe_key" || leaf === "sha256" || leaf.endsWith("_sha256");
+}
+
 function structuredStringFindings(value: string, path: string): StructuredRedactionFinding[] {
   const findings = scanText(value).map((finding) => ({ ...finding, path }));
   if (alreadyRedacted(value)) return [];
@@ -133,6 +145,7 @@ export function redactText(value: string, findings = scanText(value)): string {
 }
 
 export function scanStructured(value: unknown, rootPath = "$", seen = new WeakSet<object>()): StructuredRedactionFinding[] {
+  if (isSafeIntegrityDigest(rootPath, value)) return [];
   const sensitiveKind = sensitiveKeyKind(rootPath);
   if (sensitiveKind && value !== null && value !== undefined && !alreadyRedacted(value)) {
     const rendered = typeof value === "string" ? value : String(value);
@@ -152,6 +165,7 @@ export function scanStructured(value: unknown, rootPath = "$", seen = new WeakSe
 export function redactStructured(value: unknown): { value: unknown; findings: StructuredRedactionFinding[] } {
   const findings: StructuredRedactionFinding[] = [];
   const visit = (entry: unknown, path: string, seen: WeakSet<object>): unknown => {
+    if (isSafeIntegrityDigest(path, entry)) return entry;
     const sensitiveKind = sensitiveKeyKind(path);
     if (sensitiveKind && entry !== null && entry !== undefined && !alreadyRedacted(entry)) {
       const rendered = typeof entry === "string" ? entry : String(entry);

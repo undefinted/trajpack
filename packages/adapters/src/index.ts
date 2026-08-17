@@ -31,6 +31,7 @@ export * from "./common.js";
 export * from "./codex.js";
 export * from "./claude.js";
 export * from "./deepseek.js";
+export * from "./deepseek-epoch.js";
 export * from "./gemini.js";
 export * from "./imported.js";
 
