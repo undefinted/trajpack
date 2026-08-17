@@ -35,6 +35,13 @@ const HOSTS: Record<string, Host> = {
 
 const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", gemini: "gemini", dsh: "dsh" };
 
+/** Expand a leading `~` so `--cwd "~/proj"` resolves to the user home instead of a literal `~/proj` directory. */
+function resolveCwd(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
+  return resolve(value);
+}
+
 export interface CaptureCommandOptions extends SourceCliOptions {
   cwd?: string;
   maxEvents?: string | number;
@@ -248,7 +255,7 @@ export function armRuntimeDirectory(host: Host): string {
 export async function runCapture(hostName: string, words: string[], options: CaptureCommandOptions): Promise<number> {
   const host = HOSTS[hostName];
   if (!host) throw new Error(`Unsupported host: ${hostName}`);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveCwd(options.cwd ?? process.cwd());
   const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
   const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
   const drainMs = captureDrainMs(options.drainMs);
@@ -430,7 +437,7 @@ export async function runArm(hostName: string, options: ArmCommandOptions): Prom
   if (host !== "codex" && host !== "claude_code" && host !== "gemini_cli") {
     throw new Error("arm supports codex, claude, or gemini");
   }
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveCwd(options.cwd ?? process.cwd());
   const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
   const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
   const drainMs = captureDrainMs(options.drainMs);

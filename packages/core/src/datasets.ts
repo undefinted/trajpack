@@ -764,8 +764,15 @@ function lineageCrossSplit(prepared: PreparedTrace[]): DatasetAudit["lineage_cro
 }
 
 function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAudit {
+  // The global near-duplicate budget accumulates in traversal order. Sort by
+  // trace_id first so the audit (and its limit-trip accounting) is identical
+  // regardless of the caller's input ordering.
+  const orderedPrepared = [...prepared].sort(
+    (left, right) => left.bundle.manifest.trace_id < right.bundle.manifest.trace_id ? -1
+      : left.bundle.manifest.trace_id > right.bundle.manifest.trace_id ? 1 : 0,
+  );
   const globalNearBudget = { sourceBytes: 0, features: 0, failureReason: null as string | null };
-  const fingerprints = prepared.map((trace) => ({
+  const fingerprints = orderedPrepared.map((trace) => ({
     trace,
     fingerprint: selectedTrainingViewFingerprint(trace, build.mode, globalNearBudget),
   }));

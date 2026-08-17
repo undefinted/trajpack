@@ -1076,11 +1076,18 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   const checksums: Record<string, string> = {};
   const selected = selectedBundle(bundle, gate.excludedContentParts);
   const exportedEventIds = new Map<string, string>();
-  bundle.events.filter((event) => event.review_disposition === "include")
-    .forEach((event, index) => {
-      const exported = selected.events[index];
-      if (exported) exportedEventIds.set(event.event_id, exported.event_id);
-    });
+  const excludedKeys = new Set(gate.excludedContentParts.map((part) => `${part.eventId}\u0000${part.ordinal}`));
+  let exportedIndex = 0;
+  for (const event of bundle.events) {
+    if (event.review_disposition !== "include") continue;
+    // `selectedBundle` may drop an included event whose structured tool
+    // projection was review-excluded; advance the cursor only for events that
+    // actually survive, so `selected.events[exportedIndex]` stays aligned.
+    if (structuredToolProjectionExcluded(event, excludedKeys)) continue;
+    const exported = selected.events[exportedIndex];
+    if (exported) exportedEventIds.set(event.event_id, exported.event_id);
+    exportedIndex += 1;
+  }
   const exportedExcludedParts = gate.excludedContentParts.map((part) => ({
     ...part,
     eventId: exportedEventIds.get(part.eventId) ?? part.eventId,

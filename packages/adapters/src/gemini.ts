@@ -37,9 +37,9 @@ function geminiUsage(value: unknown): Partial<TrajectoryEvent["usage"]> {
   };
 }
 
-function responseText(response: JsonObject): string[] {
+function responseText(response: JsonObject): Array<{ index: number; text: string }> {
   const candidates = Array.isArray(response.candidates) ? response.candidates : [];
-  const rendered: string[] = [];
+  const rendered: Array<{ index: number; text: string }> = [];
   for (const candidate of candidates) {
     if (!isRecord(candidate)) continue;
     const content = nestedRecord(candidate, "content");
@@ -50,7 +50,12 @@ function responseText(response: JsonObject): string[] {
       const value = firstString(part, ["text"]);
       return value === null ? [] : [value];
     }).join("");
-    if (text.length > 0) rendered.push(text);
+    if (text.length > 0) {
+      const index = typeof candidate.index === "number" && Number.isInteger(candidate.index)
+        ? candidate.index
+        : rendered.length;
+      rendered.push({ index, text });
+    }
   }
   return rendered;
 }
@@ -182,12 +187,12 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
         metadata: { model, streaming_chunk: true, reasoning_representation: "unavailable" },
       })] };
     }
-    return { raw, events: texts.map((text, index) => make(index, {
+    return { raw, events: texts.map(({ text, index }, position) => make(position, {
       eventType: "message",
       actor: "assistant",
       status: "partial",
       content: [contentPart(text)],
-      usage: index === 0 ? usage : {},
+      usage: position === 0 ? usage : {},
       metadata: {
         model,
         candidate_index: index,

@@ -278,6 +278,24 @@ describe("policy gates", () => {
     expect(reasons).toContain("THIRD_PARTY_CONTENT_REQUIRES_ITEMIZED_RIGHTS");
   });
 
+  it("treats SPDX license identifiers case-insensitively", () => {
+    const bundle = fixtureBundle();
+    bundle.manifest.rights.source_license_expression = "apache-2.0";
+    bundle.manifest.rights.model_license_chain = ["apache-2.0"];
+    const reasons = evaluateGate(bundle, "training_competitive_distillation").reasonCodes;
+    expect(reasons).not.toContain("SOURCE_LICENSE_UNKNOWN");
+    expect(reasons).not.toContain("MODEL_LICENSE_CHAIN_UNKNOWN");
+
+    const eligibility = evaluateDefaultEligibility({
+      source: { ...bundle.manifest.source, provider: "deepseek" },
+      accountType: "api",
+      rights: { ...bundle.manifest.rights, source_license_expression: "mit", model_license_chain: [] },
+      consentActive: true,
+      now: EVIDENCE_NOW,
+    });
+    expect(eligibility.redistribution.status).toBe("allow");
+  });
+
   it("requires a reviewed event-level rights decision for structured tool payloads", () => {
     const bundle = fixtureBundle();
     bundle.manifest.rights.input_rights_basis = "unknown";

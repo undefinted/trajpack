@@ -18,6 +18,7 @@ import {
   normalizeCodexAppServerEvent,
   normalizeCodexAppServerJsonl,
   normalizeCodexHook,
+  normalizeCodexJsonEvent,
   normalizeCodexJsonl,
   normalizeDeepSeekSessionEvent,
   normalizeDeepSeekSessionJsonl,
@@ -57,6 +58,20 @@ describe("Codex adapter", () => {
       ["call-ok", "ok", 0],
       ["call-fail", "error", 1],
     ]);
+  });
+
+  it("types command_execution output by the field that supplied it", () => {
+    const withStderrKey = normalizeCodexJsonEvent({
+      type: "item.completed",
+      item: { type: "command_execution", output: "stdout-text", stderr: null, exit_code: 0, id: "c1" },
+    }, { traceId: TRACE_ID, sequence: 0 });
+    expect(withStderrKey.events[0]?.content[0]?.type).toBe("stdout");
+
+    const stderrOnly = normalizeCodexJsonEvent({
+      type: "item.completed",
+      item: { type: "command_execution", stderr: "boom", exit_code: 1, id: "c2" },
+    }, { traceId: TRACE_ID, sequence: 0 });
+    expect(stderrOnly.events[0]?.content[0]?.type).toBe("stderr");
   });
 
   it("normalizes subagent and compaction hook events without reading transcript paths", () => {

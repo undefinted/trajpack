@@ -1,6 +1,6 @@
 import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join, parse, sep } from "node:path";
 import type sodiumTypes from "libsodium-wrappers-sumo";
 import type { RawEnvelope, TraceBundle, TraceManifest, TrajectoryEvent } from "@trajpack/schema";
 import { assertTraceBundle } from "@trajpack/schema";
@@ -71,15 +71,43 @@ async function writeAll(handle: Awaited<ReturnType<typeof open>>, bytes: Buffer)
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
-  const metadata = await lstat(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error("Vault parent must be a real directory, not a symlink or junction");
-  }
+  await assertRealDirectoryPath(path, "Vault parent");
   await chmod(path, 0o700).catch((error: NodeJS.ErrnoException) => {
     // Windows ACLs do not implement POSIX modes; creation still uses the
     // process owner and all vault files themselves are opened as 0600.
     if (process.platform !== "win32") throw error;
   });
+}
+
+/**
+ * Reject not only a symlink at the final component but any symlink/junction
+ * ancestor. `mkdir(recursive)` and `lstat` both follow intermediate symlinks,
+ * so without this walk a redirected parent would silently relocate the whole
+ * encrypted store to an attacker-controlled location.
+ *
+ * macOS ships a small set of root-level platform symlinks (/tmp -> /private/tmp,
+ * /var -> /private/var, /etc -> /private/etc) that legitimately appear above
+ * `tmpdir()`; those are tolerated, while any caller-controlled link below them
+ * is still rejected.
+ */
+const SYSTEM_ALIAS_ROOTS = new Set(process.platform === "win32" ? [] : ["/tmp", "/var", "/etc"]);
+
+async function assertRealDirectoryPath(path: string, label: string): Promise<void> {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(`${label} must be a real directory, not a symlink or junction`);
+  }
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    const component = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (component?.isSymbolicLink() && !SYSTEM_ALIAS_ROOTS.has(current)) {
+      throw new Error(`${label} contains a symbolic-link or junction ancestor: ${current}`);
+    }
+  }
 }
 
 async function syncParentDirectory(path: string): Promise<void> {

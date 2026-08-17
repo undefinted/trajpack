@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, parse, sep } from "node:path";
 import type { TraceBundle } from "@trajpack/schema";
 import { sha256 } from "./canonical.js";
 import { defaultPaths, type TrajpackPaths } from "./paths.js";
@@ -45,6 +45,21 @@ async function ensureManagedDirectory(path: string): Promise<void> {
   const metadata = await lstat(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new Error("Managed trajpack path must be a real directory");
+  }
+  // `mkdir(recursive)` and `lstat` follow intermediate symlinks, so walk every
+  // ancestor to ensure a symlinked parent cannot silently redirect the store.
+  // macOS root-level platform symlinks (/tmp, /var, /etc) are tolerated.
+  const systemAliasRoots = new Set(process.platform === "win32" ? [] : ["/tmp", "/var", "/etc"]);
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    const component = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (component?.isSymbolicLink() && !systemAliasRoots.has(current)) {
+      throw new Error(`Managed trajpack path contains a symbolic-link or junction ancestor: ${current}`);
+    }
   }
   await chmod(path, 0o700).catch((error: NodeJS.ErrnoException) => {
     if (process.platform !== "win32") throw error;
@@ -248,8 +263,12 @@ export async function deleteTrace(traceId: string, paths: TrajpackPaths = defaul
   const entries = await readdir(paths.vault, { withFileTypes: true });
   const artifacts = entries.filter((entry) => pattern.test(entry.name));
   if (artifacts.some((entry) => entry.isDirectory())) throw new Error("Managed trace artifact unexpectedly became a directory");
-  const exact = artifacts.find((entry) => entry.name === `${traceId}.trajpack` && entry.isFile())
-    ?? artifacts.find((entry) => entry.isFile());
+  // Only a real generation artifact (.trajpack/.next/.backup) can represent an
+  // existing trace. Stale writer temp files alone must never produce a
+  // tombstone that claims a trace was deleted.
+  const generations = artifacts.filter((entry) => TRACE_ARTIFACT.test(entry.name));
+  const exact = generations.find((entry) => entry.name === `${traceId}.trajpack` && entry.isFile())
+    ?? generations.find((entry) => entry.isFile());
   if (artifacts.some((entry) => entry.name === `${traceId}.trajpack` && !entry.isFile())) {
     throw new Error("Managed trace artifact is not a regular file");
   }

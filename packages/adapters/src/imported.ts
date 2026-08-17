@@ -9,6 +9,7 @@ import {
   firstString,
   isRecord,
   nestedRecord,
+  sha256,
   stableJson,
   stringValue,
   toIso,
@@ -150,12 +151,18 @@ function deepSeekApiEvents(
           : toolPosition;
         const name = fn ? firstString(fn, ["name"]) : null;
         const args = fn?.arguments ?? null;
+        // Streaming continuation fragments carry only `arguments` (no id). A
+        // literal `partial` suffix would collide across chunks of the same
+        // tool, so derive a stable per-fragment identity from the delta text.
+        const fragmentSuffix = callId ?? (args === null || args === ""
+          ? `partial:${toolPosition}:${toolCall.index ?? "?"}`
+          : `partial:${sha256(typeof args === "string" ? args : stableJson(args)).slice(0, 16)}`);
         events.push(createEvent(raw, events.length, {
           eventType: "tool.call",
           actor: "assistant",
           status,
           content: [contentPart(args, 0, { type: "tool_call" })],
-          sourceEventId: `${sourcePrefix}:tool:${toolIndex}:${callId ?? "partial"}`,
+          sourceEventId: `${sourcePrefix}:tool:${toolIndex}:${fragmentSuffix}`,
           sourceSessionId: responseId,
           sourceStepId: stepId,
           startedAt,

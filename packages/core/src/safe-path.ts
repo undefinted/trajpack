@@ -28,7 +28,13 @@ export async function assertSafeOutputParent(input: string): Promise<string> {
     throw new Error(`Output parent must be an existing real directory: ${parent}`);
   }
 
-  const candidates = [resolve(process.cwd()), resolve(tmpdir()), parse(parent).root]
+  // `/tmp` and `/var` are macOS platform symlinks (/tmp -> /private/tmp,
+  // /var -> /private/var) that sit below the filesystem root, so they are not
+  // reachable through `tmpdir()` (which returns /var/folders/... on macOS).
+  // Treating them as trusted roots keeps system temp exports working while
+  // still rejecting caller-controlled links below them.
+  const systemAliasRoots = process.platform === "win32" ? [] : [resolve("/tmp"), resolve("/var")];
+  const candidates = [resolve(process.cwd()), resolve(tmpdir()), ...systemAliasRoots, parse(parent).root]
     .filter((candidate, index, values) => values.indexOf(candidate) === index)
     .filter((candidate) => isWithin(candidate, parent))
     .sort((left, right) => right.length - left.length);

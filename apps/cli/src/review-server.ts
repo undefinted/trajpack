@@ -617,6 +617,12 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   });
 
   app.post("/v1/browser/captures", async (request, reply) => {
+    // The capture route lives outside /api/v1, so it is not covered by the
+    // `locked` check in the onRequest hook. Reject before consuming the
+    // one-shot pairing nonce; otherwise a locked vault would permanently burn
+    // the nonce and leave the extension unable to retry without a restart.
+    if (locked) return reply.code(423).send({ error: "vault_locked" });
+    resetIdle();
     const requestOrigin = request.headers.origin;
     const suppliedNonce = request.headers["x-trajpack-pairing-nonce"] as string | undefined;
     if (request.headers.host !== hostHeader || !extensionOrigin(requestOrigin)

@@ -455,6 +455,11 @@ function conversation(
       while (callBoundary !== null && index + 1 < scopedEvents.length) {
         const candidate = scopedEvents[index + 1]!;
         if (candidate.event_type !== "tool.call" || boundary(candidate) !== callBoundary) break;
+        // Non-assembled Harness tool.call records (streaming deltas, execution
+        // lifecycle rows) duplicate the assembled message and must not be
+        // merged into its tool_calls; the same filter already applies to the
+        // group's first event above.
+        if (isDeepSeekHarnessCanonicalEvent(candidate) && !isAssembledHarnessToolCall(candidate)) break;
         calls.push(candidate);
         index += 1;
       }

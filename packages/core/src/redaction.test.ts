@@ -74,6 +74,15 @@ describe("redaction", () => {
     });
   });
 
+  it("does not treat space-separated date-time stamps as phone numbers", () => {
+    expect(scanText("log at 2024-05-10 12:34:56 ended")).toEqual([]);
+    expect(scanText("log at 2024-05-10 12:34 ended")).toEqual([]);
+    expect(scanText("log at 2024-05-10 ended")).toEqual([]);
+    expect(scanText("log at 2024-05-10T12:34:56Z ended")).toEqual([]);
+    // A genuine phone number is still detected.
+    expect(scanText("call 123-456-7890 now")).not.toEqual([]);
+  });
+
   it("does not mistake validated integrity digests for phone numbers", () => {
     const digest = "1".repeat(64);
     const value = {
