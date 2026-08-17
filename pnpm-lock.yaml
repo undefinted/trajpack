@@ -116,6 +116,9 @@ importers:
       '@dsnp/parquetjs':
         specifier: 1.8.9
         version: 1.8.9
+      '@trajpack/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@trajpack/schema':
         specifier: workspace:*
         version: link:../schema

@@ -103,13 +103,19 @@ The plugin subscribes with the real callback signature
 record. It forwards this bounded capsule instead:
 
 ```text
-session_id + minimal session_header + resolved provider/model route
+session_id + minimal session_header (including Session.firstLiveSeq)
++ resolved provider/model route
 + event { type, seq, time, data, ignorable? }
 ```
 
 The adapter requires the exact interface pin, header version `0`, matching
 session IDs, valid non-negative sequence/time fields, and contiguous per-session
-sequence numbers. Unknown required records and incompatible descriptor versions
+sequence numbers beginning at the official live-process boundary. This allows a
+resumed session to start above zero while still detecting a plugin loaded after
+part of the live event stream was already missed. Exact duplicate delivery is
+idempotent; a conflicting payload for the same session/sequence, or any gap,
+quarantines the temporary vault before canonical resequencing. Unknown required
+records and incompatible descriptor versions
 produce no canonical projection and make live capture publication fail closed;
 they are not coerced into plausible training events or partial training traces.
 The rc.6 golden fixtures use the actual durable names (`approval/asked`,
@@ -128,6 +134,15 @@ the same block from another or unknown provider is
 `opaque_reasoning_state`. Both remain excluded from loss by default. The plugin
 is inert without the short-lived collector variables supplied by
 `trajpack capture dsh`; it writes no local log or plaintext fallback.
+
+Harness rc.6 defines `session/event` as observe-only and `session/flush` as its
+awaited durability checkpoint. Trajpack registers both surfaces and an async
+Cordis dispose effect: normal flush waits for the session's collector queue,
+profile teardown drains all admitted tail events, and network or non-2xx HTTP
+failures reject the checkpoint. The durable `request/header.data.header.config`
+provider/model pair is reconciled with the capsule route and the declared
+teacher; the evidence digest is recorded in the manifest without claiming a
+provider signature.
 
 ## Native compatibility and validation status
 

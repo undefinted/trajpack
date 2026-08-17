@@ -134,6 +134,34 @@ function hasDeepSeekApiShape(value: unknown, requireDeepSeekModel: boolean): boo
   return records.length > 0 && records.every((record) => hasDeepSeekApiRecordShape(record, requireDeepSeekModel));
 }
 
+function hasDeepSeekHarnessHeaderShape(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || value.type !== "session" || value.version !== 0) return false;
+  return typeof value.id === "string" && value.id.length > 0
+    && typeof value.createdAt === "number" && Number.isFinite(value.createdAt) && value.createdAt >= 0
+    && Number.isSafeInteger(value.delegationDepth) && (value.delegationDepth as number) >= 0
+    && (value.cwd === undefined || typeof value.cwd === "string")
+    && (value.parentSession === undefined || typeof value.parentSession === "string")
+    && (value.seedLength === undefined || (Number.isSafeInteger(value.seedLength) && (value.seedLength as number) >= 0));
+}
+
+function hasDeepSeekHarnessEventShape(value: unknown, expectedSeq: number): boolean {
+  if (!isRecord(value) || value.seq !== expectedSeq || typeof value.type !== "string" || !value.type.includes("/")) return false;
+  return typeof value.time === "number" && Number.isFinite(value.time) && value.time >= 0
+    && isRecord(value.data)
+    && (value.ignorable === undefined || value.ignorable === true)
+    && (value.surfaceOp === undefined || value.surfaceOp === "append" || isRecord(value.surfaceOp))
+    && (value.sourceEventSeqs === undefined || (Array.isArray(value.sourceEventSeqs)
+      && value.sourceEventSeqs.every((seq) => Number.isSafeInteger(seq) && seq >= 0)));
+}
+
+function hasDeepSeekHarnessSessionShape(records: unknown[]): boolean {
+  if (records.length < 2 || !hasDeepSeekHarnessHeaderShape(records[0])) return false;
+  // Packed assistant chunk rows require the upstream lossless codec. v1 accepts
+  // only the official uncompressed one-event-per-line representation and fails
+  // closed instead of partially decoding text-chunks/reasoning-chunks rows.
+  return records.slice(1).every((record, index) => hasDeepSeekHarnessEventShape(record, index));
+}
+
 function officialDetection(
   parsed: unknown,
   filename: string | undefined,
@@ -209,6 +237,9 @@ export function detectImportFormat(
   const isHtmlFilename = file.endsWith(".html") || file.endsWith(".htm");
   const looksLikeHtml = /^<!doctype\s+html\b|^<html\b|^<head\b|^<body\b/i.test(trimmed);
   if (isHtmlFilename || looksLikeHtml) {
+    if (options.sourceHint === "dsh-session") {
+      throw new Error("DeepSeek Harness session persistence must be an unpacked JSONL v0 artifact");
+    }
     if (options.sourceHint === "deepseek-api") {
       throw new Error("The HTML input is not a validated DeepSeek API response; import it as generic HTML instead");
     }
@@ -259,6 +290,9 @@ export function detectImportFormat(
   }
 
   if (parsedAsJson) {
+    if (options.sourceHint === "dsh-session") {
+      throw new Error("DeepSeek Harness session persistence must contain a header line followed by event JSONL rows");
+    }
     const official = officialDetection(parsed, options.filename, options.sourceHint);
     const detection = official ?? {
       format: "generic_json" as const,
@@ -283,6 +317,19 @@ export function detectImportFormat(
   }
 
   if (records.length === 0) throw new Error("Import input contains no JSONL records");
+  if (options.sourceHint === "dsh-session") {
+    if (!hasDeepSeekHarnessSessionShape(records)) {
+      throw new Error("The input is not an unpacked DeepSeek Harness session JSONL v0 artifact");
+    }
+    return {
+      detection: {
+        format: "deepseek_harness_session_jsonl",
+        mediaType: "application/x-ndjson",
+        basis: "explicit dsh-session hint plus validated session header v0 and contiguous unpacked SessionEvent rows",
+      },
+      records,
+    };
+  }
   const expectedConversationJsonl = file === "conversations.jsonl";
   if ((options.sourceHint === "chatgpt" || (options.sourceHint === undefined && expectedConversationJsonl)) && hasChatGptShape(records)) {
     return {

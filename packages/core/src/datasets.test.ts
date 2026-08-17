@@ -24,6 +24,9 @@ const HAS_HF_PYTHON = spawnSync("python", ["-c", "import datasets, pyarrow"], { 
 
 function distinctBundle(traceId: string, text: string, competitive = false): TraceBundle {
   const bundle = fixtureBundle(text);
+  // Dataset mechanics are source-agnostic. Keep these fixtures off the
+  // DeepSeek Harness path, whose HF/TRL contract requires an explicit recipe.
+  bundle.manifest.source.host = "manual_import";
   bundle.manifest.trace_id = traceId;
   bundle.events = bundle.events.map((event, index) => ({
     ...event,

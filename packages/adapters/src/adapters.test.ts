@@ -281,6 +281,21 @@ describe("DeepSeek Harness adapter", () => {
       ...payload,
       event: { type: "future/required", seq: 0, time: 1_786_800_000_000, data: {} },
     }, { traceId: TRACE_ID, capturedAt: FIXED }).events).toEqual([]);
+    const ignorable = normalizeDeepSeekSessionEvent({
+      ...payload,
+      event: { type: "plugin/telemetry", seq: 0, time: 1_786_800_000_000, data: {}, ignorable: true },
+    }, { traceId: TRACE_ID, capturedAt: FIXED }).events;
+    expect(ignorable).toHaveLength(1);
+    expect(ignorable[0]).toMatchObject({
+      event_type: "evaluation",
+      status: "partial",
+      metadata: {
+        durable_event_type: "plugin/telemetry",
+        source_event_ignorable: true,
+        opaque_durable_event: true,
+        training_semantics_available: false,
+      },
+    });
   });
 
   it("retains discontinuous rc.6 records as raw-only instead of reconstructing a partial branch", () => {

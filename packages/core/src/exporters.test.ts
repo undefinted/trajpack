@@ -2,11 +2,14 @@ import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ParquetReader } from "@dsnp/parquetjs";
+import { DEEPSEEK_HARNESS_INTERFACE_VERSION, normalizeRawEnvelope } from "@trajpack/adapters";
 import { describe, expect, it } from "vitest";
 import { exportApprovedBundle, toAtif, toHfExample, toHfExamples } from "./exporters.js";
 import * as publicCore from "./index.js";
-import { sha256 } from "./canonical.js";
+import { canonicalJson, sha256 } from "./canonical.js";
 import { createApprovalScope, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
+import { applyAutomatedReview } from "./quality.js";
+import { sanitizeBundle } from "./redaction.js";
 import { fixtureBundle } from "./testing.js";
 
 function reapprove(bundle: ReturnType<typeof fixtureBundle>): void {
@@ -16,6 +19,108 @@ function reapprove(bundle: ReturnType<typeof fixtureBundle>): void {
     "training_competitive_distillation",
     "redistribution",
   ]);
+}
+
+function genericExportBundle(text = "hello"): ReturnType<typeof fixtureBundle> {
+  const bundle = fixtureBundle(text);
+  bundle.manifest.source.host = "manual_import";
+  reapprove(bundle);
+  return bundle;
+}
+
+function attestToolRights(bundle: ReturnType<typeof fixtureBundle>, eventIndex: number): void {
+  const event = bundle.events[eventIndex]!;
+  const rights = bundle.manifest.rights;
+  const decision = bundle.manifest.eligibility.training_competitive_distillation;
+  event.metadata.trajpack_review = {
+    rights_attestation: {
+      schema_version: "rights-attestation/0.1",
+      rights,
+      scopes: [{
+        mode: "training_competitive_distillation",
+        target_model_owner: decision.target_model_owner,
+        target_product: decision.target_product,
+      }],
+      reviewer: "fixture-rights-reviewer",
+      evidence_ref: `rights:sha256:${"b".repeat(64)}`,
+      evidence_sha256: "b".repeat(64),
+      attested_at: "2026-08-16T00:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      event_sha256: reviewEvidenceFingerprint(event),
+      source_sha256: sha256(canonicalJson(bundle.manifest.source)),
+    },
+  };
+}
+
+function epochExportBundle(): ReturnType<typeof fixtureBundle> {
+  const capsule = (seq: number, type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    session_id: "epoch-export",
+    session_header: {
+      version: 0, id: "epoch-export", first_live_seq: 0, seed_length: 0,
+      parent_session: null, origin: "user", delegation_depth: 0, agent_preset: "default",
+    },
+    route: { provider: "self_hosted", model: "fixture-model" },
+    event_id: `epoch-export:${seq}`,
+    timestamp: 1_786_900_100_000 + seq,
+    event: { type, seq, time: 1_786_900_100_000 + seq, data, ...extra },
+  });
+  const payloads = [
+    capsule(0, "request/header", { header: {
+      config: { provider: "self_hosted", model: "fixture-model" },
+      system: "Local research system",
+      tools: [],
+    }, reason: "initial" }),
+    capsule(1, "turn/start", { turn: 0 }),
+    capsule(2, "step/start", { turn: 0, step: 0 }),
+    capsule(3, "user/message", {
+      id: "user", role: "user", source: { kind: "user" },
+      content: [{ type: "text", text: "Compile the fixture." }],
+    }, { surfaceOp: "append" }),
+    capsule(4, "assistant/message", {
+      turn: 0, step: 0,
+      message: {
+        id: "assistant", role: "assistant",
+        source: { kind: "model", provider: "self_hosted", model: "fixture-model" },
+        content: [{ type: "text", text: "Fixture compiled." }],
+      },
+    }, { surfaceOp: "append", sourceEventSeqs: [] }),
+    capsule(5, "step/end", { turn: 0, step: 0 }),
+    capsule(6, "turn/end", { turn: 0, reason: { kind: "completed" } }),
+  ];
+  const bundle = fixtureBundle();
+  bundle.manifest.source.adapter_version = "0.1.0";
+  bundle.manifest.source.interface_version = DEEPSEEK_HARNESS_INTERFACE_VERSION;
+  bundle.raw = payloads.map((payload, sequence) => ({
+    envelope_version: "raw/0.1" as const,
+    adapter: "deepseek_harness" as const,
+    adapter_version: "0.1.0",
+    interface_version: DEEPSEEK_HARNESS_INTERFACE_VERSION,
+    captured_at: new Date(1_786_900_100_000 + sequence).toISOString(),
+    sequence,
+    source_event_id: `epoch-export:${sequence}`,
+    session_id: "epoch-export",
+    turn_id: null,
+    payload_sha256: sha256(canonicalJson(payload)),
+    payload,
+  }));
+  const events = [] as ReturnType<typeof normalizeRawEnvelope>;
+  let nextSequence = 0;
+  for (const envelope of bundle.raw) {
+    const projected = normalizeRawEnvelope(envelope, { traceId: bundle.manifest.trace_id, nextSequence });
+    for (const event of projected) {
+      event.content = event.content.map((part) => ({ ...part, redaction_status: "passed" }));
+      for (const key of ["raw_payload_sha256", "request_header_sha256", "dedupe_key"]) {
+        if (key in event.metadata) event.metadata[key] = key === "dedupe_key" ? "dedupe-alpha" : "a".repeat(64);
+      }
+      events.push(event);
+      nextSequence = Math.max(nextSequence, event.sequence + 1);
+    }
+  }
+  bundle.events = events;
+  bundle.manifest.lineage.raw_sha256 = sha256(canonicalJson(bundle.raw));
+  const reviewed = applyAutomatedReview(sanitizeBundle(bundle).bundle).bundle;
+  reapprove(reviewed);
+  return reviewed;
 }
 
 describe("exporters", () => {
@@ -45,6 +150,126 @@ describe("exporters", () => {
     expect(publicCore).not.toHaveProperty("toHfExamples");
     expect(publicCore).not.toHaveProperty("toOtlp");
     expect(publicCore).toHaveProperty("exportApprovedBundle");
+    expect(publicCore).not.toHaveProperty("compileTrainingView");
+  });
+
+  it("exports an explicit provider-exposed reasoning recipe with its evidence report", async () => {
+    const bundle = fixtureBundle("Inspect the repository first.");
+    bundle.manifest.source.host = "manual_import";
+    bundle.manifest.source.surface = "manual_import";
+    bundle.manifest.source.capture_method = "manual_copy";
+    bundle.events[0]!.actor = "user";
+    bundle.events[0]!.source_step_id = "step-0";
+    const reasoning = structuredClone(bundle.events[0]!);
+    reasoning.event_id = "reasoning-complete";
+    reasoning.span_id = "9876987698769876";
+    reasoning.sequence = 1;
+    reasoning.actor = "assistant";
+    reasoning.event_type = "reasoning";
+    reasoning.status = "ok";
+    reasoning.metadata.provider_route = "self_hosted";
+    reasoning.metadata.model = "fixture-model";
+    reasoning.content[0] = {
+      ...reasoning.content[0]!,
+      type: "reasoning",
+      value: "Inspect the tests before changing implementation.",
+      sha256: sha256("Inspect the tests before changing implementation."),
+      reasoning: {
+        representation: "provider_exposed_reasoning",
+        provider_claim: "chain_of_thought",
+        source_field: "reasoning_content",
+        visibility: "api_only",
+        include_in_loss: false,
+      },
+    };
+    bundle.events = [bundle.events[0]!, reasoning];
+    reapprove(bundle);
+    const root = await mkdtemp(join(tmpdir(), "trajpack-reasoning-view-"));
+    try {
+      const output = join(root, "dataset");
+      await exportApprovedBundle(bundle, {
+        format: "hf-trl",
+        mode: "training_noncompetitive",
+        trainingRecipe: "reasoning_sft",
+        outputDirectory: output,
+      });
+      const dataset = JSON.parse((await readFile(join(output, "dataset.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(dataset).toMatchObject({
+        training_targets: [{ components: ["reasoning"] }],
+        metadata: { view: { recipe: "reasoning_sft", objective: "sft" } },
+      });
+      const report = JSON.parse(await readFile(join(output, "training-view-report.json"), "utf8")) as Record<string, unknown>;
+      expect(report).toMatchObject({
+        recipe: "reasoning_sft",
+        compiler_version: "training-view-compiler/0.2",
+      });
+      expect(await readFile(join(output, "DATASET_CARD.md"), "utf8")).toContain("reasoning_sft");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exports exact Harness epochs through the selected canonical view without serializing raw capsules", async () => {
+    const bundle = epochExportBundle();
+    const root = await mkdtemp(join(tmpdir(), "trajpack-epoch-view-"));
+    try {
+      const output = join(root, "dataset");
+      await exportApprovedBundle(bundle, {
+        format: "hf-trl",
+        mode: "training_noncompetitive",
+        trainingRecipe: "deepseek_epoch_sft",
+        outputDirectory: output,
+      });
+      const datasetText = await readFile(join(output, "dataset.jsonl"), "utf8");
+      const dataset = JSON.parse(datasetText.trim()) as Record<string, unknown>;
+      expect(dataset).toMatchObject({
+        messages: [
+          { role: "system", content: "Local research system" },
+          { role: "user", content: "Compile the fixture." },
+          { role: "assistant", content: "Fixture compiled." },
+        ],
+        assistant_loss_mask: [false, false, true],
+        metadata: { view: { recipe: "deepseek_epoch_sft", exact_model_visible_surface: true } },
+      });
+      expect(datasetText).not.toContain("session_header");
+      expect(datasetText).not.toContain("first_live_seq");
+      const report = JSON.parse(await readFile(join(output, "training-view-report.json"), "utf8")) as Record<string, unknown>;
+      expect(report).toMatchObject({ recipe: "deepseek_epoch_sft", views: [expect.any(Object)] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+
+    const redacted = epochExportBundle();
+    const output = redacted.events.find((event) => event.metadata.harness_seq === 4
+      && event.event_type === "message")!;
+    output.content[0]!.redaction_status = "redacted";
+    output.content[0]!.value = "[REDACTED]";
+    output.content[0]!.sha256 = sha256("[REDACTED]");
+    reapprove(redacted);
+    const rejectedRoot = await mkdtemp(join(tmpdir(), "trajpack-epoch-redacted-"));
+    try {
+      await expect(exportApprovedBundle(redacted, {
+        format: "hf-trl",
+        mode: "training_noncompetitive",
+        trainingRecipe: "deepseek_epoch_sft",
+        outputDirectory: join(rejectedRoot, "dataset"),
+      })).rejects.toThrow(/produced no eligible views|RAW_LINEAGE_HASH_MISMATCH|CANONICAL/u);
+    } finally {
+      await rm(rejectedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an ambiguous trace_full HF view for DeepSeek Harness", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dsh-trace-full-"));
+    try {
+      await expect(exportApprovedBundle(epochExportBundle(), {
+        format: "hf-trl",
+        outputDirectory: join(root, "hf"),
+        mode: "training_competitive_distillation",
+      })).rejects.toThrow("requires an explicit versioned recipe");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it.skipIf(process.platform === "win32")("rejects plaintext output through a symlinked ancestor", async () => {
@@ -395,8 +620,20 @@ describe("exporters", () => {
 
   it("exports rewards only with concrete verifier provenance", () => {
     const unverified = fixtureBundle();
-    unverified.events[0]!.event_type = "evaluation";
-    unverified.events[0]!.metadata.reward = 1;
+    const target = unverified.events[0]!;
+    const evaluation = structuredClone(target);
+    evaluation.event_id = "evt_evaluation";
+    evaluation.span_id = "1111111111111111";
+    evaluation.sequence = 1;
+    evaluation.event_type = "evaluation";
+    evaluation.actor = "environment";
+    evaluation.content = [];
+    evaluation.metadata = {
+      reward: 1,
+      target_event_id: target.event_id,
+      target_event_sha256: reviewEvidenceFingerprint(target),
+    };
+    unverified.events = [target, evaluation];
     expect(toHfExample(unverified).reward).toBeNull();
 
     const verifier = {
@@ -405,22 +642,22 @@ describe("exporters", () => {
       artifact_sha256: "a".repeat(64),
       result_sha256: null,
     };
-    unverified.events[0]!.metadata.verifier = verifier;
-    unverified.events[0]!.metadata.trajpack_review = {
+    evaluation.metadata.verifier = verifier;
+    evaluation.metadata.trajpack_review = {
       verifier_confirmation: {
         schema_version: "verifier-confirmation/0.1",
         reviewer: "fixture-reviewer",
         evidence_ref: "verifier-run:fixture",
         confirmed_at: "2026-08-16T00:00:00.000Z",
-        event_sha256: reviewEvidenceFingerprint(unverified.events[0]!),
+        event_sha256: reviewEvidenceFingerprint(evaluation),
         reward: 1,
         verifier,
       },
     };
     const verified = toHfExample(unverified);
-    expect(verified.reward).toBe(1);
-    expect(verified.verifier).toEqual({ name: "tests", version: "1.2.3" });
-    expect(verified.metadata.verified_label_source_event_id).toBe("evt_fixture");
+    expect(verified.reward).toBeNull();
+    expect(verified.verifier).toBeNull();
+    expect(verified.metadata.verified_label_source_event_id).toBeNull();
 
     const atif = toAtif(unverified) as {
       reward?: unknown;
@@ -430,7 +667,9 @@ describe("exporters", () => {
     expect(atif.extra.trajpack.verified_label).toEqual({
       reward: 1,
       verifier: { name: "tests", version: "1.2.3" },
-      sourceEventId: "evt_fixture",
+      sourceEventId: "evt_evaluation",
+      targetEventId: "evt_fixture",
+      targetEventSha256: reviewEvidenceFingerprint(target),
     });
   });
 
@@ -496,7 +735,7 @@ describe("exporters", () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-export-hf-parquet-"));
     const output = join(root, "dataset");
     try {
-      await exportApprovedBundle(fixtureBundle("assistant parquet answer"), {
+      await exportApprovedBundle(genericExportBundle("assistant parquet answer"), {
         format: "hf-trl",
         outputDirectory: output,
         mode: "training_competitive_distillation",
@@ -563,6 +802,56 @@ describe("exporters", () => {
     }
   });
 
+  it("does not let a structured tool copy bypass an excluded content projection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-export-tool-selection-"));
+    const bundle = genericExportBundle("included assistant answer");
+    const toolEvent = structuredClone(bundle.events[0]!);
+    toolEvent.event_id = "evt_excluded_tool_projection";
+    toolEvent.span_id = "1234123412341234";
+    toolEvent.sequence = 1;
+    toolEvent.event_type = "tool.call";
+    toolEvent.tool = {
+      call_id: "call-excluded",
+      name: "run_secret",
+      arguments: { value: "STRUCTURED_REVIEW_EXCLUSION_SENTINEL" },
+      result: null,
+      exit_code: null,
+    };
+    toolEvent.content = [{
+      ...toolEvent.content[0]!,
+      type: "tool_call",
+      value: "STRUCTURED_REVIEW_EXCLUSION_SENTINEL",
+      sha256: sha256("STRUCTURED_REVIEW_EXCLUSION_SENTINEL"),
+      review_disposition: "exclude",
+    }];
+    bundle.events.push(toolEvent);
+    attestToolRights(bundle, 1);
+    reapprove(bundle);
+    try {
+      const canonical = join(root, "canonical");
+      const atif = join(root, "atif");
+      const hf = join(root, "hf");
+      await exportApprovedBundle(bundle, { format: "canonical", outputDirectory: canonical });
+      await exportApprovedBundle(bundle, { format: "atif", outputDirectory: atif, mode: "archive" });
+      await exportApprovedBundle(bundle, {
+        format: "hf-trl",
+        outputDirectory: hf,
+        mode: "training_competitive_distillation",
+      });
+      const plaintext = [
+        await readFile(join(canonical, "events.jsonl"), "utf8"),
+        await readFile(join(atif, "trajectory.atif.json"), "utf8"),
+        await readFile(join(hf, "dataset.jsonl"), "utf8"),
+        await readFile(join(hf, "provenance.json"), "utf8"),
+      ].join("\n");
+      expect(plaintext).toContain("included assistant answer");
+      expect(plaintext).not.toContain("STRUCTURED_REVIEW_EXCLUSION_SENTINEL");
+      expect(plaintext).not.toContain("call-excluded");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("removes opaque reasoning parts from canonical training views", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-export-opaque-"));
     const output = join(root, "dataset");
@@ -591,7 +880,7 @@ describe("exporters", () => {
 
   it("preserves canonical-only patch and verifier fields in every lossy-format sidecar", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-export-sidecar-"));
-    const bundle = fixtureBundle("diff --git a/a.ts b/a.ts");
+    const bundle = genericExportBundle("diff --git a/a.ts b/a.ts");
     bundle.events[0]!.event_type = "artifact.patch";
     bundle.events[0]!.content[0]!.type = "patch";
     bundle.events[0]!.metadata.verifier = { name: "repo-tests", version: "2.0.0" };

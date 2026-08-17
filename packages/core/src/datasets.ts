@@ -37,6 +37,7 @@ import { HF_PARQUET_SCHEMA_VERSION, writeHfParquet } from "./hf-parquet.js";
 export { validateHfParquetFile } from "./hf-parquet.js";
 import { inspectQuality } from "./quality.js";
 import { assertSafeOutputParent } from "./safe-path.js";
+import { structuredToolProjectionExcluded } from "./selection.js";
 
 export const CURRENT_DATASET_COMPILER_VERSIONS: DatasetBuild["compiler_versions"] = Object.freeze({
   view: DATASET_VIEW_COMPILER_VERSION,
@@ -438,6 +439,7 @@ function selectedTrainingViewFingerprint(
     .sort((left, right) => left.sequence - right.sequence
       || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0))
     .filter((event) => event.review_disposition === "include")
+    .filter((event) => !structuredToolProjectionExcluded(event, excluded))
     .map((event) => ({
       actor: event.actor,
       event_type: event.event_type,

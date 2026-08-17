@@ -10,11 +10,12 @@ export type ImportFormat =
   | "gemini_takeout_activity_json"
   | "gemini_takeout_activity_html"
   | "deepseek_api_response"
+  | "deepseek_harness_session_jsonl"
   | "generic_json"
   | "generic_jsonl"
   | "generic_html";
 
-export type ImportSourceHint = "chatgpt" | "claude" | "gemini" | "deepseek-api" | "generic";
+export type ImportSourceHint = "chatgpt" | "claude" | "gemini" | "deepseek-api" | "dsh-session" | "generic";
 
 export interface ImportOptions {
   filename?: string;
@@ -37,8 +38,8 @@ export interface ImportDetection {
 export interface ImportProvenance {
   schema_version: typeof IMPORT_PROVENANCE_VERSION;
   importer_version: typeof IMPORTER_VERSION;
-  import_method: "official_export" | "manual_import";
-  source_product: "chatgpt" | "claude" | "gemini" | "deepseek_api" | "generic";
+  import_method: "official_export" | "host_persistence" | "manual_import";
+  source_product: "chatgpt" | "claude" | "gemini" | "deepseek_api" | "deepseek_harness" | "generic";
   source_authenticity: "unverified_user_supplied";
   fidelity: "B" | "C";
   detected_format: ImportFormat;

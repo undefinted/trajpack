@@ -12,7 +12,11 @@ import {
   vaultPath,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION, normalizeRawEnvelope } from "@trajpack/adapters";
+import {
+  CLAUDE_TRANSCRIPT_OPAQUE_INTERFACE_VERSION,
+  DEEPSEEK_HARNESS_INTERFACE_VERSION,
+  normalizeRawEnvelope,
+} from "@trajpack/adapters";
 
 export type CaptureLimitReason =
   | "CAPTURE_EVENT_LIMIT_EXCEEDED"
@@ -34,6 +38,36 @@ export interface CaptureSessionLimits {
 
 type JsonRecord = Record<string, unknown>;
 
+export type HarnessCaptureIntegrityReason =
+  | "HARNESS_CAPSULE_INVALID"
+  | "HARNESS_SEQUENCE_START_MISMATCH"
+  | "HARNESS_SEQUENCE_GAP"
+  | "HARNESS_SEQUENCE_CONFLICT";
+
+export class HarnessCaptureIntegrityError extends Error {
+  constructor(readonly reason: HarnessCaptureIntegrityReason) {
+    super(`DeepSeek Harness capture quarantined: ${reason}`);
+    this.name = "HarnessCaptureIntegrityError";
+  }
+}
+
+interface HarnessCapsuleEvidence {
+  payload: JsonRecord;
+  event: JsonRecord;
+  data: JsonRecord;
+  header: JsonRecord;
+  route: JsonRecord | null;
+  sessionId: string;
+  seq: number;
+  firstLiveSeq: number;
+  firstObservedSeq: number;
+}
+
+interface HarnessSequenceState {
+  nextSeq: number;
+  readonly payloadHashes: Map<number, string>;
+}
+
 function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as JsonRecord
@@ -51,6 +85,60 @@ function firstNestedString(containers: Array<JsonRecord | null>, keys: string[])
   return null;
 }
 
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/**
+ * Parse the exact live capsule emitted by the rc.6 plugin. `first_live_seq` is
+ * the official Session.firstLiveSeq process boundary: it lets resumed sessions
+ * start above zero without treating an actually missed live prefix as valid.
+ */
+function liveHarnessCapsule(envelope: RawEnvelope): HarnessCapsuleEvidence | null {
+  if (envelope.adapter !== "deepseek_harness"
+    || envelope.interface_version !== DEEPSEEK_HARNESS_INTERFACE_VERSION) return null;
+  const payload = record(envelope.payload);
+  const event = payload === null ? null : record(payload.event);
+  const data = event === null ? null : record(event.data);
+  const header = payload === null ? null : record(payload.session_header);
+  const route = payload === null ? null : record(payload.route);
+  const sessionId = payload === null ? null : firstNestedString([payload], ["session_id"]);
+  const headerId = header === null ? null : firstNestedString([header], ["id"]);
+  const eventId = payload === null ? null : firstNestedString([payload], ["event_id"]);
+  const seq = event?.seq;
+  const firstLiveSeq = header?.first_live_seq;
+  const firstObservedSeq = header?.first_observed_seq;
+  const boundaryMarker = record(header?.unpublished_boundary_marker);
+  const seededBoundaryMarkerOmitted = boundaryMarker?.type === "session/end-seed"
+    && nonNegativeSafeInteger(boundaryMarker.seq)
+    && nonNegativeSafeInteger(firstLiveSeq) && nonNegativeSafeInteger(firstObservedSeq)
+    && boundaryMarker.seq === firstLiveSeq && firstObservedSeq === firstLiveSeq + 1;
+  if (
+    payload === null || event === null || data === null || header === null || sessionId === null ||
+    headerId !== sessionId || header.version !== 0 || !nonNegativeSafeInteger(seq) ||
+    !nonNegativeSafeInteger(firstLiveSeq) || !nonNegativeSafeInteger(firstObservedSeq) ||
+    (firstObservedSeq !== firstLiveSeq && !seededBoundaryMarkerOmitted) ||
+    eventId !== `${sessionId}:${String(seq)}` ||
+    envelope.session_id !== sessionId || envelope.source_event_id !== eventId
+  ) {
+    throw new HarnessCaptureIntegrityError("HARNESS_CAPSULE_INVALID");
+  }
+  return { payload, event, data, header, route, sessionId, seq, firstLiveSeq, firstObservedSeq };
+}
+
+function canonicalProviderRoute(value: string): Source["provider"] | null {
+  const route = value.toLowerCase();
+  if (route === "deepseek" || route.startsWith("deepseek-")) return "deepseek";
+  if (route === "anthropic" || route.startsWith("anthropic-")
+    || route === "claude" || route.startsWith("claude-")) return "anthropic";
+  if (route === "google" || route.startsWith("google-")
+    || route === "gemini" || route.startsWith("gemini-")) return "google";
+  if (route === "openai" || route.startsWith("openai-")) return "openai";
+  if (["local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"].includes(route)
+    || route.startsWith("local-") || route.startsWith("ollama-")) return "self_hosted";
+  return null;
+}
+
 /**
  * Reconcile a claimed Harness teacher with the durable request/header event.
  * Local process observation is not a provider signature, but it prevents a
@@ -59,54 +147,92 @@ function firstNestedString(containers: Array<JsonRecord | null>, keys: string[])
  */
 export function reconcileObservedHarnessTeacher(source: Source, raw: readonly RawEnvelope[]): Source {
   if (source.host !== "deepseek_harness") return source;
-  const observations: Array<{ provider: string; model: string; payload_sha256: string }> = [];
-  for (const envelope of raw) {
+  const observations: Array<{
+    provider: string;
+    model: string;
+    route_provider: string | null;
+    route_model: string | null;
+    session_id: string;
+    parent_session_id: string | null;
+    delegation_depth: number | null;
+    observed_order: number;
+    request_seq: number;
+    payload_sha256: string;
+  }> = [];
+  for (const [observedOrder, envelope] of raw.entries()) {
     if (envelope.adapter !== "deepseek_harness"
-      || envelope.interface_version !== "deepseek-harness@0.1.0-rc.6/session-event/0") continue;
-    const payload = record(envelope.payload);
-    if (!payload) continue;
-    const event = record(payload.event) ?? payload;
-    const body = record(event.data) ?? event;
-    const type = firstNestedString([body, event, payload], ["type", "event_type", "eventType"]);
+      || envelope.interface_version !== DEEPSEEK_HARNESS_INTERFACE_VERSION) continue;
+    const capsule = liveHarnessCapsule(envelope);
+    if (capsule === null) continue;
+    const type = firstNestedString([capsule.event], ["type"]);
     if (type !== "request/header") continue;
-    const header = record(body.header) ?? record(event.header);
-    const request = record(body.request) ?? record(event.request);
-    const config = record(body.config) ?? record(request?.config);
-    const providerObject = record(body.provider) ?? record(header?.provider) ?? record(request?.provider);
-    const model = firstNestedString(
-      [body, header, request, config, providerObject],
-      ["model", "model_id", "modelId", "model_name", "modelName"],
-    );
-    const provider = typeof body.provider === "string"
-      ? body.provider.trim()
-      : firstNestedString(
-        [body, header, request, providerObject],
-        ["provider_id", "providerId", "provider_name", "providerName", "id", "name"],
-      );
-    if (provider && model) observations.push({ provider, model, payload_sha256: envelope.payload_sha256 });
+    const requestHeader = record(capsule.data.header);
+    const config = requestHeader === null ? null : record(requestHeader.config);
+    const provider = firstNestedString([config], ["provider"]);
+    const model = firstNestedString([config], ["model"]);
+    if (provider === null || model === null) {
+      throw new Error("Harness request header is missing the resolved provider/model route");
+    }
+    const routeProvider = firstNestedString([capsule.route], ["provider"]);
+    const routeModel = firstNestedString([capsule.route], ["model"]);
+    if (routeProvider === null || routeModel === null
+      || routeProvider.toLowerCase() !== provider.toLowerCase()
+      || routeModel !== model) {
+      throw new Error("Harness capsule route conflicts with the durable request header");
+    }
+    observations.push({
+      provider,
+      model,
+      route_provider: routeProvider,
+      route_model: routeModel,
+      session_id: capsule.sessionId,
+      parent_session_id: firstNestedString([capsule.header], ["parent_session"]),
+      delegation_depth: nonNegativeSafeInteger(capsule.header.delegation_depth)
+        ? capsule.header.delegation_depth
+        : null,
+      observed_order: observedOrder,
+      request_seq: capsule.seq,
+      payload_sha256: envelope.payload_sha256,
+    });
   }
-  if (observations.length === 0) {
-    return source.provider === "deepseek"
-      ? { ...source, authenticity_evidence_ref: null }
-      : source;
-  }
-  const providers = new Set(observations.map(({ provider }) => provider.toLowerCase()));
-  const models = new Set(observations.map(({ model }) => model));
-  if (providers.size !== 1 || models.size !== 1) throw new Error("Harness teacher provenance conflicts across request headers");
-  const observedProvider = [...providers][0]!;
-  const observedModel = [...models][0]!;
+  if (observations.length === 0) return source;
+  const rootCandidates = observations.filter((observation) => observation.parent_session_id === null
+    && (observation.delegation_depth === null || observation.delegation_depth === 0));
+  const primarySessionId = (rootCandidates[0] ?? observations[0])!.session_id;
+  const primaryObservations = observations.filter((observation) => observation.session_id === primarySessionId);
+  // A Harness session may deliberately switch routes between request epochs.
+  // Keep the complete inventory in the evidence digest, but bind the manifest's
+  // singular teacher fields to the first durable request of the root session.
+  // Training-view compilers independently bind each target to its request epoch
+  // and fail closed when that epoch does not match the approved primary route.
+  const primaryObservation = primaryObservations[0]!;
+  const observedProvider = primaryObservation.provider.toLowerCase();
+  const observedModel = primaryObservation.model;
   if (source.model_id !== null && source.model_id !== observedModel) {
     throw new Error("Declared teacher model does not match the Harness request header");
   }
-  if (source.provider === "deepseek" && observedProvider !== "deepseek") {
+  const canonicalObservedProvider = canonicalProviderRoute(observedProvider);
+  if (source.provider !== "unknown" && canonicalObservedProvider !== source.provider) {
     throw new Error("Declared teacher provider does not match the Harness request header");
   }
   return {
     ...source,
+    provider: source.provider === "unknown" && canonicalObservedProvider !== null
+      ? canonicalObservedProvider
+      : source.provider,
     model_id: source.model_id ?? observedModel,
-    ...(source.provider === "deepseek" ? {
-      authenticity_evidence_ref: `native-request-header:sha256:${sha256(canonicalJson(observations))}`,
-    } : {}),
+    // A self-hosted teacher's content-bound weight digest is the stronger
+    // identity proof and is required verbatim by policy. Its request route is
+    // still present in encrypted raw lineage; do not replace the artifact ref.
+    authenticity_evidence_ref: source.provider === "self_hosted"
+      && source.model_snapshot_or_weights_digest !== null
+      && source.authenticity_evidence_ref === `local-model-artifact:${source.model_snapshot_or_weights_digest}`
+      ? source.authenticity_evidence_ref
+      : `native-request-header:sha256:${sha256(canonicalJson({
+        primary_session_id: primarySessionId,
+        observations,
+        prior_evidence_ref: source.authenticity_evidence_ref,
+      }))}`,
   };
 }
 
@@ -118,7 +244,8 @@ function positiveLimit(value: number | undefined, label: string): number {
 
 export class CaptureSession {
   private readonly raw: RawEnvelope[] = [];
-  private readonly dedupe = new Set<string>();
+  private readonly dedupe = new Map<string, string>();
+  private readonly harnessSequences = new Map<string, HarnessSequenceState>();
   private operationQueue: Promise<void> = Promise.resolve();
   private operationFailure: unknown = null;
   private rawBytes = 0;
@@ -183,7 +310,35 @@ export class CaptureSession {
     const key = parsed.source_event_id
       ? `${parsed.adapter}:${parsed.source_event_id}`
       : `${parsed.adapter}:${parsed.payload_sha256}`;
-    if (this.dedupe.has(key)) return false;
+    const duplicateHash = this.dedupe.get(key);
+    if (duplicateHash !== undefined) {
+      if (duplicateHash === parsed.payload_sha256) return false;
+      throw parsed.adapter === "deepseek_harness"
+        ? new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_CONFLICT")
+        : new Error("Conflicting duplicate raw event identity");
+    }
+    const harnessCapsule = liveHarnessCapsule(parsed);
+    let harnessState: HarnessSequenceState | null = null;
+    if (harnessCapsule !== null) {
+      harnessState = this.harnessSequences.get(harnessCapsule.sessionId) ?? null;
+      if (harnessState === null) {
+        if (harnessCapsule.seq !== harnessCapsule.firstObservedSeq) {
+          throw new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_START_MISMATCH");
+        }
+        harnessState = { nextSeq: harnessCapsule.firstObservedSeq, payloadHashes: new Map() };
+        this.harnessSequences.set(harnessCapsule.sessionId, harnessState);
+      }
+      const existingHash = harnessState.payloadHashes.get(harnessCapsule.seq);
+      if (existingHash !== undefined) {
+        if (existingHash === parsed.payload_sha256) return false;
+        throw new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_CONFLICT");
+      }
+      if (harnessCapsule.seq !== harnessState.nextSeq) {
+        throw new HarnessCaptureIntegrityError(
+          harnessCapsule.seq > harnessState.nextSeq ? "HARNESS_SEQUENCE_GAP" : "HARNESS_SEQUENCE_CONFLICT",
+        );
+      }
+    }
     // `sequence` is the append-only vault order. Provider/channel-local order
     // remains inside the opaque payload/source identifiers; assigning it here
     // prevents two concurrently observed official channels from colliding.
@@ -203,7 +358,11 @@ export class CaptureSession {
       }
       throw error;
     }
-    this.dedupe.add(key);
+    this.dedupe.set(key, parsed.payload_sha256);
+    if (harnessCapsule !== null && harnessState !== null) {
+      harnessState.payloadHashes.set(harnessCapsule.seq, parsed.payload_sha256);
+      harnessState.nextSeq = harnessCapsule.seq + 1;
+    }
     this.raw.push(envelope);
     this.rawBytes += envelopeBytes;
     return true;

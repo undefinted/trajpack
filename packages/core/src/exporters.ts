@@ -2,12 +2,19 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApprovalMode, DatasetExample, TraceBundle, TrajectoryEvent } from "@trajpack/schema";
-import { verifierConfirmationSchema, verifierEvidenceSchema } from "@trajpack/schema";
+import { datasetExampleSchema, verifierConfirmationSchema, verifierEvidenceSchema } from "@trajpack/schema";
 import { canonicalJson, sha256, stableId } from "./canonical.js";
 import { approvalFingerprint, evaluateGate, POLICY_VERSION, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
 import { inspectQuality, type QualityReport } from "./quality.js";
 import { writeHfParquet } from "./hf-parquet.js";
 import { assertSafeOutputParent } from "./safe-path.js";
+import { structuredToolProjectionExcluded } from "./selection.js";
+import {
+  compileTrainingView,
+  type CompiledTrainingView,
+  type TrainingViewCompilation,
+  type TrainingViewRecipe,
+} from "./training-views.js";
 
 export type ExportFormat = "canonical" | "atif" | "hf-trl" | "otlp";
 export type TrainingMode = "training_noncompetitive" | "training_competitive_distillation";
@@ -16,6 +23,7 @@ export interface ExportOptions {
   format: ExportFormat;
   outputDirectory: string;
   mode?: "archive" | TrainingMode | "redistribution";
+  trainingRecipe?: TrainingViewRecipe;
 }
 
 export interface ExportResult {
@@ -29,20 +37,27 @@ interface VerifiedLabel {
   reward: number;
   verifier: { name: string; version: string };
   sourceEventId: string;
+  targetEventId: string;
+  targetEventSha256: string;
 }
 
 function verifiedLabel(bundle: TraceBundle): VerifiedLabel | null {
   for (const event of [...bundle.events].reverse()) {
     if (event.review_disposition !== "include" || !["evaluation", "feedback"].includes(event.event_type)) continue;
     const reward = event.metadata.reward;
+    const targetEventId = event.metadata.target_event_id;
+    const targetEventSha256 = event.metadata.target_event_sha256;
     const review = event.metadata.trajpack_review;
     if (typeof reward !== "number" || !Number.isFinite(reward)
+      || typeof targetEventId !== "string" || typeof targetEventSha256 !== "string"
       || !review || typeof review !== "object" || Array.isArray(review)) continue;
     const verifier = verifierEvidenceSchema.safeParse(event.metadata.verifier);
     const confirmation = verifierConfirmationSchema.safeParse(
       (review as Record<string, unknown>).verifier_confirmation,
     );
-    if (!verifier.success || !confirmation.success
+    const target = bundle.events.find((candidate) => candidate.event_id === targetEventId) ?? null;
+    if (target === null || reviewEvidenceFingerprint(target) !== targetEventSha256
+      || !verifier.success || !confirmation.success
       || confirmation.data.event_sha256 !== reviewEvidenceFingerprint(event)
       || confirmation.data.reward !== reward
       || canonicalJson(confirmation.data.verifier) !== canonicalJson(verifier.data)) continue;
@@ -50,6 +65,8 @@ function verifiedLabel(bundle: TraceBundle): VerifiedLabel | null {
       reward,
       verifier: { name: verifier.data.name, version: verifier.data.version },
       sourceEventId: event.event_id,
+      targetEventId,
+      targetEventSha256,
     };
   }
   return null;
@@ -68,6 +85,7 @@ function selectedBundle(bundle: TraceBundle, excluded: ExportResult["excludedPar
   const excludedKeys = new Set(excluded.map((part) => `${part.eventId}\u0000${part.ordinal}`));
   const selectedEvents = bundle.events
     .filter((event) => event.review_disposition === "include")
+    .filter((event) => !structuredToolProjectionExcluded(event, excludedKeys))
     .map((event) => ({
       ...event,
       content: event.content
@@ -572,7 +590,6 @@ function toHfViewExample(bundle: TraceBundle, view: HfView): DatasetExample {
   const lossMask: boolean[] = [];
   const trainingTargets: DatasetExample["training_targets"] = [];
   const tools = new Map<string, Record<string, unknown>>();
-  const label = verifiedLabel({ ...bundle, events: view.events });
 
   const events = view.events;
   for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
@@ -684,7 +701,7 @@ function toHfViewExample(bundle: TraceBundle, view: HfView): DatasetExample {
     }
   }
 
-  return {
+  return datasetExampleSchema.parse({
     id: stableId("example", { trace: bundle.manifest.trace_id, events: view.events.map((event) => event.event_id) }),
     trace_id: bundle.manifest.trace_id,
     source_event_ids: view.events.map((event) => event.event_id),
@@ -692,22 +709,26 @@ function toHfViewExample(bundle: TraceBundle, view: HfView): DatasetExample {
     tools: [...tools.values()],
     assistant_loss_mask: lossMask,
     training_targets: trainingTargets,
-    reward: label?.reward ?? null,
-    verifier: label?.verifier ?? null,
+    // A trace can contain several assistant turns, while a verifier label is
+    // bound to one exact canonical target. The legacy trace_full view cannot
+    // express that target unambiguously, so it never promotes a scalar label
+    // to an example-level reward. Use pointwise_reward_rl_ready instead.
+    reward: null,
+    verifier: null,
     metadata: {
       source: bundle.manifest.source,
       rights: bundle.manifest.rights,
       eligibility: bundle.manifest.eligibility,
       review: bundle.manifest.review,
       lineage: bundle.manifest.lineage,
-      verified_label_source_event_id: label?.sourceEventId ?? null,
+      verified_label_source_event_id: null,
       view: {
         recipe: "trace_full",
         source_session_sha256: view.sessionSha256,
         branch_leaf_sha256: view.branchLeafSha256,
       },
     },
-  };
+  });
 }
 
 export function toHfExamples(bundle: TraceBundle): DatasetExample[] {
@@ -720,6 +741,72 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
     throw new Error(`Trace compiles to ${examples.length} isolated HF views; use toHfExamples()`);
   }
   return examples[0]!;
+}
+
+function trainingViewExample(bundle: TraceBundle, view: CompiledTrainingView): DatasetExample {
+  const enabledMessages = new Set(view.loss_targets.map((target) => target.message_index));
+  return datasetExampleSchema.parse({
+    id: view.view_id,
+    trace_id: view.trace_id,
+    source_event_ids: view.source_event_ids,
+    messages: view.messages.map((message) => ({ ...message })),
+    tools: view.tools.map((tool) => ({ ...tool })),
+    assistant_loss_mask: view.messages.map((_, index) => enabledMessages.has(index)),
+    training_targets: view.loss_targets.map((target) => ({
+      message_index: target.message_index,
+      components: target.components,
+      loss_weight: target.loss_weight,
+      source_event_ids: target.source_event_ids,
+    })),
+    reward: view.reward,
+    verifier: view.verifier_provenance === null
+      ? null
+      : {
+        name: view.verifier_provenance.verifier.name,
+        version: view.verifier_provenance.verifier.version,
+      },
+    metadata: {
+      source: bundle.manifest.source,
+      rights: bundle.manifest.rights,
+      eligibility: bundle.manifest.eligibility,
+      review: bundle.manifest.review,
+      lineage: bundle.manifest.lineage,
+      view: {
+        recipe: view.recipe,
+        recipe_version: view.recipe_version,
+        compiler_version: view.compiler_version,
+        objective: view.objective,
+        target_event_ids: view.target_event_ids,
+        evidence_event_ids: view.evidence_event_ids,
+        verifier_provenance: view.verifier_provenance,
+        ...view.metadata,
+      },
+    },
+  });
+}
+
+function compileRecipeExamples(
+  bundle: TraceBundle,
+  recipe: TrainingViewRecipe,
+  rawSource?: TraceBundle,
+): { examples: DatasetExample[]; compilation: TrainingViewCompilation } {
+  // The exact Harness epoch recipe needs encrypted raw capsules solely for
+  // topology replay and input/output hashes. It is compiled against the
+  // already-selected canonical export view, and the compiler requires every
+  // emitted raw field to match a review-included, privacy-passed canonical
+  // projection byte-for-byte. Raw is never serialized into the dataset.
+  const compilerInput = recipe === "deepseek_epoch_sft" && rawSource !== undefined
+    ? { ...bundle, raw: rawSource.raw }
+    : bundle;
+  const compilation = compileTrainingView(compilerInput, recipe);
+  if (compilation.views.length === 0) {
+    const reasons = [...new Set(compilation.exclusions.flatMap((item) => item.reason_codes))].sort();
+    throw new Error(`Training recipe ${recipe} produced no eligible views: ${reasons.join(", ")}`);
+  }
+  return {
+    examples: compilation.views.map((view) => trainingViewExample(bundle, view)),
+    compilation,
+  };
 }
 
 export function toOtlp(bundle: TraceBundle): Record<string, unknown> {
@@ -761,6 +848,7 @@ function datasetCard(
   quality: QualityReport,
   redaction: Record<string, unknown>,
   mode: ApprovalMode,
+  recipe: TrainingViewRecipe | null,
 ): string {
   const safe = (value: string): string => value
     .replace(/&/g, "&amp;")
@@ -779,6 +867,7 @@ function datasetCard(
 - Policy: \`${safe(POLICY_VERSION)}\`
 - Eligibility gate: \`${safe(mode)}\`
 - Export format: \`${safe(format)}\`
+- Training view recipe: \`${safe(recipe ?? "trace_full")}\`
 - Source: \`${safe(`${bundle.manifest.source.host}/${bundle.manifest.source.provider}/${bundle.manifest.source.product}`)}\`
 - Model: \`${safe(bundle.manifest.source.model_id ?? "unknown")}\`
 - Account/contract class: \`${safe(bundle.manifest.account_contract.account_type)}\`
@@ -884,9 +973,16 @@ function lineageReport(bundle: TraceBundle, format: ExportFormat, mode: Approval
 
 export async function exportApprovedBundle(bundle: TraceBundle, options: ExportOptions): Promise<ExportResult> {
   const mode = options.mode ?? (options.format === "canonical" ? "archive" : "training_competitive_distillation");
+  if (options.trainingRecipe !== undefined && options.format !== "hf-trl") {
+    throw new Error("Versioned training recipes are available only for HF/TRL exports");
+  }
   if (options.format === "hf-trl"
     && mode !== "training_noncompetitive" && mode !== "training_competitive_distillation") {
     throw new Error("HF/TRL exports require an explicit training eligibility gate");
+  }
+  if (options.format === "hf-trl" && bundle.manifest.source.host === "deepseek_harness"
+    && options.trainingRecipe === undefined) {
+    throw new Error("DeepSeek Harness HF/TRL export requires an explicit versioned recipe; use deepseek_epoch_sft for exact request context");
   }
   const gate = evaluateGate(bundle, mode);
   const reviewReasons = [
@@ -917,6 +1013,7 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     canonical_events: selected.events,
     excluded_content_parts: exportedExcludedParts,
     export_mode: mode,
+    training_view_recipe: options.trainingRecipe ?? "trace_full",
     eligibility_decision: exportDecision(selected, mode),
     approval_scope: selected.manifest.review.approval_scope,
     verified_label: verifiedLabel(selected),
@@ -938,7 +1035,11 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     await writeTrackedFile(outputDirectory, "trajectory.atif.json", `${canonicalJson(toAtif(selected))}\n`, files, checksums);
     await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   } else if (options.format === "hf-trl") {
-    const examples = toHfExamples(selected);
+    const recipeResult = options.trainingRecipe === undefined
+      ? null
+      : compileRecipeExamples(selected, options.trainingRecipe, bundle);
+    const examples = (recipeResult?.examples ?? toHfExamples(selected))
+      .map((example) => datasetExampleSchema.parse(example));
     if (examples.length === 0 || examples.some((example) => example.messages.length === 0)) {
       throw new Error("HF/TRL export requires at least one non-empty topology-safe training view");
     }
@@ -949,6 +1050,15 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     const parquet = await import("node:fs/promises").then(({ readFile }) => readFile(parquetPath));
     files.push(parquetPath);
     checksums["dataset.parquet"] = sha256(parquet);
+    if (recipeResult !== null) {
+      await writeTrackedFile(
+        outputDirectory,
+        "training-view-report.json",
+        `${canonicalJson(recipeResult.compilation)}\n`,
+        files,
+        checksums,
+      );
+    }
     await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   } else {
     await writeTrackedFile(outputDirectory, "traces.otlp.json", `${canonicalJson(toOtlp(selected))}\n`, files, checksums);
@@ -977,7 +1087,15 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     terms_snapshots: selected.manifest.account_contract.terms,
     eligibility: selected.manifest.eligibility,
   })}\n`, files, checksums);
-  await writeTrackedFile(outputDirectory, "DATASET_CARD.md", datasetCard(selected, options.format, exportedExcludedParts, quality, redaction, mode), files, checksums);
+  await writeTrackedFile(outputDirectory, "DATASET_CARD.md", datasetCard(
+    selected,
+    options.format,
+    exportedExcludedParts,
+    quality,
+    redaction,
+    mode,
+    options.trainingRecipe ?? null,
+  ), files, checksums);
   await writeTrackedFile(
     outputDirectory,
     "checksums.txt",

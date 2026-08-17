@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@dsnp/parquetjs": "1.8.9",
+    "@trajpack/adapters": "workspace:*",
     "@trajpack/schema": "workspace:*",
     "libsodium-wrappers-sumo": "0.7.16"
   },

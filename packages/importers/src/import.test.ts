@@ -147,6 +147,134 @@ describe("format detection and raw envelopes", () => {
     );
   });
 
+  it("imports unpacked DeepSeek Harness session persistence without flattening its durable events", () => {
+    const artifact = [
+      { type: "session", version: 0, id: "dsh-session", createdAt: 1_786_838_400_000, delegationDepth: 0, cwd: "C:/repo" },
+      { type: "request/header", seq: 0, time: 1_786_838_400_001, data: {
+        reason: "initial",
+        header: { config: { provider: "deepseek-official", model: "deepseek-reasoner" }, system: "System" },
+      } },
+      { type: "turn/start", seq: 1, time: 1_786_838_400_002, data: { turn: 0 } },
+      { type: "step/start", seq: 2, time: 1_786_838_400_003, data: { turn: 0, step: 0 } },
+      { type: "user/message", seq: 3, time: 1_786_838_400_004, data: {
+        id: "u1", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "hello" }],
+      }, surfaceOp: "append", sourceEventSeqs: [1] },
+    ].map((value) => JSON.stringify(value)).join("\n");
+    const result = importToRawEnvelopes(artifact, {
+      capturedAt,
+      filename: "session.jsonl",
+      sourceHint: "dsh-session",
+    });
+
+    expect(result.detection.format).toBe("deepseek_harness_session_jsonl");
+    expect(result.provenance).toMatchObject({
+      import_method: "host_persistence",
+      source_product: "deepseek_harness",
+      source_authenticity: "unverified_user_supplied",
+    });
+    expect(result.envelopes).toHaveLength(4);
+    expect(result.envelopes[0]).toMatchObject({
+      adapter: "deepseek_harness",
+      interface_version: "deepseek-harness@0.1.0-rc.6/session-event/0",
+      session_id: "dsh-session",
+      source_event_id: "dsh-session:0",
+    });
+    expect(result.envelopes[0]!.payload).toMatchObject({
+      persistence_session_header_raw: {
+        type: "session",
+        version: 0,
+        id: "dsh-session",
+        cwd: "C:/repo",
+      },
+      persistence_session_header_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(result.envelopes[3]!.payload).toMatchObject({
+      session_header: {
+        cwd: "C:/repo",
+        delegation_depth: 0,
+        first_live_seq: 0,
+        first_observed_seq: 0,
+      },
+      route: { provider: "deepseek-official", model: "deepseek-reasoner" },
+      event: { type: "user/message", seq: 3, surfaceOp: "append" },
+    });
+    expect(result.envelopes[3]!.payload).not.toHaveProperty("persistence_session_header_raw");
+    expect(result.warnings.join(" ")).toContain("user supplied");
+  });
+
+  it("fails closed on packed or discontinuous Harness persistence rows", () => {
+    const headerLine = JSON.stringify({
+      type: "session", version: 0, id: "dsh-session", createdAt: 1_786_838_400_000, delegationDepth: 0,
+    });
+    const packed = `${headerLine}\n${JSON.stringify({ type: "reasoning-chunks", seq0: 0, time0: 1 })}`;
+    const gap = `${headerLine}\n${JSON.stringify({ type: "turn/start", seq: 1, time: 1, data: { turn: 0 } })}`;
+
+    expect(() => importToRawEnvelopes(packed, { capturedAt, sourceHint: "dsh-session" }))
+      .toThrow("not an unpacked DeepSeek Harness session JSONL v0 artifact");
+    expect(() => importToRawEnvelopes(gap, { capturedAt, sourceHint: "dsh-session" }))
+      .toThrow("not an unpacked DeepSeek Harness session JSONL v0 artifact");
+  });
+
+  it("stores a bounded persistence header only once instead of amplifying it per event", () => {
+    const headerLine = JSON.stringify({
+      type: "session",
+      version: 0,
+      id: "bounded-session",
+      createdAt: 1_786_838_400_000,
+      delegationDepth: 0,
+      extension: "x".repeat(64 * 1024),
+    });
+    const rows = Array.from({ length: 32 }, (_, seq) => JSON.stringify({
+      type: "turn/start",
+      seq,
+      time: 1_786_838_400_000 + seq,
+      data: { turn: seq },
+    }));
+    const result = importToRawEnvelopes([headerLine, ...rows].join("\n"), {
+      capturedAt,
+      sourceHint: "dsh-session",
+    });
+
+    expect(result.envelopes).toHaveLength(32);
+    expect(result.envelopes.filter((envelope) => Object.hasOwn(
+      envelope.payload as object,
+      "persistence_session_header_raw",
+    ))).toHaveLength(1);
+    expect(result.envelopes.every((envelope) => typeof (
+      envelope.payload as Record<string, unknown>
+    ).persistence_session_header_sha256 === "string")).toBe(true);
+
+    const oversized = JSON.stringify({
+      type: "session",
+      version: 0,
+      id: "oversized-session",
+      createdAt: 1_786_838_400_000,
+      delegationDepth: 0,
+      extension: "x".repeat(1024 * 1024 + 1),
+    });
+    expect(() => importToRawEnvelopes(`${oversized}\n${rows[0]}`, {
+      capturedAt,
+      sourceHint: "dsh-session",
+      maxBytes: 2 * 1024 * 1024,
+    })).toThrow("header exceeds the 1 MiB limit");
+  });
+
+  it("rejects deeply nested Harness event data before canonical hashing can recurse", () => {
+    const headerLine = JSON.stringify({
+      type: "session",
+      version: 0,
+      id: "deep-session",
+      createdAt: 1_786_838_400_000,
+      delegationDepth: 0,
+    });
+    const nested = `${'{"child":'.repeat(80)}0${"}".repeat(80)}`;
+    const eventLine = `{"type":"turn/start","seq":0,"time":1,"data":${nested}}`;
+    expect(() => importToRawEnvelopes(`${headerLine}\n${eventLine}`, {
+      capturedAt,
+      sourceHint: "dsh-session",
+    })).toThrow("structural depth limit");
+  });
+
   it("rejects empty JSON collections instead of silently producing no records", () => {
     expect(() => importToRawEnvelopes("[]", { capturedAt })).toThrow("contains no records");
   });

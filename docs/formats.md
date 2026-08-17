@@ -26,12 +26,75 @@ redaction, and review dispositions.
 - **OTLP** writes resource spans using a pinned development mapping and content
   hashes rather than prompt bodies.
 
+## Versioned HF/TRL training-view recipes
+
+An approved single managed trace can be compiled into one of seven narrower HF/TRL views
+with `trajpack export <trace-id> --format hf-trl --recipe <recipe> ...`. The raw
+vault and canonical bundle are not rewritten. The exporter records the recipe,
+recipe version, compiler version, source/target/evidence event IDs, component
+loss targets, exclusions, and compilation hash in the dataset and
+`training-view-report.json`.
+
+| Recipe | Objective | Inclusion contract |
+| --- | --- | --- |
+| `answer_sft` (`answer-sft/0.1`) | SFT | Completed assistant/agent text; the answer component alone is a loss target. |
+| `reasoning_sft` (`provider-exposed-reasoning-sft/0.1`) | SFT | Complete canonical reasoning explicitly classified as `provider_exposed_reasoning`, with a visible source field and provider `chain_of_thought` claim. Partial deltas remain lineage evidence; provider summaries and opaque/unavailable states are excluded. |
+| `tool_use_sft` (`native-tool-use-sft/0.1`) | SFT | Native tool name/arguments with stable call IDs and an observed result for every call, including parallel groups. The result is evidence, not a target or inferred reward. |
+| `deepseek_epoch_sft` (`deepseek-exact-request-epoch-sft/0.1`) | Exact Harness SFT | A complete sequence-zero `0.1.0-rc.6` raw durable log is replayed into request epochs. Provider/model, request header, system prompt, native tools, compaction-aware surface, and completed output must align with the review-included, privacy-passed canonical projection. The target can contain supported answer, explicit DeepSeek reasoning, and native tool-call components. |
+| `failure_recovery` (`evidenced-failure-recovery-sft/0.1`) | SFT | A failed tool outcome, explicit retry evidence, an observable recovery action, and an observed successful outcome. It targets the recovery action and does not create a success label. |
+| `subagent_handoff` (`subagent-handoff-sft/0.1`) | SFT | A correlated `agent.invoke`/`handoff` pair with privacy-cleared delegated context and a completed handoff response. |
+| `pointwise_reward_rl_ready` (`verified-pointwise-reward/0.1`) | Pointwise reward evidence | A completed response plus a finite numeric reward bound to versioned verifier evidence and matching reviewer confirmation, ready for downstream reward-model/RL research. It is not a chosen/rejected preference pair, step reward, policy-optimization run, or RL trainer. |
+
+Request-header system text and native tool JSON Schemas are carried into
+conversation/tool fields when they are present and review-included. Every
+recipe requires passing automated checks, target-scoped human training
+approval, privacy-cleared selected content, and fresh approval fingerprints.
+If no candidate satisfies the recipe, export fails rather than emitting an
+empty or synthetically labelled training file. Recipe export is single-trace
+in v0.1. Frozen multi-trace dataset builds may continue to use their audited
+`trace_full` view for sources with an unambiguous projection. DeepSeek Harness
+HF/TRL exports must name an explicit versioned recipe; `trace_full` is rejected
+because it cannot safely represent request epochs, surface replacement,
+multi-route subagents, and the three-layer tool lifecycle.
+
+The generic recipes are cross-adapter projections; they do not replay Harness
+surface state. For a DeepSeek Harness target, they require an included,
+privacy-cleared `request/header` and a provider/model route matching the approved
+manifest. A resumed trace (`firstLiveSeq > 0`) blocks every recipe because its
+earlier model-visible context is absent. A `surfaceOp: replace` before a generic
+target blocks that candidate with
+`DEEPSEEK_SURFACE_REPLACEMENT_REQUIRES_EXACT_RECIPE`; use a complete
+sequence-zero trace with `deepseek_epoch_sft`, which applies the surface
+replacement during epoch replay. The exact recipe still rejects resumed partial
+logs, missing headers, route mismatch, raw/canonical drift, unsupported required
+records, invalid replacement ranges, and any incomplete epoch.
+
+No recipe recovers hidden Chain of Thought. In particular, a long reasoning
+string is not sufficient for `reasoning_sft`; its canonical provenance and
+completeness must satisfy the explicit representation contract above.
+
 Every format also writes `DATASET_CARD.md`, `lineage.json`,
 `quality-report.json`, `redaction-report.json`, `license-summary.json`, and
 `checksums.txt`. Excluded
 events and content parts are removed before any plaintext serializer runs.
 Opaque reasoning states are excluded from training views. Exporters do not
 invent preference pairs, rewards, verifier success, or task labels.
+
+## Research analytics and the TraceLab-shaped projection
+
+`trajpack analyze <trace-ids...> --format summary` derives deterministic,
+content-free workload and training-yield statistics from approved managed
+traces. `--format tracelab-jsonl` emits a deliberately lossy, content-free row
+projection for systems-workload analysis inspired by
+[TraceLab](https://github.com/uw-syfi/TraceLab).
+
+The projection is not a canonical format, a training view, or a substitute for
+review. It omits prompt text, reasoning text, tool arguments/results, code,
+patches, and file contents. Canonical content remains encrypted and governed by
+trajpack, together with rights, redactions, topology, approval, and lineage.
+TraceLab is an analytics inspiration rather than a runtime dependency:
+TraceLab studies agent-serving workloads, while trajpack compiles governed
+observable evidence into reproducible post-training views.
 
 Single-trace and multi-trace exports are published through a private staging
 directory and receive a `COMPLETE` marker before an atomic same-parent rename.
