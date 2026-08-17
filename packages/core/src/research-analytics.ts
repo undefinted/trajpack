@@ -355,7 +355,7 @@ function deriveRounds(records: readonly EventRecord[]): RoundGroup[] {
     byTrace.set(record.event.trace_id, trace);
   }
   const rounds: RoundGroup[] = [];
-  for (const [traceId, traceRecords] of [...byTrace.entries()].sort(([left], [right]) => left < right ? -1 : 1)) {
+  for (const [traceId, traceRecords] of [...byTrace.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
     const stepGroups = new Map<string, RoundGroup>();
     const fallbackGroups: RoundGroup[] = [];
     for (const record of traceRecords.sort((a, b) => compareEvents(a.event, b.event))) {
@@ -612,7 +612,7 @@ function firstErrors(records: readonly EventRecord[]): ResearchAnalyticsSummary[
   const output: ResearchAnalyticsSummary["errors_and_recovery"]["first_errors"] = [];
   const pairedResults = new Set(pairTools(records).pairs.flatMap((pair) => pair.result === null ? [] : [pair.result.event_id]));
   let failedEventCount = 0;
-  for (const [traceId, unordered] of [...byTrace.entries()].sort(([left], [right]) => left < right ? -1 : 1)) {
+  for (const [traceId, unordered] of [...byTrace.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
     const events = unordered.sort(compareEvents);
     failedEventCount += events.filter((event) => event.status === "error" || event.event_type === "error").length;
     const first = events.find((event) => event.status === "error" || event.event_type === "error");

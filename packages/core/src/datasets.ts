@@ -784,7 +784,8 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
   const content = groupedCrossSplit(viewEntries);
   const withinSplit = groupedWithinSplit(viewEntries);
   const nearOrdered = [...fingerprints]
-    .sort((left, right) => left.trace.bundle.manifest.trace_id < right.trace.bundle.manifest.trace_id ? -1 : 1);
+    .sort((left, right) => left.trace.bundle.manifest.trace_id < right.trace.bundle.manifest.trace_id ? -1
+      : left.trace.bundle.manifest.trace_id > right.trace.bundle.manifest.trace_id ? 1 : 0);
   const featureFailure = nearOrdered.find((entry) => entry.fingerprint.nearFailureReason !== null)
     ?.fingerprint.nearFailureReason ?? null;
   const nearPreflightFailure = globalNearBudget.failureReason ?? featureFailure;

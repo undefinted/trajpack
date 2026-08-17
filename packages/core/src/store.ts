@@ -7,6 +7,10 @@ import { readBundle, writeBundle } from "./vault.js";
 
 const TRACE_ID = /^[a-f0-9]{32}$/;
 const TRACE_ARTIFACT = /^([a-f0-9]{32})\.trajpack(?:\.(next|backup))?$/;
+// VaultWriter stages a generation at `${targetPath}.${pid}.${Date.now()}.tmp`
+// before renaming it into place. A leftover file is always the residue of a
+// crashed writer (the store is single-writer), so it can be pruned safely.
+const STALE_VAULT_TEMP = /^[a-f0-9]{32}\.trajpack(?:\.(?:next|backup))?\.\d+\.\d+\.tmp$/;
 
 type RecoveryCandidateKind = "target" | "next" | "backup";
 
@@ -179,8 +183,24 @@ async function recoverTrace(
   return recovered;
 }
 
+/**
+ * Remove stale VaultWriter temp files left behind by a crashed process. These
+ * are never a valid generation and would otherwise accumulate unboundedly.
+ */
+async function pruneStaleVaultTemps(paths: TrajpackPaths): Promise<void> {
+  const entries = await readdir(paths.vault, { withFileTypes: true });
+  let removed = false;
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !STALE_VAULT_TEMP.test(entry.name)) continue;
+    await rm(join(paths.vault, entry.name), { force: true });
+    removed = true;
+  }
+  if (removed) await syncDirectory(paths.vault);
+}
+
 export async function listTraceIds(paths: TrajpackPaths = defaultPaths()): Promise<string[]> {
   await ensureManagedDirectory(paths.vault);
+  await pruneStaleVaultTemps(paths);
   const entries = await readdir(paths.vault, { withFileTypes: true });
   const traceIds = new Set<string>();
   for (const entry of entries) {
