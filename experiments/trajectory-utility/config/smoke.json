@@ -1,0 +1,26 @@
+{
+  "schema_version": "trajectory-utility-config/0.1",
+  "model": {
+    "id": "Qwen/Qwen2-0.5B-Instruct",
+    "revision": "c540970f9e29518b1d8f06ab8b24cba66ad77b6d"
+  },
+  "seed": 3407,
+  "train": {
+    "max_steps": 60,
+    "micro_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.01,
+    "warmup_steps": 5,
+    "max_length": 512,
+    "gradient_checkpointing": true,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  },
+  "evaluation": {
+    "max_tool_tokens": 80,
+    "max_final_tokens": 40
+  }
+}

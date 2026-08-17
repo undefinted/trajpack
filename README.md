@@ -128,7 +128,7 @@ pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source 
 
 Run `pnpm trajpack doctor` (or `doctor --json`) to probe host executables and report the expected plugin directories, pinned interfaces, and safe web-import routes before collecting real data. It deliberately reports plugin installation as `not_verified`; confirm installation with each host's own list/validate command.
 
-Capture is intentionally blocked until source, account, current terms or scoped permission, consent, and required rights metadata satisfy the `automatic_capture` gate. The most direct distillation research path is a legitimately licensed self-hosted model running through the pinned DeepSeek Harness, with the actual model artifact hashed locally and a retained runtime-binding receipt.
+Capture is intentionally blocked until source, account, current terms or scoped permission, consent, and required rights metadata satisfy the `automatic_capture` gate. The strongest built-in source correlation is the pinned DeepSeek Harness path: trajpack binds the approved provider/model to its durable `request/header` evidence. A self-hosted model can additionally be content-hashed locally, but that hash does **not** prove the runtime loaded those weights; self-hosted training therefore still requires separate, evidence-backed runtime-binding review.
 
 ### DeepSeek Harness-first path
 
@@ -225,6 +225,29 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 
 [TraceLab](https://github.com/uw-syfi/TraceLab) is an analytics inspiration, not a runtime dependency. TraceLab focuses on studying agent-serving workloads; trajpack focuses on governed, reviewable transformation from observable evidence into versioned SFT or verifier-backed pointwise-RL views. Canonical content, rights, redactions, topology, and lineage remain under trajpack governance, while the TraceLab-shaped projection contains aggregate/digest-level workload fields only.
 
+An export is not evidence that a dataset improves a model. The
+[trajectory-utility protocol](docs/trajectory-utility-evaluation.md) separates
+pipeline smoke tests, narrow small-model learning checks, matched benchmark
+ablations, and external replication. Start with the fully reproducible
+[synthetic DeepSeek Harness ETL demo](docs/demo.md), then run the auditable
+[base vs answer-only vs complete-trajectory small-model experiment](experiments/trajectory-utility/README.md).
+For bounded-concurrency behavior, hard limits, and the reproducible 100k-event
+measurements, see [Performance and scale](docs/performance.md).
+
+<p align="center">
+  <a href="experiments/trajectory-utility/results/reference-v5.md">
+    <img src="experiments/trajectory-utility/results/reference-v5.svg" width="760" alt="Single-seed trajectory utility smoke result">
+  </a>
+</p>
+
+In the committed strict-offline reference run, complete action → observation
+supervision reached 32/32 tool-using end-to-end successes; answer-only SFT
+reached 2/32 final answers and 0/32 tool-using successes. This is deliberately
+reported as **narrow protocol evidence**, not a universal or causal claim: it
+uses one model, one seed, synthetic calculator tasks, and 64.4% more target
+tokens in the complete arm. See the [result card](experiments/trajectory-utility/results/reference-v5.md)
+for hashes, hardware, counts, failures, and limitations.
+
 ### Load with Hugging Face Datasets and TRL
 
 ```python
@@ -292,7 +315,7 @@ Run `pnpm trajpack <command> --help` for the exact required options. Unknown sou
 
 ## Known limits
 
-- No hidden reasoning recovery, browser network capture, token/cookie access, or commercial-site DOM preset.
+- No hidden reasoning recovery, browser network capture, token/cookie access, or commercial-site DOM preset. Claude thinking signatures are opaque provider protocol state, not a cross-model training source; see the [supported boundary](docs/claude-thinking-signatures.md).
 - Gemini Takeout import is a fidelity-B flat activity snapshot; it does not manufacture missing turns, tool edges, or chronology.
 - The current Gemini CLI hook surface may lack a provider tool-call ID; trajpack records a deterministic synthetic pairing key, so identical concurrent calls are a documented fidelity limit.
 - Codex App Server support is an offline pinned mapper, not a live App Server proxy.

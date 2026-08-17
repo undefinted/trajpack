@@ -15,3 +15,6 @@ test-results/
 playwright-report/
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
+.venv/

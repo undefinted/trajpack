@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -999,11 +1000,117 @@ async function writePrivate(path: string, value: string | Uint8Array): Promise<v
   await writeFile(path, value, { flag: "wx", mode: 0o600 });
 }
 
+async function writePrivateJsonLines(
+  path: string,
+  rows: Iterable<unknown> | AsyncIterable<unknown>,
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await open(path, "wx", 0o600);
+  let buffers: Buffer[] = [];
+  let bufferedBytes = 0;
+  const flush = async (): Promise<void> => {
+    if (bufferedBytes === 0) return;
+    const output = buffers.length === 1 ? buffers[0]! : Buffer.concat(buffers, bufferedBytes);
+    buffers = [];
+    bufferedBytes = 0;
+    let offset = 0;
+    while (offset < output.length) {
+      const result = await handle.write(output, offset, output.length - offset, null);
+      if (result.bytesWritten <= 0) throw new Error("Dataset JSONL write made no progress");
+      offset += result.bytesWritten;
+    }
+  };
+  try {
+    for await (const row of rows) {
+      const encoded = Buffer.from(`${canonicalJson(row)}\n`, "utf8");
+      if (bufferedBytes > 0 && bufferedBytes + encoded.length > 1024 * 1024) await flush();
+      buffers.push(encoded);
+      bufferedBytes += encoded.length;
+      if (bufferedBytes >= 1024 * 1024) await flush();
+    }
+    await flush();
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+// Staging JSONL is consumed through a fixed-size buffer and an independently
+// bounded 64 MiB row. A small whole-file cap would defeat multi-trace research
+// datasets without improving allocation safety, so the format-level ceiling
+// is Node's exact file-size integer range. Callers may only tighten it.
+export const MAX_DATASET_STAGING_JSONL_BYTES = Number.MAX_SAFE_INTEGER;
+
+export async function* readDatasetJsonLines(
+  path: string,
+  maxFileBytes = MAX_DATASET_STAGING_JSONL_BYTES,
+): AsyncGenerator<unknown> {
+  if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1
+    || maxFileBytes > MAX_DATASET_STAGING_JSONL_BYTES) {
+    throw new Error(`Dataset JSONL maxFileBytes must be from 1 to ${MAX_DATASET_STAGING_JSONL_BYTES}`);
+  }
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > maxFileBytes) {
+    throw new Error(`Invalid or oversized dataset JSONL staging artifact: ${path}`);
+  }
+  const handle = await open(path, "r");
+  const opened = await handle.stat();
+  if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
+    || opened.size !== before.size || opened.mtimeMs !== before.mtimeMs || opened.ctimeMs !== before.ctimeMs) {
+    await handle.close();
+    throw new Error(`Dataset JSONL staging artifact changed while opening: ${path}`);
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let pending = "";
+  const parseLine = (input: string): unknown | undefined => {
+    const line = input.endsWith("\r") ? input.slice(0, -1) : input;
+    if (line === "") return undefined;
+    if (Buffer.byteLength(line, "utf8") > 64 * 1024 * 1024) {
+      throw new Error(`Dataset JSONL row exceeds 64 MiB: ${path}`);
+    }
+    return JSON.parse(line) as unknown;
+  };
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    while (offset < opened.size) {
+      const result = await handle.read(buffer, 0, Math.min(buffer.length, opened.size - offset), offset);
+      if (result.bytesRead <= 0) throw new Error(`Dataset JSONL staging artifact was truncated: ${path}`);
+      offset += result.bytesRead;
+      pending += decoder.decode(buffer.subarray(0, result.bytesRead), { stream: true });
+      let newline = pending.indexOf("\n");
+      while (newline >= 0) {
+        const value = parseLine(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (value !== undefined) yield value;
+        newline = pending.indexOf("\n");
+      }
+      if (Buffer.byteLength(pending, "utf8") > 64 * 1024 * 1024) {
+        throw new Error(`Dataset JSONL row exceeds 64 MiB: ${path}`);
+      }
+    }
+    pending += decoder.decode();
+    const finalValue = parseLine(pending);
+    if (finalValue !== undefined) yield finalValue;
+    const [after, pathAfter] = await Promise.all([handle.stat(), lstat(path)]);
+    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+      throw new Error(`Dataset JSONL staging artifact changed while reading: ${path}`);
+    }
+    if (!pathAfter.isFile() || pathAfter.isSymbolicLink() || pathAfter.dev !== opened.dev
+      || pathAfter.ino !== opened.ino || pathAfter.size !== opened.size
+      || pathAfter.mtimeMs !== opened.mtimeMs || pathAfter.ctimeMs !== opened.ctimeMs) {
+      throw new Error(`Dataset JSONL staging path changed while reading: ${path}`);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readSelectedArtifact(format: ExportFormat, directory: string): Promise<{ selected: TraceBundle; exampleIds: string[] }> {
   if (format === "canonical") {
     const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"));
-    const events = (await readFile(join(directory, "events.jsonl"), "utf8"))
-      .split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+    const events: unknown[] = [];
+    for await (const event of readDatasetJsonLines(join(directory, "events.jsonl"))) events.push(event);
     return { selected: traceBundleSchema.parse({ manifest, events, raw: [] }), exampleIds: [manifest.trace_id as string] };
   }
   const provenance = JSON.parse(await readFile(join(directory, "provenance.json"), "utf8")) as Record<string, unknown>;
@@ -1013,10 +1120,11 @@ async function readSelectedArtifact(format: ExportFormat, directory: string): Pr
     raw: [],
   });
   if (format === "hf-trl") {
-    const examples = (await readFile(join(directory, "dataset.jsonl"), "utf8"))
-      .split(/\r?\n/u).filter(Boolean)
-      .map((line) => datasetExampleSchema.parse(JSON.parse(line)));
-    return { selected, exampleIds: examples.map((example) => example.id) };
+    const exampleIds: string[] = [];
+    for await (const value of readDatasetJsonLines(join(directory, "dataset.jsonl"))) {
+      exampleIds.push(datasetExampleSchema.parse(value).id);
+    }
+    return { selected, exampleIds };
   }
   return { selected, exampleIds: [selected.manifest.trace_id] };
 }
@@ -1187,56 +1295,62 @@ async function aggregateFormat(
   for (const split of ["train", "validation", "test"] as const) {
     const selected = artifacts.filter((artifact) => artifact.split === split);
     if (format === "hf-trl") {
-      const examples = (await Promise.all(selected.map(async (artifact) => {
-        const parsed = (await readFile(join(artifact.directory, "dataset.jsonl"), "utf8"))
-          .split(/\r?\n/u).filter(Boolean)
-          .map((line) => datasetExampleSchema.parse(JSON.parse(line)));
-        return parsed.map((example) => datasetExampleSchema.parse({
-          ...example,
-          metadata: {
-            ...example.metadata,
-            dataset_id: datasetId,
-            dataset_split: split,
-            split_group_id: artifact.buildTrace.split_group_id,
-            source_bundle_sha256: artifact.buildTrace.source_bundle_sha256,
-            selected_bundle_sha256: artifact.selectedBundleSha256,
-            training_contract: {
-              dataset_type: "conversational-language-modeling",
-              assistant_only_loss_requires_generation_markers: true,
-              assistant_loss_mask_is_advisory: true,
-              structural_targets_are_not_token_masks: true,
-            },
-          },
-        }));
-      }))).flat();
       const directory = join(staging, "splits", split);
       await mkdir(directory, { recursive: true, mode: 0o700 });
-      await writePrivate(join(directory, "dataset.jsonl"), examples.length === 0
-        ? ""
-        : `${examples.map(canonicalJson).join("\n")}\n`);
-      await writeHfParquet(join(directory, "dataset.parquet"), examples);
+      const examples = async function* (): AsyncGenerator<DatasetExample> {
+        for (const artifact of selected) {
+          for await (const value of readDatasetJsonLines(join(artifact.directory, "dataset.jsonl"))) {
+            const example = datasetExampleSchema.parse(value);
+            yield datasetExampleSchema.parse({
+              ...example,
+              metadata: {
+                ...example.metadata,
+                dataset_id: datasetId,
+                dataset_split: split,
+                split_group_id: artifact.buildTrace.split_group_id,
+                source_bundle_sha256: artifact.buildTrace.source_bundle_sha256,
+                selected_bundle_sha256: artifact.selectedBundleSha256,
+                training_contract: {
+                  dataset_type: "conversational-language-modeling",
+                  assistant_only_loss_requires_generation_markers: true,
+                  assistant_loss_mask_is_advisory: true,
+                  structural_targets_are_not_token_masks: true,
+                },
+              },
+            });
+          }
+        }
+      };
+      const jsonlPath = join(directory, "dataset.jsonl");
+      await writePrivateJsonLines(jsonlPath, examples());
+      await writeHfParquet(
+        join(directory, "dataset.parquet"),
+        (async function* (): AsyncGenerator<DatasetExample> {
+          for await (const value of readDatasetJsonLines(jsonlPath)) yield datasetExampleSchema.parse(value);
+        })(),
+      );
     } else if (format === "atif") {
-      const trajectories = await Promise.all(selected.map(async (artifact) => {
-        const value = JSON.parse(await readFile(join(artifact.directory, "trajectory.atif.json"), "utf8")) as Record<string, unknown>;
-        const extra = value.extra && typeof value.extra === "object" && !Array.isArray(value.extra)
-          ? value.extra as Record<string, unknown>
-          : {};
-        return {
-          ...value,
-          extra: {
-            ...extra,
-            trajpack_dataset: {
-              dataset_id: datasetId,
-              split,
-              split_group_id: artifact.buildTrace.split_group_id,
-              selected_bundle_sha256: artifact.selectedBundleSha256,
+      const trajectories = async function* (): AsyncGenerator<Record<string, unknown>> {
+        for (const artifact of selected) {
+          const value = JSON.parse(await readFile(join(artifact.directory, "trajectory.atif.json"), "utf8")) as Record<string, unknown>;
+          const extra = value.extra && typeof value.extra === "object" && !Array.isArray(value.extra)
+            ? value.extra as Record<string, unknown>
+            : {};
+          yield {
+            ...value,
+            extra: {
+              ...extra,
+              trajpack_dataset: {
+                dataset_id: datasetId,
+                split,
+                split_group_id: artifact.buildTrace.split_group_id,
+                selected_bundle_sha256: artifact.selectedBundleSha256,
+              },
             },
-          },
-        };
-      }));
-      await writePrivate(join(staging, "splits", split, "trajectories.atif.jsonl"), trajectories.length === 0
-        ? ""
-        : `${trajectories.map(canonicalJson).join("\n")}\n`);
+          };
+        }
+      };
+      await writePrivateJsonLines(join(staging, "splits", split, "trajectories.atif.jsonl"), trajectories());
     } else if (format === "otlp") {
       const requests = await Promise.all(selected.map(async (artifact) => JSON.parse(
         await readFile(join(artifact.directory, "traces.otlp.json"), "utf8"),

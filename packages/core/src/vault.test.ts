@@ -70,6 +70,51 @@ describe("encrypted vault", () => {
     }
   }, 30_000);
 
+  it("serializes concurrent appends and reopens coalesced ciphertext in admission order", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "trajpack-vault-concurrent-"));
+    const path = join(directory, "concurrent.trajpack");
+    const passphrase = "correct horse battery staple";
+    const fixture = fixtureBundle("coalesced ciphertext sentinel");
+    const events = Array.from({ length: 256 }, (_, sequence) => ({
+      ...fixture.events[0]!,
+      event_id: `evt_concurrent_${sequence}`,
+      source_event_id: `source-${sequence}`,
+      sequence,
+    }));
+    try {
+      const writer = await VaultWriter.create(path, passphrase, { flushBytes: 4096 });
+      await writer.append({ kind: "manifest", value: fixture.manifest });
+      const pending = events.map((event) => writer.append({ kind: "event", value: event }));
+      // finalize is the admission barrier: work queued before it is drained in
+      // order, while any later append is rejected.
+      await writer.finalize();
+      await Promise.all(pending);
+      const reopened = await readBundle(path, passphrase);
+      expect(reopened.events.map((event) => event.sequence)).toEqual(events.map((event) => event.sequence));
+      expect(reopened.events.map((event) => event.event_id)).toEqual(events.map((event) => event.event_id));
+      expect((await readFile(path)).includes(Buffer.from("coalesced ciphertext sentinel"))).toBe(false);
+      await expect(writer.append({ kind: "event", value: events[0]! })).rejects.toThrow(/closing/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("drains admitted appends before aborting and never publishes their ciphertext", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "trajpack-vault-abort-concurrent-"));
+    const path = join(directory, "aborted.trajpack");
+    const fixture = fixtureBundle("aborted ciphertext sentinel");
+    try {
+      const writer = await VaultWriter.create(path, "correct horse battery staple", { flushBytes: 128 });
+      const pending = Array.from({ length: 64 }, () => writer.append({ kind: "manifest", value: fixture.manifest }));
+      await writer.abort();
+      await expect(Promise.all(pending)).resolves.toHaveLength(64);
+      await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(writer.append({ kind: "manifest", value: fixture.manifest })).rejects.toThrow(/closing/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("streams frames with strict record, JSON depth, and JSON node limits", async () => {
     const directory = await mkdtemp(join(tmpdir(), "trajpack-vault-reader-limits-"));
     const path = join(directory, "bounded.trajpack");

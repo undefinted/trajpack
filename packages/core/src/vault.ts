@@ -43,7 +43,15 @@ export class VaultSizeLimitError extends Error {
 export interface VaultWriterOptions {
   /** Primarily useful for constrained callers and boundary tests. */
   maxFileBytes?: number;
+  /**
+   * Coalesce encrypted frames before issuing a filesystem write. The buffer
+   * contains ciphertext only and is bounded independently of provider input.
+   */
+  flushBytes?: number;
 }
+
+const DEFAULT_VAULT_FLUSH_BYTES = 1024 * 1024;
+const MAX_VAULT_FLUSH_BYTES = 8 * 1024 * 1024;
 
 export interface VaultReaderOptions {
   /** Limits may only tighten, never raise, the format safety bounds. */
@@ -262,6 +270,11 @@ export class VaultWriter {
   readonly temporaryPath: string;
   readonly header: VaultHeader;
   private recordsWritten = 0;
+  private bufferedFrames: Buffer[] = [];
+  private bufferedBytes = 0;
+  private operationQueue: Promise<void> = Promise.resolve();
+  private operationFailure: unknown = null;
+  private closing = false;
 
   private constructor(
     targetPath: string,
@@ -271,6 +284,7 @@ export class VaultWriter {
     private readonly state: unknown,
     private readonly key: Uint8Array,
     private readonly maxFileBytes: number,
+    private readonly flushBytes: number,
     private bytesWritten: number,
   ) {
     this.targetPath = targetPath;
@@ -288,6 +302,10 @@ export class VaultWriter {
     const maxFileBytes = options.maxFileBytes ?? MAX_VAULT_WRITE_BYTES;
     if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1 || maxFileBytes > MAX_VAULT_WRITE_BYTES) {
       throw new Error(`Vault writer maxFileBytes must be from 1 to ${MAX_VAULT_WRITE_BYTES}`);
+    }
+    const flushBytes = options.flushBytes ?? DEFAULT_VAULT_FLUSH_BYTES;
+    if (!Number.isSafeInteger(flushBytes) || flushBytes < 1 || flushBytes > MAX_VAULT_FLUSH_BYTES) {
+      throw new Error(`Vault writer flushBytes must be from 1 to ${MAX_VAULT_FLUSH_BYTES}`);
     }
     await ensurePrivateDirectory(dirname(targetPath));
     const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
@@ -325,6 +343,7 @@ export class VaultWriter {
         init.state,
         key,
         maxFileBytes,
+        flushBytes,
         preamble.length,
       );
     } catch (error) {
@@ -335,7 +354,28 @@ export class VaultWriter {
     }
   }
 
-  async append(record: VaultRecord): Promise<void> {
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const result = this.operationQueue.then(async () => {
+      if (this.operationFailure !== null) throw this.operationFailure;
+      await operation();
+    });
+    this.operationQueue = result.catch((error: unknown) => {
+      if (this.operationFailure === null) this.operationFailure = error;
+    });
+    return result;
+  }
+
+  private async flushBufferedFrames(): Promise<void> {
+    if (this.bufferedBytes === 0) return;
+    const frames = this.bufferedFrames;
+    const bytes = this.bufferedBytes;
+    this.bufferedFrames = [];
+    this.bufferedBytes = 0;
+    await writeAll(this.handle, frames.length === 1 ? frames[0]! : Buffer.concat(frames, bytes));
+    this.bytesWritten += bytes;
+  }
+
+  private async appendExclusive(record: VaultRecord): Promise<void> {
     if (this.recordsWritten >= MAX_VAULT_RECORDS) throw new Error("Vault exceeds the record count limit");
     const encoded = `${canonicalJson(record)}\n`;
     assertJsonStructure(encoded, MAX_VAULT_JSON_DEPTH, MAX_VAULT_JSON_NODES, "Vault record");
@@ -350,16 +390,32 @@ export class VaultWriter {
       sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE,
     );
     const frame = Buffer.concat([uint32(encrypted.length), Buffer.from(encrypted)]);
-    if (this.bytesWritten + frame.length + finalFrameBytes() > this.maxFileBytes) {
+    if (this.bytesWritten + this.bufferedBytes + frame.length + finalFrameBytes() > this.maxFileBytes) {
       throw new VaultSizeLimitError(this.maxFileBytes);
     }
-    await writeAll(this.handle, frame);
-    this.bytesWritten += frame.length;
+    // A large provider frame is still accepted up to the independent frame
+    // bound, but it is never retained alongside an already-full batch.
+    if (this.bufferedBytes > 0 && this.bufferedBytes + frame.length > this.flushBytes) {
+      await this.flushBufferedFrames();
+    }
+    this.bufferedFrames.push(frame);
+    this.bufferedBytes += frame.length;
     this.recordsWritten += 1;
+    if (this.bufferedBytes >= this.flushBytes) await this.flushBufferedFrames();
+  }
+
+  async append(record: VaultRecord): Promise<void> {
+    if (this.closing) throw new Error("Vault writer is closing");
+    return this.enqueue(() => this.appendExclusive(record));
   }
 
   async finalize(): Promise<void> {
+    if (this.closing) throw new Error("Vault writer is closing");
+    this.closing = true;
     try {
+      await this.operationQueue;
+      if (this.operationFailure !== null) throw this.operationFailure;
+      await this.flushBufferedFrames();
       const finalFrame = sodium.crypto_secretstream_xchacha20poly1305_push(
         this.state as never,
         new Uint8Array(),
@@ -386,6 +442,10 @@ export class VaultWriter {
   }
 
   async abort(): Promise<void> {
+    this.closing = true;
+    await this.operationQueue.catch(() => undefined);
+    this.bufferedFrames = [];
+    this.bufferedBytes = 0;
     sodium.memzero(this.key);
     await this.handle.close().catch(() => undefined);
     await rm(this.temporaryPath, { force: true });

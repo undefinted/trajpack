@@ -227,14 +227,17 @@ export async function validateHfParquetFile(
   return mismatches.sort();
 }
 
-export async function writeHfParquet(path: string, examples: Iterable<DatasetExample>): Promise<void> {
+export async function writeHfParquet(
+  path: string,
+  examples: Iterable<DatasetExample> | AsyncIterable<DatasetExample>,
+): Promise<void> {
   // parquetjs truncates its target. Reserve it first with private permissions so
   // no plaintext Parquet file is ever briefly created with ambient defaults.
   const placeholder = await open(path, "wx", 0o600);
   await placeholder.close();
   const writer = await ParquetWriter.openFile(schema, path);
   try {
-    for (const example of examples) {
+    for await (const example of examples) {
       await writer.appendRow({
         id: example.id,
         trace_id: example.trace_id,

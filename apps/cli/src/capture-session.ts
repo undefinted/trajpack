@@ -1,3 +1,4 @@
+import { createHash, type Hash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { Host, RawEnvelope, Source, TraceBundle, TraceManifest, TrajectoryEvent } from "@trajpack/schema";
 import { rawEnvelopeSchema, trajectoryEventSchema } from "@trajpack/schema";
@@ -34,6 +35,17 @@ export interface CaptureSessionLimits {
   maxRawEvents?: number;
   maxRawBytes?: number;
   maxVaultBytes?: number;
+  maxPendingIngest?: number;
+}
+
+export const DEFAULT_MAX_PENDING_CAPTURE_INGEST = 1024;
+export const MAX_CONFIGURABLE_PENDING_CAPTURE_INGEST = 65_536;
+
+export class CaptureBackpressureError extends Error {
+  constructor(readonly limit: number) {
+    super(`Capture ingest queue is full at ${limit} pending events`);
+    this.name = "CaptureBackpressureError";
+  }
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -65,7 +77,6 @@ interface HarnessCapsuleEvidence {
 
 interface HarnessSequenceState {
   nextSeq: number;
-  readonly payloadHashes: Map<number, string>;
 }
 
 function record(value: unknown): JsonRecord | null {
@@ -249,8 +260,12 @@ export class CaptureSession {
   private operationQueue: Promise<void> = Promise.resolve();
   private operationFailure: unknown = null;
   private rawBytes = 0;
+  private readonly rawLineageHash: Hash = createHash("sha256");
+  private rawLineageStarted = false;
   private readonly maxRawEvents: number;
   private readonly maxRawBytes: number;
+  private readonly maxPendingIngest: number;
+  private pendingIngest = 0;
   private finalized = false;
 
   private constructor(
@@ -261,6 +276,13 @@ export class CaptureSession {
   ) {
     this.maxRawEvents = positiveLimit(limits.maxRawEvents, "Capture maxRawEvents");
     this.maxRawBytes = positiveLimit(limits.maxRawBytes, "Capture maxRawBytes");
+    this.maxPendingIngest = positiveLimit(
+      limits.maxPendingIngest ?? DEFAULT_MAX_PENDING_CAPTURE_INGEST,
+      "Capture maxPendingIngest",
+    );
+    if (this.maxPendingIngest > MAX_CONFIGURABLE_PENDING_CAPTURE_INGEST) {
+      throw new Error(`Capture maxPendingIngest must be at most ${MAX_CONFIGURABLE_PENDING_CAPTURE_INGEST}`);
+    }
   }
 
   static async create(
@@ -292,6 +314,10 @@ export class CaptureSession {
 
   async ingest(input: unknown): Promise<boolean> {
     if (this.finalized) throw new Error("Capture is already finalized");
+    if (this.pendingIngest >= this.maxPendingIngest) {
+      throw new CaptureBackpressureError(this.maxPendingIngest);
+    }
+    this.pendingIngest += 1;
     const operation = this.operationQueue.then(async () => {
       if (this.operationFailure !== null) throw this.operationFailure;
       return this.ingestExclusive(input);
@@ -300,7 +326,11 @@ export class CaptureSession {
       () => undefined,
       (error: unknown) => { this.operationFailure = error; },
     );
-    return operation;
+    try {
+      return await operation;
+    } finally {
+      this.pendingIngest -= 1;
+    }
   }
 
   private async ingestExclusive(input: unknown): Promise<boolean> {
@@ -325,13 +355,8 @@ export class CaptureSession {
         if (harnessCapsule.seq !== harnessCapsule.firstObservedSeq) {
           throw new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_START_MISMATCH");
         }
-        harnessState = { nextSeq: harnessCapsule.firstObservedSeq, payloadHashes: new Map() };
+        harnessState = { nextSeq: harnessCapsule.firstObservedSeq };
         this.harnessSequences.set(harnessCapsule.sessionId, harnessState);
-      }
-      const existingHash = harnessState.payloadHashes.get(harnessCapsule.seq);
-      if (existingHash !== undefined) {
-        if (existingHash === parsed.payload_sha256) return false;
-        throw new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_CONFLICT");
       }
       if (harnessCapsule.seq !== harnessState.nextSeq) {
         throw new HarnessCaptureIntegrityError(
@@ -343,7 +368,8 @@ export class CaptureSession {
     // remains inside the opaque payload/source identifiers; assigning it here
     // prevents two concurrently observed official channels from colliding.
     const envelope: RawEnvelope = { ...parsed, sequence: this.raw.length };
-    const envelopeBytes = Buffer.byteLength(canonicalJson(envelope), "utf8");
+    const encodedEnvelope = canonicalJson(envelope);
+    const envelopeBytes = Buffer.byteLength(encodedEnvelope, "utf8");
     if (this.raw.length + 1 > this.maxRawEvents) {
       throw new CaptureLimitError("CAPTURE_EVENT_LIMIT_EXCEEDED");
     }
@@ -360,9 +386,15 @@ export class CaptureSession {
     }
     this.dedupe.set(key, parsed.payload_sha256);
     if (harnessCapsule !== null && harnessState !== null) {
-      harnessState.payloadHashes.set(harnessCapsule.seq, parsed.payload_sha256);
       harnessState.nextSeq = harnessCapsule.seq + 1;
     }
+    if (!this.rawLineageStarted) {
+      this.rawLineageHash.update("[");
+      this.rawLineageStarted = true;
+    } else {
+      this.rawLineageHash.update(",");
+    }
+    this.rawLineageHash.update(encodedEnvelope);
     this.raw.push(envelope);
     this.rawBytes += envelopeBytes;
     return true;
@@ -402,6 +434,9 @@ export class CaptureSession {
         || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0));
       const observed = observedRawSource(this.raw);
       const observedSource = reconcileObservedHarnessTeacher(this.manifest.source, this.raw);
+      if (!this.rawLineageStarted) this.rawLineageHash.update("[");
+      this.rawLineageHash.update("]");
+      const rawLineageSha256 = this.rawLineageHash.digest("hex");
       let bundle: TraceBundle = {
         manifest: {
           ...this.manifest,
@@ -412,7 +447,7 @@ export class CaptureSession {
           },
           lineage: {
             ...this.manifest.lineage,
-            raw_sha256: sha256(canonicalJson(this.raw)),
+            raw_sha256: rawLineageSha256,
           },
         },
         raw: this.raw,

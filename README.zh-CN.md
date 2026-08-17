@@ -128,7 +128,7 @@ pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source 
 
 采集真实数据前，运行 `pnpm trajpack doctor`（或 `doctor --json`）可以探测宿主可执行文件，并报告预期插件目录、固定接口和安全网页导入路径。它会刻意把插件安装状态报告为 `not_verified`；请再使用各宿主自己的 list/validate 命令确认安装。
 
-在来源、账号、当前条款或限定范围的许可、同意记录和必要的权利元数据满足 `automatic_capture` gate 之前，采集会被主动阻断。当前最直接的蒸馏科研路径，是在固定版本的 DeepSeek Harness 中运行来源合法的自托管模型：由 trajpack 本地计算真实模型 artifact 哈希，并保留运行时绑定 receipt。
+在来源、账号、当前条款或限定范围的许可、同意记录和必要的权利元数据满足 `automatic_capture` gate 之前，采集会被主动阻断。内置来源关联最强的是固定版本的 DeepSeek Harness 路径：trajpack 会把批准的 provider/model 与 durable `request/header` 证据绑定。自托管模型还可以在本地计算内容哈希，但该哈希并不能证明运行时确实加载了这些权重；因此，自托管训练仍需单独、证据绑定的运行时证明与审阅。
 
 ### DeepSeek Harness-first 路径
 
@@ -225,6 +225,20 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 
 [TraceLab](https://github.com/uw-syfi/TraceLab) 是分析设计的借鉴对象，不是运行时依赖。TraceLab 侧重研究 Agent serving workload；trajpack 侧重把可观察证据经过治理和审阅，转换为版本化 SFT 或 verifier-backed pointwise-RL 视图。Canonical 内容、权利、redaction、拓扑和 lineage 始终留在 trajpack 的治理边界内，TraceLab-shaped 投影只携带聚合或摘要级 workload 字段。
 
+能导出数据不等于已经证明数据能提升模型。[轨迹效用评测协议](docs/trajectory-utility-evaluation.md)明确区分 pipeline smoke test、小模型窄域学习验证、matched benchmark 消融和外部复现。可以先运行[可复现的合成 DeepSeek Harness 全流程 Demo](docs/demo.md)，再执行可审计的[base / answer-only / 完整轨迹小模型对照实验](experiments/trajectory-utility/README.md)。有界并发、硬上限和 10 万事件实测见[性能与规模说明](docs/performance.md)。
+
+<p align="center">
+  <a href="experiments/trajectory-utility/results/reference-v5.md">
+    <img src="experiments/trajectory-utility/results/reference-v5.svg" width="760" alt="单 seed 的轨迹效用 smoke 结果">
+  </a>
+</p>
+
+在仓库内可复核的严格离线参考运行中，完整 action → observation 监督达到
+32/32 工具闭环成功；answer-only SFT 只有 2/32 最终答案正确，工具闭环为
+0/32。这里明确把它称为**窄域协议证据**，而不是普遍或因果结论：实验只有
+一个模型、一个 seed、合成计算器任务，而且完整轨迹臂看到的 target token
+多 64.4%。完整哈希、硬件、计数、失败与限制见[结果卡](experiments/trajectory-utility/results/reference-v5.md)。
+
 ### 使用 Hugging Face Datasets 和 TRL 加载
 
 ```python
@@ -292,7 +306,7 @@ trajpack delete <trace-id> --yes
 
 ## 已知边界
 
-- 不恢复隐藏推理，不拦截浏览器网络，不读取 token/cookie，也不提供商业站点 DOM preset。
+- 不恢复隐藏推理，不拦截浏览器网络，不读取 token/cookie，也不提供商业站点 DOM preset。Claude thinking signature 是 opaque 的提供商协议状态，不是跨模型训练数据源；详见 [支持边界](docs/claude-thinking-signatures.md)。
 - Gemini Takeout 导入只是 B 级扁平活动快照；不会编造缺失的 turn、工具边或时间关系。
 - 当前 Gemini CLI hook 可能不提供厂商 tool-call ID；trajpack 会记录确定性合成配对键，因此完全相同的并发调用属于已知 fidelity 边界。
 - Codex App Server 支持属于离线固定版本 mapper，不是实时 App Server proxy。

@@ -1,0 +1,151 @@
+{
+  "record_type": "trace_manifest",
+  "schema_version": "trajectory/0.1",
+  "trace_id": "d3305eed000000000000000000000001",
+  "created_at": "2026-08-16T00:00:00.000Z",
+  "source": {
+    "host": "deepseek_harness",
+    "provider": "deepseek",
+    "product": "deepseek-harness-synthetic-demo",
+    "surface": "harness",
+    "capture_method": "instrumented_harness",
+    "adapter_version": "0.1.0",
+    "interface_version": "deepseek-harness@0.1.0-rc.6/session-event/0",
+    "model_id": "synthetic-deepseek-research-teacher",
+    "model_snapshot_or_weights_digest": null,
+    "origin": "urn:trajpack:synthetic-demo",
+    "fidelity": "A",
+    "authenticity": "user_supplied",
+    "authenticity_evidence_ref": "synthetic-fixture:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "account_contract": {
+    "account_type": "api",
+    "contracting_region": null,
+    "workspace_owner_hmac": null,
+    "terms": [
+      {
+        "name": "DeepSeek Terms of Use (demo routing metadata only)",
+        "url": "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
+        "effective_at": "2026-01-01T00:00:00.000Z",
+        "retrieved_at": "2026-08-16T00:00:00.000Z",
+        "snapshot_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "review_after": "2099-01-01T00:00:00.000Z"
+      }
+    ],
+    "order_form_or_written_permission_ref": "demo-only:synthetic-content"
+  },
+  "rights": {
+    "source_license_expression": "CC0-1.0",
+    "model_license_chain": [],
+    "input_rights_basis": "owned",
+    "third_party_content": "none",
+    "rights_holder": "trajpack synthetic demo authors"
+  },
+  "consent": {
+    "receipt_id": "synthetic-demo-consent",
+    "subjects_scope": "single_user",
+    "purposes": ["archive", "training_noncompetitive", "training_competitive_distillation"],
+    "active": true,
+    "captured_at": "2026-08-16T00:00:00.000Z",
+    "withdrawal_ref": null
+  },
+  "eligibility": {
+    "local_archive": {
+      "status": "allow",
+      "purposes": ["archive"],
+      "reason_codes": ["SYNTHETIC_DEMO_OWNED_CONTENT"],
+      "basis": "synthetic-demo",
+      "target_model_owner": null,
+      "target_product": null,
+      "competitive_with_source": "no",
+      "decision_id": "demo-archive-v1",
+      "decided_at": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2099-01-01T00:00:00.000Z",
+      "reviewer": "trajpack-demo-synthetic-reviewer",
+      "evidence_ref": "synthetic-fixture:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "automatic_capture": {
+      "status": "allow",
+      "purposes": ["automatic_capture"],
+      "reason_codes": ["SYNTHETIC_DEMO_OWNED_CONTENT"],
+      "basis": "synthetic-demo",
+      "target_model_owner": null,
+      "target_product": null,
+      "competitive_with_source": "no",
+      "decision_id": "demo-capture-v1",
+      "decided_at": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2099-01-01T00:00:00.000Z",
+      "reviewer": "trajpack-demo-synthetic-reviewer",
+      "evidence_ref": "synthetic-fixture:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "training_noncompetitive": {
+      "status": "allow",
+      "purposes": ["training_noncompetitive"],
+      "reason_codes": ["SYNTHETIC_DEMO_MANUAL_OVERRIDE"],
+      "basis": "manual-override:policy/2026-08-16.4:synthetic-demo",
+      "target_model_owner": "trajpack-demo",
+      "target_product": "local-research-student",
+      "competitive_with_source": "no",
+      "decision_id": "demo-noncompetitive-v1",
+      "decided_at": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2099-01-01T00:00:00.000Z",
+      "reviewer": "trajpack-demo-synthetic-reviewer",
+      "evidence_ref": "demo-policy:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "training_competitive_distillation": {
+      "status": "allow",
+      "purposes": ["training_competitive_distillation"],
+      "reason_codes": ["SYNTHETIC_DEMO_MANUAL_OVERRIDE"],
+      "basis": "manual-override:policy/2026-08-16.4:synthetic-demo",
+      "target_model_owner": "trajpack-demo",
+      "target_product": "local-research-student",
+      "competitive_with_source": "yes",
+      "decision_id": "demo-competitive-v1",
+      "decided_at": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2099-01-01T00:00:00.000Z",
+      "reviewer": "trajpack-demo-synthetic-reviewer",
+      "evidence_ref": "demo-policy:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "redistribution": {
+      "status": "deny",
+      "purposes": ["redistribution"],
+      "reason_codes": ["DEMO_EXPORT_NOT_REVIEWED_FOR_REDISTRIBUTION"],
+      "basis": "synthetic-demo",
+      "target_model_owner": null,
+      "target_product": null,
+      "competitive_with_source": "no",
+      "decision_id": "demo-redistribution-v1",
+      "decided_at": "2026-08-16T00:00:00.000Z",
+      "expires_at": "2099-01-01T00:00:00.000Z",
+      "reviewer": "trajpack-demo-synthetic-reviewer",
+      "evidence_ref": "synthetic-fixture:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "privacy": {
+    "legal_basis": "authored synthetic fixture",
+    "jurisdictions": [],
+    "storage_region": "local-only",
+    "retention_class": "repository-demo",
+    "redaction_policy_version": "redaction/0.1"
+  },
+  "environment": {
+    "cwd_hmac": null,
+    "repo_commit": null,
+    "container_digest": null
+  },
+  "review": {
+    "revision": 0,
+    "automated_checks": "pending",
+    "human_approval": "pending",
+    "reviewer": null,
+    "reviewed_at": null,
+    "notes": null,
+    "approval_scope": null
+  },
+  "lineage": {
+    "parent_trace_ids": [],
+    "raw_sha256": null,
+    "normalizer_version": "0.1.0",
+    "tombstoned": false
+  }
+}
