@@ -1,9 +1,11 @@
-<p align="center">
-  <img src="docs/assets/trajpack-mark.svg" width="680" alt="trajpack — observe, govern, export">
+<p align="right">
+  <strong>🌐 Language / 语言：</strong>
+  <a href="./README.md"><strong>🇬🇧 English</strong></a> ·
+  <a href="./README.zh-CN.md">🇨🇳 简体中文</a>
 </p>
 
 <p align="center">
-  <a href="README.md"><strong>English</strong></a> · <a href="README.zh-CN.md">简体中文</a>
+  <img src="docs/assets/trajpack-mark.svg" width="680" alt="trajpack — observe, govern, export">
 </p>
 
 <p align="center">
