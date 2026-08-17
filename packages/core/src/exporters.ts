@@ -892,9 +892,11 @@ provider-exposed representation and do not assert access to hidden chain-of-thou
 }
 
 async function createPrivateStagingDirectory(finalPath: string): Promise<{ finalPath: string; stagingPath: string }> {
-  const absolute = resolve(finalPath);
-  const parent = dirname(absolute);
-  await assertSafeOutputParent(parent);
+  // Build paths from the canonical parent returned by validation. Using the
+  // lexical path would leave a window in which the parent directory could be
+  // swapped for a symlink between validation and the mkdir below.
+  const parent = await assertSafeOutputParent(dirname(resolve(finalPath)));
+  const absolute = join(parent, basename(resolve(finalPath)));
   try {
     await lstat(absolute);
     throw new Error(`Export destination already exists: ${absolute}`);

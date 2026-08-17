@@ -17,6 +17,11 @@ function isWithin(base: string, target: string): boolean {
  * symlink/junction. The process cwd and OS temp directory are trusted roots so
  * platform aliases such as macOS `/var` -> `/private/var` do not make every
  * temporary export fail; links introduced below those roots are still denied.
+ *
+ * Returns the canonical (realpath) parent so callers build paths from a
+ * symlink-free absolute directory. Returning the lexical path would leave a
+ * validate-then-use window in which a concurrent rename could swap the parent
+ * for a symlink after this function returned.
  */
 export async function assertSafeOutputParent(input: string): Promise<string> {
   const parent = resolve(input);
@@ -47,5 +52,5 @@ export async function assertSafeOutputParent(input: string): Promise<string> {
   if (comparable(expected) !== comparable(canonicalParent)) {
     throw new Error(`Output parent contains a symbolic-link or junction ancestor: ${parent}`);
   }
-  return parent;
+  return canonicalParent;
 }

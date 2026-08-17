@@ -950,9 +950,11 @@ export function inspectDatasetBuild(inputBuild: DatasetBuild, inputBundles: Trac
 }
 
 async function ensurePrivateParentAndAbsent(output: string): Promise<string> {
-  const absolute = resolve(output);
-  const parent = dirname(absolute);
-  await assertSafeOutputParent(parent);
+  // Build from the canonical parent so the staging directory and final rename
+  // use a symlink-free path rather than a lexical path that could be swapped
+  // after validation.
+  const parent = await assertSafeOutputParent(dirname(resolve(output)));
+  const absolute = join(parent, basename(resolve(output)));
   try {
     await lstat(absolute);
     throw new Error(`Dataset export destination already exists: ${absolute}`);
