@@ -207,7 +207,16 @@ function makeDecision(
     target_model_owner: context.targetModelOwner ?? null,
     target_product: context.targetProduct ?? null,
     competitive_with_source: competitive,
-    decision_id: stableId("decision", { key, status, reasonCodes, source: context.source, competitive }),
+    decision_id: stableId("decision", {
+      key,
+      status,
+      reasonCodes,
+      source: context.source,
+      competitive,
+      evidenceRef: evidence?.evidence_ref ?? null,
+      evidenceReviewer: evidence?.reviewer ?? null,
+      evidenceExpiresAt: evidence?.expires_at ?? null,
+    }),
     decided_at: now.toISOString(),
     expires_at: expiresAt.toISOString(),
     reviewer: evidence?.reviewer ?? null,
@@ -230,12 +239,15 @@ const SPDX_LICENSE_IDS = new Set([
   "ISC", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only",
   "LGPL-3.0-or-later", "MIT", "MPL-2.0", "OFL-1.1", "Unlicense", "Zlib",
 ]);
+const SPDX_LICENSE_IDS_UPPER = new Set([...SPDX_LICENSE_IDS].map((id) => id.toUpperCase()));
 
 function validLicenseAtom(value: string): boolean {
   // Custom LicenseRef claims require a richer evidence object than v1 Rights
   // currently carries, so they remain archiveable but cannot auto-clear a
-  // training hard gate.
-  return SPDX_LICENSE_IDS.has(value);
+  // training hard gate. SPDX identifiers are compared case-insensitively so
+  // lowercased tool output (e.g. `apache-2.0`, `mit`) is not treated as an
+  // unknown license while the sentinel check above is case-insensitive.
+  return SPDX_LICENSE_IDS_UPPER.has(normalizedLicense(value));
 }
 
 function validLicenseExpression(value: string): boolean {
@@ -476,9 +488,8 @@ export function evaluateDefaultEligibility(context: PolicyContext): Eligibility 
     }
   }
 
-  let redistribution = context.rights.source_license_expression === "MIT"
-    || context.rights.source_license_expression === "Apache-2.0"
-    || context.rights.source_license_expression === "CC0-1.0"
+  const normalizedSourceLicense = normalizedLicense(context.rights.source_license_expression);
+  let redistribution = ["MIT", "APACHE-2.0", "CC0-1.0"].includes(normalizedSourceLicense)
     ? makeDecision("redistribution", "allow", ["REDISTRIBUTABLE_SOURCE_LICENSE"], context, ["release"])
     : makeDecision("redistribution", "unknown", ["REDISTRIBUTION_NOT_ESTABLISHED"], context, ["release"]);
   if (context.consentActive) {

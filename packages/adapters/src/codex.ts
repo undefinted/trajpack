@@ -120,12 +120,17 @@ function itemEvents(payload: JsonObject, raw: NormalizedCapture["raw"], options:
   if (sourceType === "command_execution") {
     const command = item.command ?? item.commands ?? null;
     const output = item.aggregated_output ?? item.output ?? item.stderr ?? null;
+    // Type the part by which field actually supplied the value, not by key
+    // presence: a completed command that has both `output` (stdout) and a
+    // `stderr` key (even null) must not label its stdout as stderr.
+    const isNullish = (value: unknown): boolean => value === null || value === undefined;
+    const fromStderr = output !== null && isNullish(item.aggregated_output) && isNullish(item.output);
     const exitCode = item.exit_code ?? item.exitCode;
     const completed = lifecycle === "item.completed" || lifecycle === "item.failed";
     const callId = itemId;
     const content: ContentPart[] = [];
     if (completed && output !== null && output !== undefined) {
-      content.push(contentPart(output, 0, { type: item.stderr !== undefined ? "stderr" : "stdout" }));
+      content.push(contentPart(output, 0, { type: fromStderr ? "stderr" : "stdout" }));
     } else if (command !== null) {
       content.push(contentPart(command, 0, { type: "tool_call" }));
     }

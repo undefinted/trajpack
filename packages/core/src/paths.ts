@@ -10,14 +10,24 @@ export interface TrajpackPaths {
 
 export function defaultPaths(environment: NodeJS.ProcessEnv = process.env): TrajpackPaths {
   const system = platform();
+  // An empty-string env var must be treated as unset; otherwise
+  // `join("", "trajpack")` yields a *relative* root that silently relocates
+  // the encrypted store to the process cwd.
+  const value = (name: string): string | undefined => {
+    const raw = environment[name];
+    return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
+  };
+  const localAppData = value("LOCALAPPDATA");
+  const xdgDataHome = value("XDG_DATA_HOME");
+  const xdgRuntimeDir = value("XDG_RUNTIME_DIR");
   const root = system === "win32"
-    ? join(environment.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "trajpack")
+    ? join(localAppData ?? join(homedir(), "AppData", "Local"), "trajpack")
     : system === "darwin"
       ? join(homedir(), "Library", "Application Support", "trajpack")
-      : join(environment.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "trajpack");
+      : join(xdgDataHome ?? join(homedir(), ".local", "share"), "trajpack");
   const runtimeRoot = system === "win32"
-    ? join(environment.LOCALAPPDATA ?? tmpdir(), "trajpack", "runtime")
-    : join(environment.XDG_RUNTIME_DIR ?? tmpdir(), `trajpack-${process.getuid?.() ?? "user"}`);
+    ? join(localAppData ?? tmpdir(), "trajpack", "runtime")
+    : join(xdgRuntimeDir ?? tmpdir(), `trajpack-${process.getuid?.() ?? "user"}`);
   return {
     data: root,
     vault: join(root, "vault"),

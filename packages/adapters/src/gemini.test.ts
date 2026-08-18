@@ -53,6 +53,23 @@ describe("Gemini CLI hook adapter", () => {
     expect(normalized.events.every((event) => !("transcript_path" in event.metadata))).toBe(true);
   });
 
+  it("uses the provider candidate index, not the text-list position", () => {
+    const normalized = normalizeGeminiCliHook({
+      session_id: "gemini-session",
+      hook_event_name: "AfterModel",
+      llm_response: {
+        candidates: [
+          { index: 0, content: { parts: [{ text: "" }] } },
+          { index: 1, content: { parts: [{ text: "the real answer" }] } },
+        ],
+      },
+    }, { traceId: TRACE_ID, capturedAt: FIXED });
+
+    expect(normalized.events).toHaveLength(1);
+    expect(normalized.events[0]?.metadata.candidate_index).toBe(1);
+    expect(normalized.events[0]?.content[0]?.value).toBe("the real answer");
+  });
+
   it("fails closed on an interface version mismatch and unknown hook vocabulary", () => {
     const payload = { session_id: "gemini-session", hook_event_name: "BeforeAgent", prompt: "hello" };
     const wrong = normalizeGeminiCliHook(payload, {

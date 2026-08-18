@@ -1,6 +1,6 @@
 import type { TraceBundle, TrajectoryEvent } from "@trajpack/schema";
 import { describe, expect, it } from "vitest";
-import { sha256 } from "./canonical.js";
+import { canonicalJson, sha256 } from "./canonical.js";
 import { inspectQuality } from "./quality.js";
 import { fixtureBundle } from "./testing.js";
 
@@ -214,6 +214,33 @@ describe("quality inspection", () => {
       "REPO_SPLIT_CONTAMINATION_SIGNAL",
       "TIME_SPLIT_CONTAMINATION_SIGNAL",
     ]);
+  });
+
+  it("counts raw sequence gaps between consecutive envelopes, not offset from zero", () => {
+    const rawEnvelope = (sequence: number) => {
+      const payload = { seq: sequence };
+      return {
+        envelope_version: "raw/0.1" as const,
+        adapter: "deepseek_harness" as const,
+        adapter_version: "0.1.0",
+        interface_version: "deepseek-harness@0.1.0-rc.6/session-event/0",
+        captured_at: "2026-08-16T00:00:00.000Z",
+        sequence,
+        source_event_id: null,
+        session_id: null,
+        turn_id: null,
+        payload_sha256: sha256(canonicalJson(payload)),
+        payload,
+      };
+    };
+
+    const consecutive = fixtureBundle();
+    consecutive.raw = [rawEnvelope(1), rawEnvelope(2), rawEnvelope(3)];
+    expect(inspectQuality(consecutive).metrics.raw_sequence_gap_count).toBe(0);
+
+    const gapped = fixtureBundle();
+    gapped.raw = [rawEnvelope(0), rawEnvelope(2), rawEnvelope(4)];
+    expect(inspectQuality(gapped).metrics.raw_sequence_gap_count).toBe(2);
   });
 
   it("uses warnings for absent provenance and grounding rather than fabricating verifier or success labels", () => {

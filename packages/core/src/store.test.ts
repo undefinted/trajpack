@@ -48,6 +48,22 @@ describe("vault store", () => {
     }
   }, 20_000);
 
+  it("prunes stale writer temp files when listing traces", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-store-stale-temp-"));
+    const paths = fixturePaths(root);
+    const bundle = fixtureBundle();
+    const passphrase = "correct horse battery staple";
+    try {
+      await saveNewTrace(bundle, passphrase, paths);
+      const stale = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.123.456.tmp`);
+      await writeFile(stale, "stale-remnant");
+      expect(await listTraceIds(paths)).toEqual([bundle.manifest.trace_id]);
+      await expect(access(stale)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("recovers and lists a trace when a crash left only the backup", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-store-backup-recovery-"));
     const paths = fixturePaths(root);

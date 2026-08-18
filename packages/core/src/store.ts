@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, parse, sep } from "node:path";
 import type { TraceBundle } from "@trajpack/schema";
 import { sha256 } from "./canonical.js";
 import { defaultPaths, type TrajpackPaths } from "./paths.js";
@@ -7,6 +7,10 @@ import { readBundle, writeBundle } from "./vault.js";
 
 const TRACE_ID = /^[a-f0-9]{32}$/;
 const TRACE_ARTIFACT = /^([a-f0-9]{32})\.trajpack(?:\.(next|backup))?$/;
+// VaultWriter stages a generation at `${targetPath}.${pid}.${Date.now()}.tmp`
+// before renaming it into place. A leftover file is always the residue of a
+// crashed writer (the store is single-writer), so it can be pruned safely.
+const STALE_VAULT_TEMP = /^[a-f0-9]{32}\.trajpack(?:\.(?:next|backup))?\.\d+\.\d+\.tmp$/;
 
 type RecoveryCandidateKind = "target" | "next" | "backup";
 
@@ -45,6 +49,21 @@ async function ensureManagedDirectory(path: string): Promise<void> {
   const metadata = await lstat(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new Error("Managed trajpack path must be a real directory");
+  }
+  // `mkdir(recursive)` and `lstat` follow intermediate symlinks, so walk every
+  // ancestor to ensure a symlinked parent cannot silently redirect the store.
+  // macOS root-level platform symlinks (/tmp, /var, /etc) are tolerated.
+  const systemAliasRoots = new Set(process.platform === "win32" ? [] : ["/tmp", "/var", "/etc"]);
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    const component = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (component?.isSymbolicLink() && !systemAliasRoots.has(current)) {
+      throw new Error(`Managed trajpack path contains a symbolic-link or junction ancestor: ${current}`);
+    }
   }
   await chmod(path, 0o700).catch((error: NodeJS.ErrnoException) => {
     if (process.platform !== "win32") throw error;
@@ -164,8 +183,24 @@ async function recoverTrace(
   return recovered;
 }
 
+/**
+ * Remove stale VaultWriter temp files left behind by a crashed process. These
+ * are never a valid generation and would otherwise accumulate unboundedly.
+ */
+async function pruneStaleVaultTemps(paths: TrajpackPaths): Promise<void> {
+  const entries = await readdir(paths.vault, { withFileTypes: true });
+  let removed = false;
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !STALE_VAULT_TEMP.test(entry.name)) continue;
+    await rm(join(paths.vault, entry.name), { force: true });
+    removed = true;
+  }
+  if (removed) await syncDirectory(paths.vault);
+}
+
 export async function listTraceIds(paths: TrajpackPaths = defaultPaths()): Promise<string[]> {
   await ensureManagedDirectory(paths.vault);
+  await pruneStaleVaultTemps(paths);
   const entries = await readdir(paths.vault, { withFileTypes: true });
   const traceIds = new Set<string>();
   for (const entry of entries) {
@@ -248,8 +283,12 @@ export async function deleteTrace(traceId: string, paths: TrajpackPaths = defaul
   const entries = await readdir(paths.vault, { withFileTypes: true });
   const artifacts = entries.filter((entry) => pattern.test(entry.name));
   if (artifacts.some((entry) => entry.isDirectory())) throw new Error("Managed trace artifact unexpectedly became a directory");
-  const exact = artifacts.find((entry) => entry.name === `${traceId}.trajpack` && entry.isFile())
-    ?? artifacts.find((entry) => entry.isFile());
+  // Only a real generation artifact (.trajpack/.next/.backup) can represent an
+  // existing trace. Stale writer temp files alone must never produce a
+  // tombstone that claims a trace was deleted.
+  const generations = artifacts.filter((entry) => TRACE_ARTIFACT.test(entry.name));
+  const exact = generations.find((entry) => entry.name === `${traceId}.trajpack` && entry.isFile())
+    ?? generations.find((entry) => entry.isFile());
   if (artifacts.some((entry) => entry.name === `${traceId}.trajpack` && !entry.isFile())) {
     throw new Error("Managed trace artifact is not a regular file");
   }

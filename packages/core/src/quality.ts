@@ -280,7 +280,10 @@ export function inspectQuality(bundle: TraceBundle): QualityReport {
   const rawSequenceCounts = new Map<number, number>();
   for (const envelope of bundle.raw) rawSequenceCounts.set(envelope.sequence, (rawSequenceCounts.get(envelope.sequence) ?? 0) + 1);
   const rawUniqueSequences = [...rawSequenceCounts.keys()].sort((left, right) => left - right);
-  const rawSequenceGapCount = rawUniqueSequences.reduce((total, sequence, index) => total + Math.max(0, sequence - index), 0);
+  const rawSequenceGapCount = rawUniqueSequences.reduce(
+    (total, sequence, index) => total + (index === 0 ? 0 : Math.max(0, sequence - rawUniqueSequences[index - 1]! - 1)),
+    0,
+  );
   const rawDuplicateSequenceCount = [...rawSequenceCounts.values()].reduce((total, count) => total + Math.max(0, count - 1), 0);
   const rawReasons = rawIntegrityReasons(bundle);
   for (const reason of rawReasons) pushIssue(issues, reason, "error", `Raw vault integrity check failed: ${reason}`);

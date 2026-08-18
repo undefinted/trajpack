@@ -175,7 +175,7 @@ export type Rights = z.infer<typeof rightsSchema>;
 export const consentSchema = z.object({
   receipt_id: z.string().min(1),
   subjects_scope: z.enum(["single_user", "workspace", "all_participants"]),
-  purposes: z.array(z.string().min(1)),
+  purposes: z.array(z.string().min(1)).min(1),
   active: z.boolean(),
   captured_at: z.string().datetime(),
   withdrawal_ref: z.string().nullable().default(null),
@@ -204,6 +204,13 @@ export const contentPartSchema = z.object({
   review_disposition: z.enum(["include", "exclude"]).default("include"),
   reasoning: reasoningMetadataSchema.nullable().default(null),
   rights_override: rightsSchema.nullable().default(null),
+}).superRefine((part, context) => {
+  if (part.value === null && part.blob_ref === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A content part must carry inline value or a blob reference",
+    });
+  }
 });
 export type ContentPart = z.infer<typeof contentPartSchema>;
 
@@ -350,6 +357,14 @@ export const trajectoryEventSchema = z.object({
   }),
   metadata: z.record(z.string(), z.unknown()).default({}),
   review_disposition: z.enum(["include", "exclude"]).default("include"),
+}).superRefine((event, context) => {
+  if (event.ended_at !== null && Date.parse(event.ended_at) < Date.parse(event.started_at)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["ended_at"],
+      message: "Event ended_at must not precede started_at",
+    });
+  }
 });
 export type TrajectoryEvent = z.infer<typeof trajectoryEventSchema>;
 
@@ -422,8 +437,29 @@ export type RawEnvelope = z.infer<typeof rawEnvelopeSchema>;
 
 export const traceBundleSchema = z.object({
   manifest: traceManifestSchema,
-  events: z.array(trajectoryEventSchema),
+  events: z.array(trajectoryEventSchema).min(1),
   raw: z.array(rawEnvelopeSchema).default([]),
+}).superRefine((bundle, context) => {
+  const eventIds = new Set<string>();
+  let previousSequence = -1;
+  for (const [index, event] of bundle.events.entries()) {
+    if (eventIds.has(event.event_id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["events", index, "event_id"],
+        message: "Event ids must be unique within a trace bundle",
+      });
+    }
+    eventIds.add(event.event_id);
+    if (event.sequence <= previousSequence) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["events", index, "sequence"],
+        message: "Event sequences must increase strictly in stored order",
+      });
+    }
+    previousSequence = event.sequence;
+  }
 });
 export type TraceBundle = z.infer<typeof traceBundleSchema>;
 

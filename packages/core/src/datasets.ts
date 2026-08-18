@@ -764,8 +764,15 @@ function lineageCrossSplit(prepared: PreparedTrace[]): DatasetAudit["lineage_cro
 }
 
 function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAudit {
+  // The global near-duplicate budget accumulates in traversal order. Sort by
+  // trace_id first so the audit (and its limit-trip accounting) is identical
+  // regardless of the caller's input ordering.
+  const orderedPrepared = [...prepared].sort(
+    (left, right) => left.bundle.manifest.trace_id < right.bundle.manifest.trace_id ? -1
+      : left.bundle.manifest.trace_id > right.bundle.manifest.trace_id ? 1 : 0,
+  );
   const globalNearBudget = { sourceBytes: 0, features: 0, failureReason: null as string | null };
-  const fingerprints = prepared.map((trace) => ({
+  const fingerprints = orderedPrepared.map((trace) => ({
     trace,
     fingerprint: selectedTrainingViewFingerprint(trace, build.mode, globalNearBudget),
   }));
@@ -777,7 +784,8 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
   const content = groupedCrossSplit(viewEntries);
   const withinSplit = groupedWithinSplit(viewEntries);
   const nearOrdered = [...fingerprints]
-    .sort((left, right) => left.trace.bundle.manifest.trace_id < right.trace.bundle.manifest.trace_id ? -1 : 1);
+    .sort((left, right) => left.trace.bundle.manifest.trace_id < right.trace.bundle.manifest.trace_id ? -1
+      : left.trace.bundle.manifest.trace_id > right.trace.bundle.manifest.trace_id ? 1 : 0);
   const featureFailure = nearOrdered.find((entry) => entry.fingerprint.nearFailureReason !== null)
     ?.fingerprint.nearFailureReason ?? null;
   const nearPreflightFailure = globalNearBudget.failureReason ?? featureFailure;
@@ -943,9 +951,11 @@ export function inspectDatasetBuild(inputBuild: DatasetBuild, inputBundles: Trac
 }
 
 async function ensurePrivateParentAndAbsent(output: string): Promise<string> {
-  const absolute = resolve(output);
-  const parent = dirname(absolute);
-  await assertSafeOutputParent(parent);
+  // Build from the canonical parent so the staging directory and final rename
+  // use a symlink-free path rather than a lexical path that could be swapped
+  // after validation.
+  const parent = await assertSafeOutputParent(dirname(resolve(output)));
+  const absolute = join(parent, basename(resolve(output)));
   try {
     await lstat(absolute);
     throw new Error(`Dataset export destination already exists: ${absolute}`);

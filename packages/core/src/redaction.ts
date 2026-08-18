@@ -123,7 +123,7 @@ export function scanText(value: string): RedactionFinding[] {
     pattern.expression.lastIndex = 0;
     for (const match of value.matchAll(pattern.expression)) {
       if (match.index === undefined) continue;
-      if (pattern.kind === "phone" && (/^\d{4}-\d{2}-\d{2}(?:\.\d+)?$/.test(match[0])
+      if (pattern.kind === "phone" && (/^\d{4}-\d{2}-\d{2}(?:\.\d+)?(?:[ T]\d{1,2})?$/.test(match[0])
         || match[0].replace(/\D/g, "").length > 15)) continue;
       findings.push({
         kind: pattern.kind,

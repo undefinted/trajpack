@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  consentSchema,
+  contentPartSchema,
   datasetBuildSchema,
   datasetArtifactPathSchema,
   datasetExampleSchema,
@@ -7,6 +9,8 @@ import {
   decisionStatusSchema,
   migrateTraceBundle,
   reasoningMetadataSchema,
+  traceBundleSchema,
+  trajectoryEventSchema,
 } from "./index.js";
 
 describe("schema primitives", () => {
@@ -89,6 +93,136 @@ describe("schema primitives", () => {
       assistant_loss_mask: [false],
       reward: 1,
     })).toThrow("Reward and verifier");
+  });
+
+  it("rejects content parts with neither inline value nor a blob reference", () => {
+    const part = {
+      ordinal: 0,
+      type: "text",
+      mime_type: "text/plain",
+      value: null,
+      blob_ref: null,
+      sha256: "0".repeat(64),
+      sensitivity: "internal",
+      redaction_status: "not_scanned",
+      review_disposition: "include",
+      reasoning: null,
+      rights_override: null,
+    };
+    expect(contentPartSchema.safeParse(part).success).toBe(false);
+    expect(contentPartSchema.safeParse({ ...part, value: "text" }).success).toBe(true);
+    expect(contentPartSchema.safeParse({ ...part, blob_ref: "blob://ref" }).success).toBe(true);
+  });
+
+  it("requires at least one consent purpose", () => {
+    const consent = {
+      receipt_id: "receipt",
+      subjects_scope: "single_user",
+      purposes: [],
+      active: true,
+      captured_at: "2026-08-16T00:00:00.000Z",
+      withdrawal_ref: null,
+    };
+    expect(consentSchema.safeParse(consent).success).toBe(false);
+    expect(consentSchema.safeParse({ ...consent, purposes: ["archive"] }).success).toBe(true);
+  });
+
+  it("rejects events whose ended_at precedes started_at", () => {
+    const event = {
+      record_type: "event",
+      event_id: "evt-1",
+      trace_id: "a".repeat(32),
+      span_id: "b".repeat(16),
+      sequence: 0,
+      started_at: "2026-08-16T00:00:05.000Z",
+      ended_at: "2026-08-16T00:00:00.000Z",
+      event_type: "message",
+      actor: "assistant",
+      status: "ok",
+    };
+    expect(trajectoryEventSchema.safeParse(event).success).toBe(false);
+    expect(trajectoryEventSchema.safeParse({
+      ...event,
+      ended_at: "2026-08-16T00:00:05.000Z",
+    }).success).toBe(true);
+  });
+
+  it("rejects empty, duplicate, and non-monotonic trace bundles", () => {
+    const decision = (purposes: string[]) => ({
+      status: "unknown" as const,
+      purposes,
+      reason_codes: [],
+      basis: "test",
+      target_model_owner: null,
+      target_product: null,
+      competitive_with_source: "unknown" as const,
+      decision_id: "decision",
+      decided_at: "2026-08-16T00:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      reviewer: null,
+      evidence_ref: null,
+    });
+    const manifest = {
+      record_type: "trace_manifest",
+      schema_version: "trajectory/0.1",
+      trace_id: "a".repeat(32),
+      created_at: "2026-08-16T00:00:00.000Z",
+      source: {
+        host: "manual_import",
+        provider: "other",
+        product: "p",
+        surface: "manual_import",
+        capture_method: "manual_copy",
+        adapter_version: "0.1.0",
+        interface_version: "generic_json",
+        fidelity: "B",
+      },
+      account_contract: { account_type: "unknown", terms: [] },
+      rights: {
+        source_license_expression: "Apache-2.0",
+        input_rights_basis: "owned",
+        third_party_content: "none",
+      },
+      consent: {
+        receipt_id: "receipt",
+        subjects_scope: "single_user",
+        purposes: ["archive"],
+        active: true,
+        captured_at: "2026-08-16T00:00:00.000Z",
+      },
+      eligibility: {
+        local_archive: decision(["archive"]),
+        automatic_capture: decision(["capture"]),
+        training_noncompetitive: decision(["sft"]),
+        training_competitive_distillation: decision(["distillation"]),
+        redistribution: decision(["release"]),
+      },
+      privacy: {
+        legal_basis: "test",
+        storage_region: "local",
+        retention_class: "test",
+        redaction_policy_version: "redaction/0.1",
+      },
+      review: { automated_checks: "pending", human_approval: "pending" },
+      lineage: { normalizer_version: "0.1.0" },
+    };
+    const event = (sequence: number, id = `evt-${sequence}`) => ({
+      record_type: "event",
+      event_id: id,
+      trace_id: "a".repeat(32),
+      span_id: (sequence + 1).toString(16).padStart(16, "0"),
+      sequence,
+      started_at: "2026-08-16T00:00:00.000Z",
+      ended_at: null,
+      event_type: "message",
+      actor: "assistant",
+      status: "ok",
+    });
+
+    expect(traceBundleSchema.safeParse({ manifest, events: [], raw: [] }).success).toBe(false);
+    expect(traceBundleSchema.safeParse({ manifest, events: [event(0)], raw: [] }).success).toBe(true);
+    expect(traceBundleSchema.safeParse({ manifest, events: [event(0), event(0, "evt-dup")], raw: [] }).success).toBe(false);
+    expect(traceBundleSchema.safeParse({ manifest, events: [event(1), event(0)], raw: [] }).success).toBe(false);
   });
 
   it("rejects unsafe or ambiguous dataset inventories", () => {

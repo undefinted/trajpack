@@ -24,7 +24,11 @@ function pathWithin(base: string, target: string): boolean {
 }
 
 async function expectedCanonicalPath(path: string): Promise<string> {
-  const candidates = [resolve(process.cwd()), resolve(tmpdir()), parse(path).root]
+  // `/tmp` and `/var` are macOS platform symlinks that sit below the root and
+  // are not covered by `tmpdir()` (/var/folders/...), so treat them as trusted
+  // roots to avoid falsely rejecting evidence files under the system temp dir.
+  const systemAliasRoots = process.platform === "win32" ? [] : [resolve("/tmp"), resolve("/var")];
+  const candidates = [resolve(process.cwd()), resolve(tmpdir()), ...systemAliasRoots, parse(path).root]
     .filter((candidate, index, values) => values.indexOf(candidate) === index)
     .filter((candidate) => pathWithin(candidate, path))
     .sort((left, right) => right.length - left.length);
