@@ -36,7 +36,7 @@ describe("vault store", () => {
       await replaceTrace(bundle, passphrase, paths);
       expect((await loadTrace(bundle.manifest.trace_id, passphrase, paths)).manifest.review.notes).toBe("reviewed");
       const backup = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.backup`);
-      const crashedTemporary = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.next.123.456.tmp`);
+      const crashedTemporary = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.next.123.456.a1b2c3d4.tmp`);
       await writeFile(backup, "encrypted-remnant");
       await writeFile(crashedTemporary, "encrypted-remnant");
       await deleteTrace(bundle.manifest.trace_id, paths);
@@ -55,7 +55,7 @@ describe("vault store", () => {
     const passphrase = "correct horse battery staple";
     try {
       await saveNewTrace(bundle, passphrase, paths);
-      const stale = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.123.456.tmp`);
+      const stale = join(paths.vault, `${bundle.manifest.trace_id}.trajpack.123.456.a1b2c3d4.tmp`);
       await writeFile(stale, "stale-remnant");
       expect(await listTraceIds(paths)).toEqual([bundle.manifest.trace_id]);
       await expect(access(stale)).rejects.toThrow();

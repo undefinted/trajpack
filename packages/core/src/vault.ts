@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, parse, sep } from "node:path";
@@ -336,7 +337,9 @@ export class VaultWriter {
       throw new Error(`Vault writer flushBytes must be from 1 to ${MAX_VAULT_FLUSH_BYTES}`);
     }
     await ensurePrivateDirectory(dirname(targetPath));
-    const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+    // The random suffix keeps two writers for the same target in the same
+    // process/millisecond from colliding on the same staging name (EEXIST).
+    const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.${randomBytes(4).toString("hex")}.tmp`;
     const handle = await open(temporaryPath, "wx", 0o600);
     let key: Uint8Array | undefined;
     try {
