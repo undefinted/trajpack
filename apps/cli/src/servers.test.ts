@@ -15,7 +15,7 @@ import {
   sha256,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { CaptureBackpressureError, CaptureLimitError, CaptureSession } from "./capture-session.js";
+import { CaptureBackpressureError, CaptureInvalidEventError, CaptureLimitError, CaptureSession } from "./capture-session.js";
 import { startIngestServer } from "./ingest-server.js";
 import { startReviewServer } from "./review-server.js";
 
@@ -1061,6 +1061,38 @@ describe("loopback collectors", () => {
     }
   });
 
+  it("restores the one-shot browser pairing capability after a rejected invalid envelope", async () => {
+    const envelope = makeBrowserEnvelope();
+    const ingest = vi.fn()
+      .mockRejectedValueOnce(new CaptureInvalidEventError("payload hash mismatch"))
+      .mockResolvedValueOnce(true);
+    const running = await startIngestServer({
+      host: "browser",
+      token: "unused-token",
+      pairingNonce: "retryable-pairing-nonce-invalid-envelope",
+      session: { ingest } as unknown as CaptureSession,
+    });
+    const headers = {
+      origin: extensionOrigin,
+      "x-trajpack-pairing-nonce": "retryable-pairing-nonce-invalid-envelope",
+      "x-trajpack-recipe-sha256": (envelope.payload as { provenance: { selector_recipe_sha256: string } }).provenance.selector_recipe_sha256,
+    };
+    try {
+      const rejected = await running.server.inject({
+        method: "POST", url: "/v1/browser/captures", headers, payload: { envelope },
+      });
+      expect(rejected.statusCode).toBe(422);
+      expect(rejected.json()).toEqual({ error: "event_rejected" });
+      const retried = await running.server.inject({
+        method: "POST", url: "/v1/browser/captures", headers, payload: { envelope },
+      });
+      expect(retried.statusCode).toBe(201);
+      expect(ingest).toHaveBeenCalledTimes(2);
+    } finally {
+      await running.close();
+    }
+  });
+
   it("encrypts an authorized DOM capture immediately through the reviewer pairing route", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-review-test-"));
     temporaryRoots.push(root);
@@ -1089,6 +1121,37 @@ describe("loopback collectors", () => {
       expect(bundle.manifest.source.capture_method).toBe("authorized_dom");
       expect(bundle.manifest.account_contract.order_form_or_written_permission_ref).toBe("LicenseRef-owned-test-site");
       expect(bundle.events.map((event) => event.content[0]?.value)).toEqual(["owned prompt sentinel", "owned response sentinel"]);
+    } finally {
+      await running.close();
+    }
+  }, 30_000);
+
+  it("restores the reviewer pairing nonce when a capture fails after pairing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-review-nonce-restore-test-"));
+    temporaryRoots.push(root);
+    // A passphrase too short to open a vault makes CaptureSession.create throw
+    // after the pairing nonce was consumed; the nonce must be restored so the
+    // extension can retry once the operator restarts with a valid passphrase.
+    const running = await startReviewServer({
+      passphrase: "short",
+      paths: testPaths(root),
+      reviewerDist: join(root, "missing-dist"),
+    });
+    const envelope = makeBrowserEnvelope();
+    const recipeSha256 = (envelope.payload as { provenance: { selector_recipe_sha256: string } }).provenance.selector_recipe_sha256;
+    const headers = {
+      host: new URL(running.url).host,
+      origin: extensionOrigin,
+      "x-trajpack-pairing-nonce": running.browserPairingNonce,
+      "x-trajpack-recipe-sha256": recipeSha256,
+    };
+    try {
+      const response = await running.server.inject({ method: "POST", url: "/v1/browser/captures", headers, payload: { envelope } });
+      expect(response.statusCode).toBe(500);
+      // The nonce survived the failed pairing attempt.
+      expect(running.browserPairingNonce).not.toBeNull();
+      const retried = await running.server.inject({ method: "POST", url: "/v1/browser/captures", headers, payload: { envelope } });
+      expect(retried.statusCode).toBe(500);
     } finally {
       await running.close();
     }

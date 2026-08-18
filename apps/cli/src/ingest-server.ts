@@ -667,8 +667,16 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
       }
       // A rejected envelope (e.g. payload hash mismatch) is a bounded invalid
       // attempt; do not poison the collector or leave the reservation held.
+      // The one-shot pairing nonce was consumed immediately before ingestion,
+      // but a rejection means the pairing did not succeed: restore exactly that
+      // capability (as the backpressure branch above does) so a corrected retry
+      // does not force a reviewer restart.
       if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
         releaseReservation(envelope);
+        if (browserNonce === undefined && pairedOrigin === origin) {
+          browserNonce = nonce;
+          pairedOrigin = previousPairedOrigin;
+        }
         return rejectInvalid(reply, 422, { error: "event_rejected" });
       }
       const reason = error instanceof CaptureLimitError
