@@ -96,10 +96,18 @@ function sessionIdentity(value: unknown): {
     header.version !== sessionFormatVersion || (header.id !== undefined && header.id !== sessionId)
   ) return null;
   const events = Array.isArray(session.events) ? session.events : [];
-  const marker = record(events[firstLiveSeq]);
-  const boundaryMarker = marker?.type === "session/end-seed" && marker.seq === firstLiveSeq
-    ? { type: "session/end-seed" as const, seq: firstLiveSeq }
-    : null;
+  // The harness contract locates the LAST session/end-seed marker, which for a
+  // resumed seed may sit at firstLiveSeq - 1 (a seed that already ended is not
+  // re-marked). Only scanning events[firstLiveSeq] would miss it and report a
+  // wrong live boundary.
+  let boundaryMarker: { type: "session/end-seed"; seq: number } | null = null;
+  for (let index = Math.min(firstLiveSeq, events.length - 1); index >= 0; index -= 1) {
+    const marker = record(events[index]);
+    if (marker?.type === "session/end-seed" && marker.seq === index && index <= firstLiveSeq) {
+      boundaryMarker = { type: "session/end-seed" as const, seq: index };
+      break;
+    }
+  }
   return { session, header, sessionId, firstLiveSeq, boundaryMarker };
 }
 
@@ -154,9 +162,18 @@ function capsule(state: ForwardState, identity: NonNullable<ReturnType<typeof se
 async function forward(payload: JsonObject): Promise<void> {
   const collector = process.env.TRAJPACK_COLLECTOR_URL;
   const token = process.env.TRAJPACK_CAPTURE_TOKEN;
-  if (typeof collector !== "string" || typeof token !== "string" || token.length === 0 || token.length > 4096) return;
+  // No-op only when the plugin is entirely unarmed. Present-but-invalid
+  // configuration must fail the durability checkpoint instead of silently
+  // producing an empty vault with a successful session/flush.
+  if (collector === undefined && token === undefined) return;
+  if (typeof collector !== "string" || typeof token !== "string"
+    || token.length === 0 || token.length > 4096) {
+    throw new CollectorForwardError(null, "Trajpack collector configuration is invalid");
+  }
   const endpoint = loopbackUrl(collector);
-  if (endpoint === null) return;
+  if (endpoint === null) {
+    throw new CollectorForwardError(null, "Trajpack collector URL must be an HTTP loopback origin");
+  }
 
   let body: string;
   try {
@@ -212,7 +229,15 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
 
   const drainStates = async (states: Iterable<ForwardState>): Promise<void> => {
     const snapshot = [...states];
-    await Promise.all(snapshot.map(async (state) => state.queue));
+    // `session/flush` is a durability barrier: events admitted while it runs
+    // append a new queue tail that must also be awaited before draining.
+    for (const state of snapshot) {
+      for (;;) {
+        const tail = state.queue;
+        await tail;
+        if (tail === state.queue) break;
+      }
+    }
     const failures = failureFrom(snapshot);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, "Trajpack collector drain failed");

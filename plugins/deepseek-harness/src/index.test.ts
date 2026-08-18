@@ -226,14 +226,16 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     expect(drained).toBe(true);
   });
 
-  it("refuses non-loopback collectors", async () => {
+  it("refuses non-loopback collectors and fails the durability checkpoint", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "https://collector.example/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "token";
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
     const installed = install();
     installed.eventListener(session(), event("turn/start", 0, { turn: 0 }));
-    await installed.controller.flush();
+    // Present-but-invalid collector configuration must fail the flush loudly
+    // instead of silently producing an empty vault.
+    await expect(installed.controller.flush()).rejects.toThrow(/loopback/iu);
     expect(fetch).not.toHaveBeenCalled();
   });
 });
