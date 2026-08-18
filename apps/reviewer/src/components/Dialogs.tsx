@@ -129,6 +129,7 @@ export function DecisionDialog({
 
 interface ExportDialogProps {
   open: boolean;
+  eligibleModes: ApprovalMode[];
   onClose: () => void;
   onPreview: (format: ExportFormat, mode: ApprovalMode) => Promise<ExportPreview>;
   onExport: (format: ExportFormat, mode: ApprovalMode, confirmation: ExportPreview["confirmation_phrase"]) => Promise<ExportReceipt>;
@@ -142,9 +143,17 @@ const formats: Array<{ value: ExportFormat; label: string; detail: string }> = [
   { value: "otlp", label: "OTLP", detail: "OpenTelemetry trace mapping" },
 ];
 
-export function ExportDialog({ open, onClose, onPreview, onExport, onComplete }: ExportDialogProps): ReactNode {
+const ALL_EXPORT_MODES: ApprovalMode[] = ["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"];
+
+export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport, onComplete }: ExportDialogProps): ReactNode {
   const [format, setFormat] = useState<ExportFormat>("canonical");
   const [mode, setMode] = useState<ApprovalMode>("archive");
+  const modeOptions = ALL_EXPORT_MODES.filter((candidate) => eligibleModes.includes(candidate));
+  useEffect(() => {
+    if (open && modeOptions.length > 0 && !modeOptions.includes(mode)) {
+      setMode(modeOptions[0]!);
+    }
+  }, [open, mode, modeOptions]);
   const [preview, setPreview] = useState<ExportPreview | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [phrase, setPhrase] = useState("");
@@ -220,11 +229,8 @@ export function ExportDialog({ open, onClose, onPreview, onExport, onComplete }:
 
           <label>
             <span>Eligibility gate / 用途</span>
-            <select value={mode} onChange={(event) => setMode(event.target.value as ApprovalMode)} disabled={loading}>
-              <option value="archive">archive</option>
-              <option value="training_noncompetitive">training_noncompetitive</option>
-              <option value="training_competitive_distillation">training_competitive_distillation</option>
-              <option value="redistribution">redistribution</option>
+            <select value={mode} onChange={(event) => setMode(event.target.value as ApprovalMode)} disabled={loading || modeOptions.length === 0}>
+              {modeOptions.map((candidate) => <option key={candidate} value={candidate}>{candidate}</option>)}
             </select>
           </label>
 

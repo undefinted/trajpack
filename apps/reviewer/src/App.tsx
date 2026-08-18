@@ -373,6 +373,7 @@ export function App({ api }: AppProps): ReactNode {
       {detail && (
         <ExportDialog
           open={exportOpen}
+          eligibleModes={eligibleApprovalModes}
           onClose={() => setExportOpen(false)}
           onPreview={handlePreviewExport}
           onExport={handleExport}
