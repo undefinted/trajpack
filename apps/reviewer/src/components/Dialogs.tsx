@@ -31,6 +31,7 @@ export function DecisionDialog({
 
   useEffect(() => {
     if (open) {
+      setReviewer("");
       setNotes("");
       setAcknowledged(false);
       // Purpose approval is never preselected. Archive, training, and
@@ -245,7 +246,7 @@ export function ExportDialog({ open, onClose, onPreview, onExport, onComplete }:
                 <div><dt>遮盖片段</dt><dd>{preview.redacted_part_count}</dd></div>
                 <div><dt>许可</dt><dd>{preview.license_summary}</dd></div>
               </dl>
-              {preview.block_reasons.map((reason) => <p className="text-danger" key={reason}>阻断：{reason}</p>)}
+              {preview.block_reasons.map((reason, index) => <p className="text-danger" key={`${index}-${reason}`}>阻断：{reason}</p>)}
             </div>
           )}
 

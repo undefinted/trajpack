@@ -67,7 +67,7 @@ export function EventInspector({
     event.preventDefault();
     onSaveReview({
       note: note.trim() || null,
-      redaction_replacement: review.disposition === "redact" ? replacement.trim() || "[REDACTED]" : null,
+      redaction_replacement: review.disposition === "redact" ? replacement.trim() || "[REDACTED BY REVIEWER]" : null,
     });
   }
 
