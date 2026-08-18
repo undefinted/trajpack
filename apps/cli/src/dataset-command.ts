@@ -43,7 +43,8 @@ async function readBoundedRegularFile(path: string, maxBytes: number): Promise<B
   const handle = await open(absolute, "r");
   try {
     const opened = await handle.stat();
-    if (!opened.isFile() || opened.size !== before.size || opened.size > maxBytes) {
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
+      || opened.size !== before.size || opened.size > maxBytes) {
       throw new Error(`File changed while opening: ${absolute}`);
     }
     const buffer = Buffer.allocUnsafe(opened.size + 1);

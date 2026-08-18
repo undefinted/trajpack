@@ -10,7 +10,13 @@ import {
   classifyJsonLine,
 } from "@trajpack/adapters";
 import { canonicalJson, sha256 } from "@trajpack/core";
-import { CaptureBackpressureError, CaptureLimitError, CaptureSession } from "./capture-session.js";
+import {
+  CaptureBackpressureError,
+  CaptureInvalidEventError,
+  CaptureLimitError,
+  CaptureSession,
+  HarnessCaptureIntegrityError,
+} from "./capture-session.js";
 
 const MAX_CLAUDE_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_MAX_CAPTURE_EVENTS = 100_000;
@@ -524,6 +530,12 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
         releaseReservation(envelope);
         return reply.code(429).send({ error: "collector_busy" });
       }
+      // A malformed/rejected envelope is a bounded invalid attempt, not a
+      // storage failure; it must not poison the whole collector.
+      if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+        releaseReservation(envelope);
+        return rejectInvalid(reply, 422, { error: "event_rejected" });
+      }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)
         : exceedLimit("CAPTURE_STORAGE_FAILURE");
@@ -533,16 +545,25 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
     if (accepted) received += 1;
     else releaseReservation(envelope);
 
-    const isBoundClaudeSessionEnd =
+    const isClaudeSessionEnd =
       options.host === "claude_code" &&
       envelope.adapter === "claude_code" &&
       envelope.interface_version === "claude-hook/1" &&
       payload.hook_event_name === "SessionEnd" &&
       typeof requestSessionId === "string" &&
       requestSessionId === boundSessionId &&
-      (!options.expectedCwd || payload.cwd === options.expectedCwd) &&
-      !boundSessionEnded;
-    if (isBoundClaudeSessionEnd && typeof payload.transcript_path === "string" && claudeTranscriptBindingPromise) {
+      (!options.expectedCwd || payload.cwd === options.expectedCwd);
+    // Claim the SessionEnd synchronously so two concurrent SessionEnd requests
+    // cannot both pass the guard and emit the same opaque transcript twice
+    // (which would conflict on the dedupe key and poison the capture).
+    let claimedSessionEnd = false;
+    if (isClaudeSessionEnd && !boundSessionEnded) {
+      boundSessionEnded = true;
+      claimedSessionEnd = true;
+      options.onSessionEnd?.();
+    }
+    if (claimedSessionEnd && typeof requestSessionId === "string"
+      && typeof payload.transcript_path === "string" && claudeTranscriptBindingPromise) {
       const binding = await claudeTranscriptBindingPromise;
       const transcript = binding ? await readOpaqueClaudeTranscript(
         payload.transcript_path,
@@ -563,6 +584,10 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
             releaseReservation(opaque);
             return reply.code(429).send({ error: "collector_busy" });
           }
+          if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+            releaseReservation(opaque);
+            return rejectInvalid(reply, 422, { error: "event_rejected" });
+          }
           const reason = error instanceof CaptureLimitError
             ? exceedLimit(error.reason)
             : exceedLimit("CAPTURE_STORAGE_FAILURE");
@@ -577,6 +602,7 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
       hookInterface &&
       payload.hook_event_name === "SessionEnd" &&
       (!options.bindNextSession || requestSessionId === boundSessionId) &&
+      !claimedSessionEnd &&
       !boundSessionEnded
     ) {
       boundSessionEnded = true;
@@ -638,6 +664,12 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
           pairedOrigin = previousPairedOrigin;
         }
         return reply.code(429).send({ error: "collector_busy" });
+      }
+      // A rejected envelope (e.g. payload hash mismatch) is a bounded invalid
+      // attempt; do not poison the collector or leave the reservation held.
+      if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+        releaseReservation(envelope);
+        return rejectInvalid(reply, 422, { error: "event_rejected" });
       }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)
