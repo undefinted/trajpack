@@ -11,7 +11,8 @@ import { runDemo } from "../../scripts/demo-trajectory.mjs";
 const DEMO_ROOT = dirname(fileURLToPath(import.meta.url));
 // demo-trajectory.mjs writes replay artifacts under the repository root, not
 // the process cwd; derive the root from this file so the test is cwd-independent.
-const REPOSITORY_ROOT = dirname(DEMO_ROOT);
+// The test file lives at <root>/examples/deepseek-research-demo/, two levels down.
+const REPOSITORY_ROOT = dirname(dirname(DEMO_ROOT));
 const OUTPUT_MARKER = "trajpack-deepseek-research-demo/0.1\n";
 
 async function text(root, name) {
