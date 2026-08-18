@@ -256,37 +256,97 @@ function messageEvents(
   sessionId: string | null,
   metadata: Record<string, unknown>,
 ): TrajectoryEvent[] {
-  const ordered = messages
-    .map((message, inputIndex) => ({ message, inputIndex }))
-    .sort((left, right) => {
-      const leftSequence = isRecord(left.message) && typeof left.message.sequence === "number" ? left.message.sequence : left.inputIndex;
-      const rightSequence = isRecord(right.message) && typeof right.message.sequence === "number" ? right.message.sequence : right.inputIndex;
-      return leftSequence - rightSequence;
-    });
+  // Sort by the provider sequence when every record carries one. If any
+  // record lacks a numeric sequence, fall back to input order: comparing a
+  // positional fallback against real sequence values would mix two key domains
+  // and silently reorder the conversation.
+  const allSequenced = messages.every((message) => isRecord(message) && typeof message.sequence === "number");
+  const ordered = allSequenced
+    ? [...messages]
+      .map((message, inputIndex) => ({ message, inputIndex }))
+      .sort((left, right) => {
+        const leftSequence = (left.message as JsonObject).sequence as number;
+        const rightSequence = (right.message as JsonObject).sequence as number;
+        return leftSequence - rightSequence;
+      })
+    : messages.map((message, inputIndex) => ({ message, inputIndex }));
 
   const events = ordered.flatMap(({ message, inputIndex }, index) => {
     if (!isRecord(message)) return [];
-    const text = messageText(message);
-    if (text === null) return [];
     const role = stringValue(message.role) ?? "unknown";
     const messageId = firstString(message, ["id", "message_id", "messageId"]) ?? `${inputIndex}`;
-    return [createEvent(raw, index, {
-      eventType: "message",
-      actor: actorFromRole(role),
-      content: [contentPart(text)],
-      sourceEventId: messageId,
-      sourceSessionId: sessionId,
-      startedAt: toIso(message.timestamp ?? message.created_at ?? message.createdAt, raw.captured_at),
-      metadata: {
-        ...metadata,
-        source_role: role,
-        source_role_inference: message.source_role_inference ?? null,
-        source_products: message.products ?? null,
-        source_sequence: message.sequence ?? inputIndex,
-        source_parent_message_id: firstString(message, ["parent_id", "parentId", "parent_message_id", "parentMessageId"]),
-        dedupe_key: dedupeKey(raw.adapter, sessionId, messageId, role, text),
-      },
-    }, options)];
+    const startedAt = toIso(message.timestamp ?? message.created_at ?? message.createdAt, raw.captured_at);
+    const baseMetadata = {
+      ...metadata,
+      source_role: role,
+      source_role_inference: message.source_role_inference ?? null,
+      source_products: message.products ?? null,
+      source_sequence: message.sequence ?? inputIndex,
+      source_parent_message_id: firstString(message, ["parent_id", "parentId", "parent_message_id", "parentMessageId"]),
+    };
+    const output: TrajectoryEvent[] = [];
+    const text = messageText(message);
+    if (text !== null) {
+      output.push(createEvent(raw, index, {
+        eventType: "message",
+        actor: actorFromRole(role),
+        content: [contentPart(text)],
+        sourceEventId: messageId,
+        sourceSessionId: sessionId,
+        startedAt,
+        metadata: {
+          ...baseMetadata,
+          dedupe_key: dedupeKey(raw.adapter, sessionId, messageId, role, text),
+        },
+      }, options));
+    }
+    // Official Claude exports carry tool_use / tool_result blocks inside
+    // message.content. Emit them as real tool events instead of silently
+    // dropping the calls or mislabelling results as user messages.
+    const content = Array.isArray(message.content) ? message.content : [];
+    for (const [blockIndex, candidate] of content.entries()) {
+      if (!isRecord(candidate)) continue;
+      const blockType = firstString(candidate, ["type"]);
+      if (blockType === "tool_use") {
+        const callId = firstString(candidate, ["id"]);
+        const name = firstString(candidate, ["name"]);
+        const input = candidate.input ?? null;
+        output.push(createEvent(raw, index + 1 + blockIndex, {
+          eventType: "tool.call",
+          actor: "assistant",
+          content: [contentPart(input, 0, { type: "tool_call" })],
+          tool: { call_id: callId, name, arguments: input, result: null, exit_code: null },
+          sourceEventId: callId ?? `${messageId}:tool:${blockIndex}`,
+          sourceSessionId: sessionId,
+          startedAt,
+          metadata: {
+            ...baseMetadata,
+            imported_block_type: "tool_use",
+            dedupe_key: dedupeKey(raw.adapter, sessionId, messageId, "tool_use", callId, name),
+          },
+        }, options));
+      } else if (blockType === "tool_result") {
+        const callId = firstString(candidate, ["tool_use_id"]);
+        const resultText = messageText(candidate);
+        const failed = candidate.is_error === true;
+        output.push(createEvent(raw, index + 1 + blockIndex, {
+          eventType: "tool.result",
+          actor: "tool",
+          status: failed ? "error" : "ok",
+          content: resultText === null ? [] : [contentPart(resultText, 0, { type: "tool_result" })],
+          tool: { call_id: callId, name: null, arguments: null, result: resultText, exit_code: null },
+          sourceEventId: callId ? `${callId}:result` : `${messageId}:tool_result:${blockIndex}`,
+          sourceSessionId: sessionId,
+          startedAt,
+          metadata: {
+            ...baseMetadata,
+            imported_block_type: "tool_result",
+            dedupe_key: dedupeKey(raw.adapter, sessionId, messageId, "tool_result", callId),
+          },
+        }, options));
+      }
+    }
+    return output;
   });
   const spans = new Map(events.flatMap((event) => event.source_event_id ? [[event.source_event_id, event.span_id] as const] : []));
   return events.map((event) => {
@@ -299,18 +359,32 @@ function messageEvents(
 
 function chatGptMessages(record: JsonObject): JsonObject[] {
   if (!isRecord(record.mapping)) return [];
+  // Real exports use distinct node ids and message ids; the mapping "parent"
+  // edge refers to a *node* id while events are keyed by *message* id. Resolve
+  // the parent's message id up front so messageEvents can link spans.
+  const messageIdByNode = new Map<string, string>();
+  for (const [nodeId, candidate] of Object.entries(record.mapping)) {
+    if (!isRecord(candidate) || !isRecord(candidate.message)) continue;
+    const id = firstString(candidate.message, ["id"]) ?? nodeId;
+    messageIdByNode.set(nodeId, id);
+  }
   return Object.entries(record.mapping).flatMap(([nodeId, candidate]) => {
     if (!isRecord(candidate) || !isRecord(candidate.message)) return [];
     const message = candidate.message;
     const author = nestedRecord(message, "author");
     const content = nestedRecord(message, "content");
     const parts = content && Array.isArray(content.parts) ? content.parts : [];
+    const parentNode = firstString(candidate, ["parent"]);
+    // A parent edge may reference a node id (real exports) or a message id
+    // (some fixtures); resolve node ids to message ids and pass through
+    // message ids unchanged so the span link is found either way.
+    const parentId = parentNode === null ? null : messageIdByNode.get(parentNode) ?? parentNode;
     return [{
-      id: firstString(message, ["id"]) ?? nodeId,
+      id: messageIdByNode.get(nodeId) ?? nodeId,
       role: author ? firstString(author, ["role"]) ?? "unknown" : "unknown",
       content: parts,
       timestamp: message.create_time ?? message.created_at ?? null,
-      parent_id: firstString(candidate, ["parent"]),
+      parent_id: parentId,
       sequence: typeof message.create_time === "number" ? message.create_time : undefined,
     }];
   });

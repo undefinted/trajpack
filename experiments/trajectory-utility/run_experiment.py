@@ -233,6 +233,9 @@ def train_adapter(
     adapter_dir: Path,
 ) -> tuple[Any, dict[str, Any]]:
     torch = stack["torch"]
+    for knob in ("max_steps", "micro_batch_size", "gradient_accumulation_steps", "warmup_steps"):
+        if knob not in train_config or not isinstance(train_config[knob], int) or train_config[knob] < 1:
+            raise ValueError(f"train.{knob} must be a positive integer")
     samples, token_stats = supervised_samples(records, tokenizer, int(train_config["max_length"]))
     lora = stack["LoraConfig"](
         task_type=stack["TaskType"].CAUSAL_LM,
@@ -576,6 +579,19 @@ def main() -> None:
     output = require_ignored_path(args.output, repository, "output")
     cache_dir = require_ignored_path(args.cache_dir, repository, "cache-dir")
     create_fresh_output(output)
+    # Write a status record immediately so any setup failure below leaves a
+    # diagnostic run-state.json instead of an empty directory. The full header
+    # is written once environment/config collection succeeds.
+    atomic_json(output / "run-state.json", {
+        "schema_version": "trajectory-utility-run/0.1",
+        "status": "running",
+        "seed": None,
+        "config_sha256": None,
+        "input_sha256": None,
+        "model": None,
+        "validation": None,
+        "environment": None,
+    })
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(cache_dir)
     if args.local_files_only:

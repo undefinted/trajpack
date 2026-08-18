@@ -49,7 +49,11 @@ export function EventInspector({
     setRightsModes(entry?.review.rights_attestation?.scopes.map(({ mode }) => mode) ?? []);
     setVerifierReviewer(entry?.review.verifier_confirmation?.reviewer ?? "");
     setVerifierEvidenceRef(entry?.review.verifier_confirmation?.evidence_ref ?? "");
-  }, [entry, inheritedRights]);
+    // Depend on the inspected event's stable identity plus a serialized key of
+    // the inherited rights. The full object identities change on every save
+    // (each response is a fresh clone), which would wipe all unsaved form
+    // fields after any unrelated save.
+  }, [entry?.event.event_id, entry?.review.updated_at, JSON.stringify(inheritedRights)]);
 
   if (!entry) {
     return (
@@ -97,9 +101,10 @@ export function EventInspector({
     });
   }
 
-  const verifier = verifierEvidenceSchema.safeParse(event.metadata.verifier);
-  const reward = typeof event.metadata.reward === "number" && Number.isFinite(event.metadata.reward)
-    ? event.metadata.reward
+  const metadata = event.metadata ?? {};
+  const verifier = verifierEvidenceSchema.safeParse(metadata.verifier);
+  const reward = typeof metadata.reward === "number" && Number.isFinite(metadata.reward)
+    ? metadata.reward
     : null;
   const verifierCandidate = verifier.success && reward !== null && ["evaluation", "feedback"].includes(event.event_type)
     ? { verifier: verifier.data, reward }

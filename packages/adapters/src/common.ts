@@ -93,7 +93,11 @@ export function nestedRecord(object: JsonObject, key: string): JsonObject | null
 
 export function toIso(value: unknown, fallback: string): string {
   if (typeof value === "number" && Number.isFinite(value)) {
-    const millis = value > 10_000_000_000 ? value : value * 1000;
+    // Treat values >= 1e11 as milliseconds (1973-03-03 onward; all modern
+    // epoch-ms timestamps). Below that they are epoch seconds. The old 1e10
+    // threshold misread milliseconds between 1970-04-26 and 1973-03-03 as
+    // seconds and shifted them into 2286.
+    const millis = value >= 100_000_000_000 ? value : value * 1000;
     const date = new Date(millis);
     if (!Number.isNaN(date.valueOf())) return date.toISOString();
   }

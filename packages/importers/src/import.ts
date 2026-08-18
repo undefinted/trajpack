@@ -138,13 +138,20 @@ function deepSeekHarnessEnvelopes(
       const requestHeader = record(data.header);
       const config = requestHeader === null ? null : record(requestHeader.config);
       if (config !== null) {
-        route = { provider: nonEmptyText(config.provider), model: nonEmptyText(config.model) };
+        const provider = nonEmptyText(config.provider);
+        const model = nonEmptyText(config.model);
+        // Preserve the previously observed route when a later header omits the
+        // provider/model fields; a partial config must not erase valid route
+        // evidence for every subsequent event.
+        if (provider !== null && model !== null) route = { provider, model };
       }
     } else if (event.type === "assistant/message") {
       const message = record(data.message);
       const source = message === null ? null : record(message.source);
       if (source?.kind === "model") {
-        route = { provider: nonEmptyText(source.provider), model: nonEmptyText(source.model) };
+        const provider = nonEmptyText(source.provider);
+        const model = nonEmptyText(source.model);
+        if (provider !== null && model !== null) route = { provider, model };
       }
     }
     const observedDate = typeof event.time === "number" && Number.isFinite(event.time)

@@ -136,11 +136,21 @@ export class LoopbackReviewApi implements ReviewApi {
     });
 
     const contentType = response.headers.get("content-type") ?? "";
-    const payload: unknown = contentType.includes("application/json")
-      ? await response.json()
-      : await response.text();
+    const parseBody = async (): Promise<unknown> =>
+      contentType.includes("application/json")
+        ? response.json()
+        : response.text();
 
     if (!response.ok) {
+      // A proxy/gateway error may carry an empty or truncated body even with a
+      // JSON content-type. Parsing must be best-effort so the caller still gets
+      // a typed ReviewApiError with the status code instead of a raw SyntaxError.
+      let payload: unknown = null;
+      try {
+        payload = await parseBody();
+      } catch {
+        // Ignore malformed error bodies; fall through to the generic message.
+      }
       const errorPayload = isErrorPayload(payload) ? payload : null;
       throw new ReviewApiError(
         errorPayload?.error.message ?? `Reviewer API request failed (${response.status})`,
@@ -149,7 +159,7 @@ export class LoopbackReviewApi implements ReviewApi {
       );
     }
 
-    return payload as T;
+    return (await parseBody()) as T;
   }
 }
 

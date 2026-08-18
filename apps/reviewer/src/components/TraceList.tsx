@@ -80,7 +80,9 @@ export function TraceList({ traces, selectedId, onSelect, busy = false }: TraceL
 
       <div className="trace-list" aria-busy={busy}>
         {visible.map((trace) => {
-          const blocked = trace.blocker_count > 0;
+          // A rejected trace is rejected regardless of remaining blockers; only
+          // pending/approved traces with failed checks are still "blocked".
+          const blocked = trace.human_approval !== "rejected" && trace.blocker_count > 0;
           return (
             <button
               className={selectedId === trace.trace_id ? "trace-card trace-card--selected" : "trace-card"}

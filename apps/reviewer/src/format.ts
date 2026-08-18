@@ -15,7 +15,7 @@ export function formatDateTime(value: string | null): string {
 }
 
 export function formatDuration(milliseconds: number | null): string {
-  if (milliseconds === null) return "—";
+  if (milliseconds === null || !Number.isFinite(milliseconds) || milliseconds < 0) return "—";
   if (milliseconds < 1_000) return `${milliseconds} ms`;
   return `${(milliseconds / 1_000).toFixed(milliseconds >= 10_000 ? 0 : 1)} s`;
 }
@@ -31,7 +31,10 @@ export function shortId(value: string, head = 8): string {
 }
 
 export function eventPreview(event: TrajectoryEvent): string {
-  const values = event.content
+  // The wire format may omit zod-defaulted fields on older servers; treat a
+  // missing array as empty rather than crashing the whole review page.
+  const content = event.content ?? [];
+  const values = content
     .map((part) => part.value)
     .filter((value): value is string => typeof value === "string" && value.length > 0);
   if (values.length > 0) return values.join("\n");
