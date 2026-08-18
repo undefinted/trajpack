@@ -39,7 +39,15 @@ export class LoopbackReviewApi implements ReviewApi {
   }
 
   bootstrap(): Promise<ReviewerBootstrap> {
-    this.bootstrapResult ??= this.request<ReviewerBootstrap>("/bootstrap", { method: "GET" }, false);
+    // Do not cache a rejected bootstrap: a transient failure must not poison
+    // every later call until the page is reloaded.
+    if (this.bootstrapResult === null) {
+      this.bootstrapResult = this.request<ReviewerBootstrap>("/bootstrap", { method: "GET" }, false)
+        .catch((error: unknown) => {
+          this.bootstrapResult = null;
+          throw error;
+        });
+    }
     return this.bootstrapResult;
   }
 

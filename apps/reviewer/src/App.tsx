@@ -67,6 +67,9 @@ export function App({ api }: AppProps): ReactNode {
     let active = true;
     setDetailLoading(true);
     setError(null);
+    // Clear the previous trace's detail so the loading state is visible and no
+    // stale-trace save/approve can mutate the wrong manifest while fetching.
+    setDetail(null);
     void api.getTrace(selectedTraceId)
       .then((next) => {
         if (!active) return;

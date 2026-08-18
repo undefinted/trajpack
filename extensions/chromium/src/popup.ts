@@ -139,4 +139,4 @@ attestationInput.addEventListener("change", resetPendingCapture);
 void chrome.storage.local.get(["authorizedSelectorRecipe"]).then((stored) => {
   const saved = stored["authorizedSelectorRecipe"];
   if (typeof saved === "string") recipeInput.value = saved;
-});
+}).catch(() => undefined);

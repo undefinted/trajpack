@@ -178,8 +178,7 @@ export function EventInspector({
             <small>原文继续留在加密 raw vault；导出视图只出现替代文本。</small>
           </label>
         )}
-        {overrideEnabled && rightsModes.length === 0 && <small>至少选择一个用途/目标范围。</small>}
-        <button className="button button--secondary button--full" disabled={busy || (overrideEnabled && rightsModes.length === 0)} type="submit">
+        <button className="button button--secondary button--full" disabled={busy} type="submit">
           {busy ? "保存中…" : "保存事件审阅"}
         </button>
       </form>
@@ -280,7 +279,8 @@ export function EventInspector({
             ))}
           </fieldset>
         </fieldset>
-        <button className="button button--secondary button--full" disabled={busy} type="submit">
+        {overrideEnabled && rightsModes.length === 0 && <small>至少选择一个用途/目标范围。</small>}
+        <button className="button button--secondary button--full" disabled={busy || (overrideEnabled && rightsModes.length === 0)} type="submit">
           {busy ? "保存中…" : overrideEnabled ? "保存权利覆盖" : "恢复继承权利"}
         </button>
       </form>

@@ -42,19 +42,24 @@ export function eventPreview(event: TrajectoryEvent): string {
 }
 
 export function safeStringify(value: unknown, pretty = true): string {
-  const seen = new WeakSet<object>();
   try {
-    const result = JSON.stringify(
-      value,
-      (_key, nested) => {
-        if (typeof nested === "object" && nested !== null) {
-          if (seen.has(nested)) return "[Circular]";
-          seen.add(nested);
-        }
-        return nested;
-      },
-      pretty ? 2 : 0,
-    );
+    // Track only the objects on the current serialization branch so a shared
+    // (non-circular) reference is serialized fully instead of being reported
+    // as circular the second time it appears.
+    const ancestors = new Set<object>();
+    const visit = (entry: unknown): unknown => {
+      if (entry === null || typeof entry !== "object") return entry;
+      if (ancestors.has(entry)) return "[Circular]";
+      ancestors.add(entry);
+      const result = Array.isArray(entry)
+        ? entry.map(visit)
+        : Object.fromEntries(
+          Object.entries(entry as Record<string, unknown>).map(([key, child]) => [key, visit(child)]),
+        );
+      ancestors.delete(entry);
+      return result;
+    };
+    const result = JSON.stringify(visit(value), null, pretty ? 2 : 0);
     return result ?? String(value);
   } catch {
     return "[Unserializable value]";

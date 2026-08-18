@@ -157,7 +157,9 @@ async function prepareOutput(output, clean) {
     await assertCleanPathHasNoIndirection(output);
     await rm(output, { recursive: true, force: false });
   }
-  await mkdir(output, { recursive: false, mode: 0o700 });
+  // Recursive creation so `--output a/b/c` works when the parent does not
+  // already exist; indirection checks run before this point.
+  await mkdir(output, { recursive: true, mode: 0o700 });
   await writeFile(join(output, ".trajpack-demo-output"), OUTPUT_MARKER, { flag: "wx", mode: 0o600 });
 }
 

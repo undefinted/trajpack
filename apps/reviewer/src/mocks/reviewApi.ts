@@ -527,8 +527,11 @@ export class MockReviewApi implements ReviewApi {
     const detail = this.requireTrace(traceId);
     this.assertRevision(detail, request.expected_revision);
     const approved = detail.manifest.review.human_approval === "approved";
-    const trainingAllowed = detail.manifest.eligibility.training_competitive_distillation.status === "allow";
-    const allowed = approved && trainingAllowed && !detail.checks.some(({ status }) => status === "failed");
+    const decision = request.mode === "archive"
+      ? detail.manifest.eligibility.local_archive
+      : detail.manifest.eligibility[request.mode];
+    const modeAllowed = decision.status === "allow";
+    const allowed = approved && modeAllowed && !detail.checks.some(({ status }) => status === "failed");
     return {
       trace_id: traceId,
       format: request.format,

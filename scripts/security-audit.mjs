@@ -51,7 +51,11 @@ for (const hook of ["plugins/trajpack/scripts/forward-hook.mjs", "plugins/claude
 
 const packageJson = JSON.parse(await text("package.json"));
 requireCondition(packageJson.license === "Apache-2.0", "root code license changed");
-await text("LICENSE");
+const license = await text("LICENSE");
+requireCondition(
+  license.includes("Apache License") && license.includes("Version 2.0"),
+  "root LICENSE file must carry the Apache-2.0 text",
+);
 
 if (failures.length) {
   process.stderr.write(`${failures.map((failure) => `security-audit: ${failure}`).join("\n")}\n`);

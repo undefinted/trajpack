@@ -145,7 +145,7 @@ function canonicalProviderRoute(value: string): Source["provider"] | null {
   if (route === "google" || route.startsWith("google-")
     || route === "gemini" || route.startsWith("gemini-")) return "google";
   if (route === "openai" || route.startsWith("openai-")) return "openai";
-  if (["local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"].includes(route)
+  if (["self_hosted", "self-hosted", "local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"].includes(route)
     || route.startsWith("local-") || route.startsWith("ollama-")) return "self_hosted";
   return null;
 }
