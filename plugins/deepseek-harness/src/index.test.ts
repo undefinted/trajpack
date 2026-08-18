@@ -194,6 +194,43 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     });
   });
 
+  it("locates a resumed-seed end marker at firstLiveSeq - 1 instead of missing it", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const firstLiveSeq = 5;
+    // A seed that already ends in session/end-seed is not re-marked, so on
+    // resume the marker sits at firstLiveSeq - 1 rather than firstLiveSeq.
+    const resumed = {
+      id: "session-1",
+      firstLiveSeq,
+      events: Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === firstLiveSeq - 1
+        ? { type: "session/end-seed", seq, time: 1, data: {} }
+        : undefined),
+      header: {
+        version: 0,
+        id: "session-1",
+        seedLength: firstLiveSeq,
+        parentSession: "parent-1",
+        origin: "subagent",
+        delegationDepth: 1,
+        agentPreset: "researcher",
+      },
+      privateTranscript: "MUST_NOT_BE_SERIALIZED",
+    };
+    installed.eventListener(resumed, event("turn/start", firstLiveSeq, { turn: 1 }));
+    await installed.flushListener(resumed);
+
+    const [, init] = fetch.mock.calls[0] as unknown as [URL, RequestInit];
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(payload.session_header.unpublished_boundary_marker).toEqual({
+      type: "session/end-seed",
+      seq: firstLiveSeq - 1,
+    });
+  });
+
   it("treats a non-2xx response as a failed durability checkpoint", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";

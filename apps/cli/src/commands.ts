@@ -991,13 +991,18 @@ export async function runTermsSnapshot(options: TermsSnapshotOptions): Promise<v
   } finally {
     await handle.close();
   }
+  const effectiveAt = new Date(options.effectiveAt);
+  const reviewAfter = new Date(options.reviewAfter);
+  if (!Number.isFinite(effectiveAt.getTime()) || !Number.isFinite(reviewAfter.getTime())) {
+    throw new Error("--effective-at and --review-after must be ISO-8601 timestamps");
+  }
   const snapshot = termsSnapshotSchema.parse({
     name: options.name,
     url: options.url,
-    effective_at: new Date(options.effectiveAt).toISOString(),
+    effective_at: effectiveAt.toISOString(),
     retrieved_at: new Date().toISOString(),
     snapshot_sha256: sha256(bytes),
-    review_after: new Date(options.reviewAfter).toISOString(),
+    review_after: reviewAfter.toISOString(),
   });
   if (Date.parse(snapshot.review_after) <= Date.parse(snapshot.retrieved_at)) {
     throw new Error("--review-after must be later than retrieval time");
