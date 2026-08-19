@@ -281,7 +281,17 @@ const deepseekEvents: TrajectoryEvent[] = [
   event(DEEPSEEK_TRACE_ID, 6, "tool.result", "tool", [part(0, "stdout", "PASS parser.test.ts (12 tests)")], {
     tool: { call_id: "call-test-2", name: "exec_command", arguments: null, result: "passed", exit_code: 0 },
   }),
-  event(DEEPSEEK_TRACE_ID, 7, "evaluation", "environment", [part(0, "text", "Verifier: related tests passed; no unrelated files changed.")]),
+  event(DEEPSEEK_TRACE_ID, 7, "evaluation", "environment", [part(0, "text", "Verifier: related tests passed; no unrelated files changed.")], {
+    metadata: {
+      reward: 1,
+      verifier: {
+        name: "fixture-verifier",
+        version: "1.0.0",
+        artifact_sha256: HASH_A,
+        result_sha256: HASH_B,
+      },
+    },
+  }),
 ];
 
 const claudeEvents: TrajectoryEvent[] = [
@@ -372,7 +382,7 @@ function makeDetail(manifest: TraceManifest, events: TrajectoryEvent[], failed =
     metrics: failed
       ? { input_tokens: 210, output_tokens: 38, reasoning_tokens: 0, tool_calls: 0, failed_events: 0, observation_action_pairs: 0, verification_events: 0, targeted_observation_ratio: null }
       : { input_tokens: 620, output_tokens: 318, reasoning_tokens: 64, tool_calls: 2, failed_events: 1, observation_action_pairs: 2, verification_events: 1, targeted_observation_ratio: 0.72 },
-    revision: 1,
+    revision: manifest.review.revision,
   };
 }
 
@@ -435,6 +445,7 @@ export class MockReviewApi implements ReviewApi {
     if (patch.redaction_replacement !== undefined) entry.review.redaction_replacement = patch.redaction_replacement;
     entry.review.updated_at = new Date().toISOString();
     detail.revision += 1;
+    detail.manifest.review.revision = detail.revision;
     return clone(detail);
   }
 
@@ -444,10 +455,14 @@ export class MockReviewApi implements ReviewApi {
     const entry = detail.events.find(({ event }) => event.event_id === eventId);
     if (!entry) throw new Error("Event not found");
     entry.review.rights_override = clone(patch.rights_override);
+    const modes = [...new Set(patch.modes ?? [])];
+    if (patch.rights_override !== null && modes.length === 0) {
+      throw new Error("Rights override requires at least one training or redistribution mode");
+    }
     entry.review.rights_attestation = patch.rights_override === null ? null : {
       schema_version: "rights-attestation/0.1",
       rights: clone(patch.rights_override),
-      scopes: (patch.modes ?? []).map((mode) => {
+      scopes: modes.map((mode) => {
         const decision = mode === "archive" ? detail.manifest.eligibility.local_archive : detail.manifest.eligibility[mode];
         return { mode, target_model_owner: decision.target_model_owner, target_product: decision.target_product };
       }),
@@ -462,6 +477,7 @@ export class MockReviewApi implements ReviewApi {
     entry.review.updated_at = new Date().toISOString();
     this.resetApproval(detail);
     detail.revision += 1;
+    detail.manifest.review.revision = detail.revision;
     return clone(detail);
   }
 
@@ -489,6 +505,7 @@ export class MockReviewApi implements ReviewApi {
     entry.review.updated_at = new Date().toISOString();
     this.resetApproval(detail);
     detail.revision += 1;
+    detail.manifest.review.revision = detail.revision;
     return clone(detail);
   }
 
@@ -520,6 +537,7 @@ export class MockReviewApi implements ReviewApi {
       }),
     } : null;
     detail.revision += 1;
+    detail.manifest.review.revision = detail.revision;
     return clone(detail);
   }
 
@@ -527,8 +545,11 @@ export class MockReviewApi implements ReviewApi {
     const detail = this.requireTrace(traceId);
     this.assertRevision(detail, request.expected_revision);
     const approved = detail.manifest.review.human_approval === "approved";
-    const trainingAllowed = detail.manifest.eligibility.training_competitive_distillation.status === "allow";
-    const allowed = approved && trainingAllowed && !detail.checks.some(({ status }) => status === "failed");
+    const decision = request.mode === "archive"
+      ? detail.manifest.eligibility.local_archive
+      : detail.manifest.eligibility[request.mode];
+    const modeAllowed = decision.status === "allow";
+    const allowed = approved && modeAllowed && !detail.checks.some(({ status }) => status === "failed");
     return {
       trace_id: traceId,
       format: request.format,

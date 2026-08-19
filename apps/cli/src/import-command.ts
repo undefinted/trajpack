@@ -46,7 +46,11 @@ function providerFromHarnessRoute(route: string): Provider {
   if (value.includes("openai")) return "openai";
   if (value.includes("anthropic") || value.includes("claude")) return "anthropic";
   if (value.includes("google") || value.includes("gemini")) return "google";
-  if (value.includes("self-host") || value.includes("local") || value.includes("ollama")) return "self_hosted";
+  // Keep the self-hosted classification consistent with the live capture path
+  // (canonicalProviderRoute): underscore/hyphen variants and common local
+  // inference-server route names must not fall through to `other`.
+  const selfHosted = ["self_hosted", "self-hosted", "local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"];
+  if (selfHosted.includes(value) || value.startsWith("local-") || value.startsWith("ollama-")) return "self_hosted";
   return "other";
 }
 

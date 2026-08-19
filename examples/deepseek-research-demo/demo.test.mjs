@@ -9,6 +9,10 @@ import { fileURLToPath } from "node:url";
 import { runDemo } from "../../scripts/demo-trajectory.mjs";
 
 const DEMO_ROOT = dirname(fileURLToPath(import.meta.url));
+// demo-trajectory.mjs writes replay artifacts under the repository root, not
+// the process cwd; derive the root from this file so the test is cwd-independent.
+// The test file lives at <root>/examples/deepseek-research-demo/, two levels down.
+const REPOSITORY_ROOT = dirname(dirname(DEMO_ROOT));
 const OUTPUT_MARKER = "trajpack-deepseek-research-demo/0.1\n";
 
 async function text(root, name) {
@@ -39,11 +43,11 @@ test("the synthetic DeepSeek research demo is deterministic and fails closed", a
     assert.match(dataset, /"hidden_chain_of_thought_claimed":false/u);
     assert.match(dataset, /"reward":null/u);
 
-    const replay = await readFile(join(process.cwd(), "work", "demo-replay", "trajpack-deepseek-demo.json"), "utf8");
+    const replay = await readFile(join(REPOSITORY_ROOT, "work", "demo-replay", "trajpack-deepseek-demo.json"), "utf8");
     assert.doesNotMatch(replay, /trajpack-research-demo-|[A-Za-z]:[\\/]|\/(?:home|Users)\//u);
     assert.match(replay, /"actual_run":true/u);
     assert.match(replay, /"training_effect_evidence":false/u);
-    const safeTranscript = await readFile(join(process.cwd(), "work", "demo-replay", "trajpack-deepseek-demo.txt"), "utf8");
+    const safeTranscript = await readFile(join(REPOSITORY_ROOT, "work", "demo-replay", "trajpack-deepseek-demo.txt"), "utf8");
     assert.doesNotMatch(safeTranscript, /trajpack-research-demo-|[A-Za-z]:[\\/]|\/(?:home|Users)\//u);
     assert.match(safeTranscript, /PASS: 2 exact SFT epochs/u);
     assert.match(safeTranscript, /not a downstream model-quality claim/u);

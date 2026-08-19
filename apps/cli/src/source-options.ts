@@ -32,7 +32,8 @@ async function readBoundedJson(path: string, label: string): Promise<unknown> {
   const handle = await open(path, "r");
   try {
     const openedDetails = await handle.stat();
-    if (!openedDetails.isFile() || openedDetails.size > MAX_SOURCE_METADATA_BYTES) {
+    if (!openedDetails.isFile() || openedDetails.dev !== pathDetails.dev
+      || openedDetails.ino !== pathDetails.ino || openedDetails.size > MAX_SOURCE_METADATA_BYTES) {
       throw new Error(`${label} must be a regular file no larger than 1 MiB`);
     }
     const buffer = Buffer.allocUnsafe(MAX_SOURCE_METADATA_BYTES + 1);

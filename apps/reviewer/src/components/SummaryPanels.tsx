@@ -16,6 +16,12 @@ const eligibilityLabels: Record<keyof TraceDetail["manifest"]["eligibility"], st
   redistribution: "再分发",
 };
 
+function policyVersion(detail: TraceDetail): string {
+  const basis = detail.manifest.eligibility.local_archive.basis;
+  const match = /(?:^|:)(policy\/[^:\s]+)/u.exec(basis);
+  return match?.[1] ?? "policy/unknown";
+}
+
 export function SummaryPanels({ detail, onFocusEvent }: SummaryPanelsProps): ReactNode {
   const failed = detail.checks.filter(({ status }) => status === "failed").length;
   const warnings = detail.checks.filter(({ status }) => status === "warning").length;
@@ -69,7 +75,7 @@ export function SummaryPanels({ detail, onFocusEvent }: SummaryPanelsProps): Rea
             <p className="eyebrow">POLICY ROUTER</p>
             <h3 id="eligibility-heading">用途资格</h3>
           </div>
-          <span className="policy-version">policy/0.1</span>
+          <span className="policy-version">{policyVersion(detail)}</span>
         </header>
         <div className="eligibility-list">
           {(Object.entries(detail.manifest.eligibility) as Array<[

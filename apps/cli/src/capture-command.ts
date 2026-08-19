@@ -418,8 +418,15 @@ function parseTtl(value: string): number {
   const match = /^(\d+)(s|m|h)$/.exec(value);
   if (!match) throw new Error("TTL must look like 30s, 10m, or 1h");
   const amount = Number(match[1]);
+  if (!Number.isSafeInteger(amount)) throw new Error("TTL amount is out of range");
   const multiplier = match[2] === "s" ? 1_000 : match[2] === "m" ? 60_000 : 3_600_000;
-  return amount * multiplier;
+  const ttl = amount * multiplier;
+  // Bound the product so `new Date(Date.now() + ttl).toISOString()` cannot
+  // overflow into an Invalid Date and crash the arm command.
+  if (!Number.isSafeInteger(ttl) || ttl < 1_000 || ttl > 24 * 60 * 60 * 1_000) {
+    throw new Error("TTL must be between 1s and 24h");
+  }
+  return ttl;
 }
 
 export interface ArmCommandOptions extends SourceCliOptions {

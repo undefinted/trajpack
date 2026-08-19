@@ -10,7 +10,7 @@ const TRACE_ARTIFACT = /^([a-f0-9]{32})\.trajpack(?:\.(next|backup))?$/;
 // VaultWriter stages a generation at `${targetPath}.${pid}.${Date.now()}.tmp`
 // before renaming it into place. A leftover file is always the residue of a
 // crashed writer (the store is single-writer), so it can be pruned safely.
-const STALE_VAULT_TEMP = /^[a-f0-9]{32}\.trajpack(?:\.(?:next|backup))?\.\d+\.\d+\.tmp$/;
+const STALE_VAULT_TEMP = /^[a-f0-9]{32}\.trajpack(?:\.(?:next|backup))?\.\d+\.\d+\.[a-f0-9]{8}\.tmp$/;
 
 type RecoveryCandidateKind = "target" | "next" | "backup";
 
@@ -278,7 +278,7 @@ export async function deleteTrace(traceId: string, paths: TrajpackPaths = defaul
   const target = vaultPath(traceId, paths);
   await ensureManagedDirectory(paths.tombstones);
   const tombstone = join(paths.tombstones, `${traceId}.json`);
-  const pattern = new RegExp(`^${traceId}\\.trajpack(?:\\.(?:next|backup)(?:\\.\\d+\\.\\d+\\.tmp)?|\\.\\d+\\.\\d+\\.tmp)?$`);
+  const pattern = new RegExp(`^${traceId}\\.trajpack(?:\\.(?:next|backup)(?:\\.\\d+\\.\\d+\\.[a-f0-9]{8}\\.tmp)?|\\.\\d+\\.\\d+\\.[a-f0-9]{8}\\.tmp)?$`);
   await ensureManagedDirectory(paths.vault);
   const entries = await readdir(paths.vault, { withFileTypes: true });
   const artifacts = entries.filter((entry) => pattern.test(entry.name));

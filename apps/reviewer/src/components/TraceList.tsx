@@ -10,13 +10,14 @@ interface TraceListProps {
   busy?: boolean;
 }
 
-type Filter = "all" | "pending" | "blocked" | "approved";
+type Filter = "all" | "pending" | "blocked" | "approved" | "rejected";
 
 const filters: Array<{ value: Filter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "pending", label: "待审" },
   { value: "blocked", label: "阻断" },
   { value: "approved", label: "已批准" },
+  { value: "rejected", label: "已拒绝" },
 ];
 
 export function TraceList({ traces, selectedId, onSelect, busy = false }: TraceListProps): ReactNode {
@@ -36,7 +37,8 @@ export function TraceList({ traces, selectedId, onSelect, busy = false }: TraceL
       const matchesFilter = filter === "all" ||
         (filter === "pending" && trace.human_approval === "pending" && trace.blocker_count === 0) ||
         (filter === "blocked" && trace.blocker_count > 0) ||
-        (filter === "approved" && trace.human_approval === "approved");
+        (filter === "approved" && trace.human_approval === "approved") ||
+        (filter === "rejected" && trace.human_approval === "rejected");
       return matchesQuery && matchesFilter;
     });
   }, [filter, query, traces]);
@@ -78,7 +80,9 @@ export function TraceList({ traces, selectedId, onSelect, busy = false }: TraceL
 
       <div className="trace-list" aria-busy={busy}>
         {visible.map((trace) => {
-          const blocked = trace.blocker_count > 0;
+          // A rejected trace is rejected regardless of remaining blockers; only
+          // pending/approved traces with failed checks are still "blocked".
+          const blocked = trace.human_approval !== "rejected" && trace.blocker_count > 0;
           return (
             <button
               className={selectedId === trace.trace_id ? "trace-card trace-card--selected" : "trace-card"}

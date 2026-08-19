@@ -62,6 +62,7 @@ def _require(condition: bool, message: str) -> None:
 def validate_dataset_example(example: dict[str, Any], where: str = "record") -> None:
     for key in ("id", "trace_id", "source_event_ids", "messages", "tools", "assistant_loss_mask", "training_targets", "metadata"):
         _require(key in example, f"{where}: missing {key}")
+    _require(isinstance(example["metadata"], dict), f"{where}: metadata must be an object")
     messages = example["messages"]
     masks = example["assistant_loss_mask"]
     _require(isinstance(messages, list) and isinstance(masks, list), f"{where}: messages/mask must be arrays")
@@ -72,7 +73,7 @@ def validate_dataset_example(example: dict[str, Any], where: str = "record") -> 
         _require(message.get("role") in ALLOWED_ROLES, f"{where}: invalid role at message {index}")
         _require(isinstance(enabled, bool), f"{where}: loss mask {index} is not boolean")
         _require(not enabled or message["role"] == "assistant", f"{where}: non-assistant loss target at {index}")
-        for call in message.get("tool_calls", []):
+        for call in (message.get("tool_calls") or []):
             _require(message["role"] == "assistant" and isinstance(call, dict), f"{where}: malformed tool call")
             call_id = call.get("id")
             _require(isinstance(call_id, str) and call_id and call_id not in observed_calls, f"{where}: duplicate/invalid tool id")
@@ -80,7 +81,11 @@ def validate_dataset_example(example: dict[str, Any], where: str = "record") -> 
             function = call.get("function")
             _require(isinstance(function, dict) and isinstance(function.get("name"), str), f"{where}: malformed tool function")
             arguments = function.get("arguments")
-            _require(isinstance(arguments, str) and isinstance(json.loads(arguments), dict), f"{where}: tool arguments are not JSON object text")
+            try:
+                arguments_parsed = json.loads(arguments) if isinstance(arguments, str) else None
+            except json.JSONDecodeError:
+                arguments_parsed = None
+            _require(isinstance(arguments, str) and isinstance(arguments_parsed, dict), f"{where}: tool arguments are not JSON object text")
         if message["role"] == "tool":
             _require(message.get("tool_call_id") in observed_calls, f"{where}: tool result has no preceding call")
     for target in example["training_targets"]:

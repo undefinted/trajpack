@@ -49,7 +49,11 @@ export function EventInspector({
     setRightsModes(entry?.review.rights_attestation?.scopes.map(({ mode }) => mode) ?? []);
     setVerifierReviewer(entry?.review.verifier_confirmation?.reviewer ?? "");
     setVerifierEvidenceRef(entry?.review.verifier_confirmation?.evidence_ref ?? "");
-  }, [entry, inheritedRights]);
+    // Depend on the inspected event's stable identity plus a serialized key of
+    // the inherited rights. The full object identities change on every save
+    // (each response is a fresh clone), which would wipe all unsaved form
+    // fields after any unrelated save.
+  }, [entry?.event.event_id, entry?.review.updated_at, JSON.stringify(inheritedRights)]);
 
   if (!entry) {
     return (
@@ -67,7 +71,7 @@ export function EventInspector({
     event.preventDefault();
     onSaveReview({
       note: note.trim() || null,
-      redaction_replacement: review.disposition === "redact" ? replacement.trim() || "[REDACTED]" : null,
+      redaction_replacement: review.disposition === "redact" ? replacement.trim() || "[REDACTED BY REVIEWER]" : null,
     });
   }
 
@@ -97,9 +101,10 @@ export function EventInspector({
     });
   }
 
-  const verifier = verifierEvidenceSchema.safeParse(event.metadata.verifier);
-  const reward = typeof event.metadata.reward === "number" && Number.isFinite(event.metadata.reward)
-    ? event.metadata.reward
+  const metadata = event.metadata ?? {};
+  const verifier = verifierEvidenceSchema.safeParse(metadata.verifier);
+  const reward = typeof metadata.reward === "number" && Number.isFinite(metadata.reward)
+    ? metadata.reward
     : null;
   const verifierCandidate = verifier.success && reward !== null && ["evaluation", "feedback"].includes(event.event_type)
     ? { verifier: verifier.data, reward }
@@ -178,8 +183,7 @@ export function EventInspector({
             <small>原文继续留在加密 raw vault；导出视图只出现替代文本。</small>
           </label>
         )}
-        {overrideEnabled && rightsModes.length === 0 && <small>至少选择一个用途/目标范围。</small>}
-        <button className="button button--secondary button--full" disabled={busy || (overrideEnabled && rightsModes.length === 0)} type="submit">
+        <button className="button button--secondary button--full" disabled={busy} type="submit">
           {busy ? "保存中…" : "保存事件审阅"}
         </button>
       </form>
@@ -280,7 +284,8 @@ export function EventInspector({
             ))}
           </fieldset>
         </fieldset>
-        <button className="button button--secondary button--full" disabled={busy} type="submit">
+        {overrideEnabled && rightsModes.length === 0 && <small>至少选择一个用途/目标范围。</small>}
+        <button className="button button--secondary button--full" disabled={busy || (overrideEnabled && rightsModes.length === 0)} type="submit">
           {busy ? "保存中…" : overrideEnabled ? "保存权利覆盖" : "恢复继承权利"}
         </button>
       </form>

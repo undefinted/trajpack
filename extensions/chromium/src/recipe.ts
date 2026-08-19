@@ -83,10 +83,15 @@ function integerField(record: Record<string, unknown>, key: string, min: number,
   return value as number;
 }
 
+// ISO-8601 date-times must carry an explicit UTC offset or "Z". A bare local
+// time ("2026-08-16T00:00:00") is ambiguous and would be evaluated as local
+// time by Date.parse, disagreeing with the JSON-Schema "date-time" format.
+const ISO_DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u;
+
 function isoDatetime(record: Record<string, unknown>, key: string): string {
   const value = stringField(record, key, 64);
-  if (!Number.isFinite(Date.parse(value)) || !/^\d{4}-\d{2}-\d{2}T/u.test(value)) {
-    throw new Error(`${key} must be an ISO-8601 datetime`);
+  if (!ISO_DATETIME_PATTERN.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`${key} must be an ISO-8601 datetime with an explicit timezone offset`);
   }
   return value;
 }
@@ -101,7 +106,14 @@ function assertExactOrigin(value: string): string {
   if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password) {
     throw new Error("origin must be an HTTP(S) origin without credentials");
   }
-  if (url.origin !== value || url.pathname !== "/" || url.search || url.hash) {
+  if (url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("origin must contain only scheme, host, and optional port (no trailing slash, path, query, or fragment)");
+  }
+  // new URL() normalizes away explicit default ports (https://host:443 ->
+  // https://host), so url.origin !== value would wrongly reject a valid origin
+  // that spells the default port. Compare canonical origins instead, while
+  // still rejecting a trailing slash.
+  if (value.endsWith("/") || new URL(value).origin !== url.origin) {
     throw new Error("origin must contain only scheme, host, and optional port (no trailing slash, path, query, or fragment)");
   }
   if (isBlockedCommercialOrigin(url.origin)) {

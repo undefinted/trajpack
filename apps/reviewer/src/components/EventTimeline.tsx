@@ -8,6 +8,8 @@ interface EventTimelineProps {
   events: ReviewEvent[];
   selectedEventId: string | null;
   busyEventId: string | null;
+  /** Any save in flight disables all disposition buttons (a global busy guard). */
+  anyBusy: boolean;
   onSelect: (eventId: string) => void;
   onDisposition: (eventId: string, disposition: EventDisposition) => void;
 }
@@ -18,6 +20,7 @@ export function EventTimeline({
   events,
   selectedEventId,
   busyEventId,
+  anyBusy,
   onSelect,
   onDisposition,
 }: EventTimelineProps): ReactNode {
@@ -34,7 +37,7 @@ export function EventTimeline({
         eventPreview(event),
       ].some((value) => value.toLowerCase().includes(normalized));
       const matchesFilter = filter === "all" ||
-        (filter === "messages" && ["message", "reasoning", "plan"].includes(event.event_type)) ||
+        (filter === "messages" && ["message", "reasoning", "plan", "model.inference"].includes(event.event_type)) ||
         (filter === "tools" && event.event_type.startsWith("tool.")) ||
         (filter === "artifacts" && event.event_type.startsWith("artifact.")) ||
         (filter === "issues" && event.status !== "ok");
@@ -71,7 +74,7 @@ export function EventTimeline({
         {visible.map(({ event, review }) => {
           const selected = selectedEventId === event.event_id;
           const busy = busyEventId === event.event_id;
-          const reasoning = event.content.find((part) => part.reasoning !== null)?.reasoning;
+          const reasoning = (event.content ?? []).find((part) => part.reasoning !== null)?.reasoning;
           return (
             <article
               className={`${selected ? "event-card event-card--selected" : "event-card"} event-card--${review.disposition}`}
@@ -95,9 +98,9 @@ export function EventTimeline({
                 <SafeText value={eventPreview(event)} label={`事件 ${event.sequence} 内容`} compact />
               </button>
               <div className="disposition-controls" aria-label={`事件 ${event.sequence} 处置`}>
-                <DispositionButton value="include" current={review.disposition} busy={busy} onClick={() => onDisposition(event.event_id, "include")} />
-                <DispositionButton value="redact" current={review.disposition} busy={busy} onClick={() => onDisposition(event.event_id, "redact")} />
-                <DispositionButton value="exclude" current={review.disposition} busy={busy} onClick={() => onDisposition(event.event_id, "exclude")} />
+                <DispositionButton value="include" current={review.disposition} busy={busy || anyBusy} onClick={() => onDisposition(event.event_id, "include")} />
+                <DispositionButton value="redact" current={review.disposition} busy={busy || anyBusy} onClick={() => onDisposition(event.event_id, "redact")} />
+                <DispositionButton value="exclude" current={review.disposition} busy={busy || anyBusy} onClick={() => onDisposition(event.event_id, "exclude")} />
               </div>
             </article>
           );

@@ -96,6 +96,25 @@ describe("redaction", () => {
     expect(scanStructured({ raw_payload_sha256: "123 456 7890" })).not.toEqual([]);
   });
 
+  it("redacts a shared non-circular reference only once and preserves it elsewhere", () => {
+    const shared = { token: "sk-abcdefghijklmnopqrstuvwxyz" };
+    const value = { a: shared, b: shared };
+    const { value: redacted, findings } = redactStructured(value);
+    expect(findings.map((finding) => finding.path)).toEqual(["$.a.token", "$.b.token"]);
+    expect(redacted.a).toEqual({ token: "[REDACTED:api_key]" });
+    // b must survive as a normal object, not be mistaken for a cycle.
+    expect(redacted.b).toEqual({ token: "[REDACTED:api_key]" });
+    expect(redacted.a).not.toBe("[REDACTED:cyclic_reference]");
+    expect(redacted.b).not.toBe("[REDACTED:cyclic_reference]");
+  });
+
+  it("still replaces a genuine cycle with the cyclic marker", () => {
+    const value: Record<string, unknown> = { name: "loop" };
+    value.self = value;
+    const { value: redacted } = redactStructured(value);
+    expect(redacted.self).toBe("[REDACTED:cyclic_reference]");
+  });
+
   it("detects secret assignments in plaintext env/config content", () => {
     const text = [
       "DB_PASSWORD=hunter2",
