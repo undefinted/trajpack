@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 EXPERIMENT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ from generate_data import generate  # noqa: E402
 from run_experiment import (  # noqa: E402
     assistant_payload,
     create_fresh_output,
+    git_revision,
     parse_final,
     parse_tool_call,
     render_generation_prompt,
@@ -117,6 +119,10 @@ class StructureTests(unittest.TestCase):
             self.assertTrue(output.is_dir())
             with self.assertRaises(FileExistsError):
                 create_fresh_output(output)
+
+    def test_missing_git_is_recorded_as_unavailable(self) -> None:
+        with patch("run_experiment.subprocess.run", side_effect=FileNotFoundError("git")):
+            self.assertIsNone(git_revision(EXPERIMENT))
 
     def test_pairing_and_held_out_leakage_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

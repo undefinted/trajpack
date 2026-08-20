@@ -239,6 +239,11 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 一个模型、一个 seed、合成计算器任务，而且完整轨迹臂看到的 target token
 多 64.4%。完整哈希、硬件、计数、失败与限制见[结果卡](experiments/trajectory-utility/results/reference-v5.md)。
 
+同一方向也在严格离线的 H100 集群运行中独立复现：complete-trajectory SFT
+达到 31/32 工具闭环，answer-only 与 base 仍为 0/32。[集群结果卡](experiments/trajectory-utility/results/cluster-h100-20260820.zh-CN.md)
+记录了独立的源码哈希、软件栈、产物校验、启动阶段失败，以及相同的非因果
+局限。
+
 ### 使用 Hugging Face Datasets 和 TRL 加载
 
 ```python

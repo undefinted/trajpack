@@ -521,9 +521,15 @@ def dependency_versions() -> dict[str, str | None]:
 
 
 def git_revision(repository: Path) -> str | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, text=True, capture_output=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True, capture_output=True, check=False,
+        )
+    except OSError:
+        # Minimal GPU images often omit the git executable. Source identity is
+        # still bound by source_tree_hash; an unavailable convenience field
+        # must not make an otherwise reproducible offline run impossible.
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 

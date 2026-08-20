@@ -20,6 +20,13 @@ answers and 0/32 tool successes; base reached 0/32 accuracy. Read the result
 card's limits before citing it: this is a single-seed synthetic smoke test, and
 the complete arm saw 64.4% more target tokens than answer-only.
 
+An independent [H100 cluster replication](results/cluster-h100-20260820.md)
+reached 31/32 tool-using end-to-end successes for complete-trajectory SFT,
+versus 0/32 for answer-only and base. It used the same pinned model, inputs,
+seed, and optimizer-step budget under a different PyTorch/CUDA stack. This is a
+useful engineering replication, but it retains the same single-seed and
+target-token-mismatch limitations.
+
 ## Three controlled arms
 
 | Arm | Training view | Assistant loss targets |

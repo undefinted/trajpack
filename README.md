@@ -248,6 +248,12 @@ uses one model, one seed, synthetic calculator tasks, and 64.4% more target
 tokens in the complete arm. See the [result card](experiments/trajectory-utility/results/reference-v5.md)
 for hashes, hardware, counts, failures, and limitations.
 
+The same direction was independently reproduced on a strict-offline H100 run:
+complete-trajectory SFT reached 31/32 tool-using E2E, while answer-only and base
+remained at 0/32. The [cluster result card](experiments/trajectory-utility/results/cluster-h100-20260820.md)
+records the separate source hash, stack, artifact checks, bring-up failures, and
+the same non-causal limitations.
+
 ### Load with Hugging Face Datasets and TRL
 
 ```python
