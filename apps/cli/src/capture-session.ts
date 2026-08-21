@@ -63,6 +63,18 @@ export class HarnessCaptureIntegrityError extends Error {
   }
 }
 
+/**
+ * A rejected envelope (schema, adapter, payload hash, or conflicting
+ * duplicate). This is a bounded invalid attempt, not a storage failure:
+ * the collector must keep serving after a single bad event.
+ */
+export class CaptureInvalidEventError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CaptureInvalidEventError";
+  }
+}
+
 interface HarnessCapsuleEvidence {
   payload: JsonRecord;
   event: JsonRecord;
@@ -145,7 +157,7 @@ function canonicalProviderRoute(value: string): Source["provider"] | null {
   if (route === "google" || route.startsWith("google-")
     || route === "gemini" || route.startsWith("gemini-")) return "google";
   if (route === "openai" || route.startsWith("openai-")) return "openai";
-  if (["local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"].includes(route)
+  if (["self_hosted", "self-hosted", "local", "ollama", "lmstudio", "llama.cpp", "vllm", "sglang"].includes(route)
     || route.startsWith("local-") || route.startsWith("ollama-")) return "self_hosted";
   return null;
 }
@@ -335,8 +347,12 @@ export class CaptureSession {
 
   private async ingestExclusive(input: unknown): Promise<boolean> {
     const parsed = rawEnvelopeSchema.parse(input);
-    if (parsed.adapter !== this.host) throw new Error(`Envelope adapter ${parsed.adapter} does not match ${this.host}`);
-    if (sha256(canonicalJson(parsed.payload)) !== parsed.payload_sha256) throw new Error("Raw envelope payload hash mismatch");
+    if (parsed.adapter !== this.host) {
+      throw new CaptureInvalidEventError(`Envelope adapter ${parsed.adapter} does not match ${this.host}`);
+    }
+    if (sha256(canonicalJson(parsed.payload)) !== parsed.payload_sha256) {
+      throw new CaptureInvalidEventError("Raw envelope payload hash mismatch");
+    }
     const key = parsed.source_event_id
       ? `${parsed.adapter}:${parsed.source_event_id}`
       : `${parsed.adapter}:${parsed.payload_sha256}`;
@@ -345,7 +361,7 @@ export class CaptureSession {
       if (duplicateHash === parsed.payload_sha256) return false;
       throw parsed.adapter === "deepseek_harness"
         ? new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_CONFLICT")
-        : new Error("Conflicting duplicate raw event identity");
+        : new CaptureInvalidEventError("Conflicting duplicate raw event identity");
     }
     const harnessCapsule = liveHarnessCapsule(parsed);
     let harnessState: HarnessSequenceState | null = null;

@@ -1069,6 +1069,27 @@ export interface TermsSnapshotOptions {
   output: string;
 }
 
+const UTC_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
+
+function parseUtcInstant(value: string, option: string): Date {
+  const match = UTC_INSTANT.exec(value);
+  if (match === null) throw new Error(`${option} must be an ISO-8601 UTC timestamp ending in Z`);
+  const date = new Date(value);
+  const expected = match.slice(1, 7).map(Number);
+  const observed = [
+    date.getUTCFullYear(),
+    date.getUTCMonth() + 1,
+    date.getUTCDate(),
+    date.getUTCHours(),
+    date.getUTCMinutes(),
+    date.getUTCSeconds(),
+  ];
+  if (!Number.isFinite(date.getTime()) || observed.some((part, index) => part !== expected[index])) {
+    throw new Error(`${option} must be a valid ISO-8601 UTC timestamp`);
+  }
+  return date;
+}
+
 export async function runTermsSnapshot(options: TermsSnapshotOptions): Promise<void> {
   const input = resolve(options.input);
   const output = resolve(options.output);
@@ -1096,13 +1117,15 @@ export async function runTermsSnapshot(options: TermsSnapshotOptions): Promise<v
   } finally {
     await handle.close();
   }
+  const effectiveAt = parseUtcInstant(options.effectiveAt, "--effective-at");
+  const reviewAfter = parseUtcInstant(options.reviewAfter, "--review-after");
   const snapshot = termsSnapshotSchema.parse({
     name: options.name,
     url: options.url,
-    effective_at: new Date(options.effectiveAt).toISOString(),
+    effective_at: effectiveAt.toISOString(),
     retrieved_at: new Date().toISOString(),
     snapshot_sha256: sha256(bytes),
-    review_after: new Date(options.reviewAfter).toISOString(),
+    review_after: reviewAfter.toISOString(),
   });
   if (Date.parse(snapshot.review_after) <= Date.parse(snapshot.retrieved_at)) {
     throw new Error("--review-after must be later than retrieval time");

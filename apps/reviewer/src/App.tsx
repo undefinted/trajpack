@@ -67,6 +67,9 @@ export function App({ api }: AppProps): ReactNode {
     let active = true;
     setDetailLoading(true);
     setError(null);
+    // Clear the previous trace's detail so the loading state is visible and no
+    // stale-trace save/approve can mutate the wrong manifest while fetching.
+    setDetail(null);
     void api.getTrace(selectedTraceId)
       .then((next) => {
         if (!active) return;
@@ -288,11 +291,12 @@ export function App({ api }: AppProps): ReactNode {
                     status={currentApproval}
                     label={currentApproval === "approved" ? "已批准" : currentApproval === "rejected" ? "已拒绝" : "待人工审阅"}
                   />
-                  <button className="button button--ghost" type="button" onClick={() => setDecisionMode("rejected")} disabled={decisionBusy}>拒绝</button>
+                  <button className="button button--ghost" type="button" onClick={() => setDecisionMode("rejected")} disabled={decisionBusy || busyEventId !== null}>拒绝</button>
                   <button
                     className="button button--secondary"
                     type="button"
                     onClick={() => setExportOpen(true)}
+                    disabled={busyEventId !== null}
                     title="先执行 policy 与明文边界预检"
                   >
                     导出预检
@@ -301,7 +305,7 @@ export function App({ api }: AppProps): ReactNode {
                     className="button button--primary"
                     type="button"
                     onClick={() => setDecisionMode("approved")}
-                    disabled={blockerCount > 0 || decisionBusy || currentApproval === "approved"}
+                    disabled={blockerCount > 0 || decisionBusy || busyEventId !== null || currentApproval === "approved"}
                     title={blockerCount > 0 ? `${blockerCount} 个自动检查阻断批准` : undefined}
                   >
                     {currentApproval === "approved" ? "已批准" : "批准轨迹"}
@@ -312,16 +316,17 @@ export function App({ api }: AppProps): ReactNode {
               <SummaryPanels detail={detail} onFocusEvent={focusEvent} />
 
               <div className="view-tabs" role="tablist" aria-label="轨迹视图">
-                <button type="button" role="tab" aria-selected={view === "timeline"} className={view === "timeline" ? "view-tab view-tab--active" : "view-tab"} onClick={() => setView("timeline")}>事件审阅</button>
-                <button type="button" role="tab" aria-selected={view === "manifest"} className={view === "manifest" ? "view-tab view-tab--active" : "view-tab"} onClick={() => setView("manifest")}>Manifest 原文</button>
+                <button type="button" role="tab" id="tab-timeline" aria-selected={view === "timeline"} aria-controls="panel-timeline" className={view === "timeline" ? "view-tab view-tab--active" : "view-tab"} onClick={() => setView("timeline")}>事件审阅</button>
+                <button type="button" role="tab" id="tab-manifest" aria-selected={view === "manifest"} aria-controls="panel-manifest" className={view === "manifest" ? "view-tab view-tab--active" : "view-tab"} onClick={() => setView("manifest")}>Manifest 原文</button>
               </div>
 
               {view === "timeline" ? (
-                <div className="review-workspace">
+                <div className="review-workspace" role="tabpanel" id="panel-timeline" aria-labelledby="tab-timeline">
                   <EventTimeline
                     events={detail.events}
                     selectedEventId={selectedEventId}
                     busyEventId={busyEventId}
+                    anyBusy={busyEventId !== null}
                     onSelect={setSelectedEventId}
                     onDisposition={(eventId, disposition) => void handleDisposition(eventId, disposition)}
                   />
@@ -336,7 +341,7 @@ export function App({ api }: AppProps): ReactNode {
                   />
                 </div>
               ) : (
-                <section className="panel manifest-view" role="tabpanel" aria-labelledby="manifest-heading">
+                <section className="panel manifest-view" role="tabpanel" id="panel-manifest" aria-labelledby="tab-manifest">
                   <header className="panel__header">
                     <div>
                       <p className="eyebrow">UNTRUSTED PLAIN TEXT</p>
@@ -370,6 +375,7 @@ export function App({ api }: AppProps): ReactNode {
       {detail && (
         <ExportDialog
           open={exportOpen}
+          eligibleModes={eligibleApprovalModes}
           onClose={() => setExportOpen(false)}
           onPreview={handlePreviewExport}
           onExport={handleExport}

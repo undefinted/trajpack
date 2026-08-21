@@ -76,7 +76,7 @@ def _candidate(rng: random.Random) -> Task:
     if family == "add_mul":
         return Task(family, f"Add {a} and {b}, then multiply that sum by {c}.", f"({a}+{b})*{c}", (a + b) * c)
     if family == "mul_sub":
-        # c is always smaller than a*b with the ranges above.
+        # c (2..19) may exceed a*b (>= 4), so answers can be negative or zero.
         return Task(family, f"Multiply {a} by {b}, then subtract {c}.", f"({a}*{b})-{c}", a * b - c)
     if family == "sub_mul":
         high, low = max(a, b), min(a, b)

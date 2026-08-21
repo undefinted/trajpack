@@ -77,8 +77,15 @@ export function captureVisibleConversation(recipe: AuthorizedSelectorRecipe): Au
   let totalCharacters = 0;
   const messages = visibleItems.map((item, sequence): VisibleMessage => {
     const sourceRole = item.getAttribute(recipe.selectors.role_attribute);
-    const role = sourceRole === null ? undefined : recipe.role_map[sourceRole];
-    if (!role) throw new Error(`Item ${sequence} has an unmapped or missing role attribute`);
+    // executeScript serializes the recipe into the isolated world, which drops
+    // the null prototype the validator used. Resolve only own properties and
+    // re-validate the type so prototype members ("constructor", "toString",
+    // "__proto__", ...) cannot bypass the fail-closed role mapping.
+    const role = sourceRole !== null
+      && Object.prototype.hasOwnProperty.call(recipe.role_map, sourceRole)
+      ? recipe.role_map[sourceRole]
+      : undefined;
+    if (typeof role !== "string") throw new Error(`Item ${sequence} has an unmapped or missing role attribute`);
 
     const contents = query(item, recipe.selectors.content, `content selector for item ${sequence}`);
     if (contents.length !== recipe.expectations.content_nodes_per_item) {

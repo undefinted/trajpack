@@ -635,6 +635,14 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
       return reply.code(409).send({ error: "recipe_hash_mismatch" });
     }
     browserPairingNonce = null;
+    // If any step below rejects the capture (policy block, storage failure,
+    // invalid envelope), the pairing did not succeed: restore the one-shot
+    // nonce so the extension can retry with corrected input without forcing a
+    // reviewer restart. Only a fully accepted capture consumes it permanently.
+    // suppliedNonce is a non-empty string here (validated above).
+    const restorePairingNonce = (): void => {
+      if (browserPairingNonce === null) browserPairingNonce = suppliedNonce!;
+    };
     const source = defaultSource("browser", "unknown");
     source.origin = metadata.origin;
     source.interface_version = metadata.envelope.interface_version;
@@ -656,10 +664,12 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
     manifest.lineage.raw_sha256 = sha256(canonicalJson([metadata.envelope]));
     const preflight = evaluateGate({ manifest, raw: [metadata.envelope], events: [] }, "automatic_capture");
     if (!preflight.allowed) {
+      restorePairingNonce();
       return reply.code(409).send({ error: "policy_blocked", reasons: preflight.reasonCodes });
     }
-    const captureSession = await CaptureSession.create("browser", manifest, passphrase, paths);
+    let captureSession: CaptureSession | null = null;
     try {
+      captureSession = await CaptureSession.create("browser", manifest, passphrase, paths);
       await captureSession.ingest(metadata.envelope);
       const bundle = await captureSession.finalize();
       return reply
@@ -668,7 +678,8 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
         .code(201)
         .send({ accepted: true, trace_id: bundle.manifest.trace_id });
     } catch (error) {
-      await captureSession.abort();
+      await captureSession?.abort().catch(() => undefined);
+      restorePairingNonce();
       throw error;
     }
   });

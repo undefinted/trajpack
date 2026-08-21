@@ -71,15 +71,15 @@ pnpm bench:scale
 python -m unittest discover -s experiments/trajectory-utility/tests -p "test_*.py" -v
 ```
 
-The Windows validation run on 2026-08-22 completed with 365 TypeScript tests
-passing and 5 platform/optional-capability skips, 15 Python bridge tests
+The Windows validation run on 2026-08-22 completed with 377 TypeScript tests
+passing and 5 platform/optional-capability skips, 17 Python bridge tests
 passing, no known production dependency vulnerabilities, and a successful
 release-pack smoke test. The same run processed 100,000 events at about 692k
 events/s for bounded JSONL and 85.9k events/s for the encrypted vault; these are
 single-machine measurements, not distributed-load claims.
 
-2026-08-22 的 Windows 验证结果为：365 项 TypeScript 测试通过、5 项因平台或
-可选能力跳过，15 项 Python bridge 测试通过，生产依赖未发现已知漏洞，release
+2026-08-22 的 Windows 验证结果为：377 项 TypeScript 测试通过、5 项因平台或
+可选能力跳过，17 项 Python bridge 测试通过，生产依赖未发现已知漏洞，release
 pack smoke test 通过。同次 10 万事件实测中，有界 JSONL 约为 69.2 万 events/s，
 加密 vault 约为 8.59 万 events/s；这些仅是单机测量，不代表分布式负载能力。
 

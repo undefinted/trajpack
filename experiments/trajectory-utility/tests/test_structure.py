@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -18,6 +19,7 @@ COMMITTED_DEEPSEEK_HF_EXPORT = (
 sys.path.insert(0, str(EXPERIMENT))
 
 from generate_data import generate  # noqa: E402
+import run_experiment as runner  # noqa: E402
 from run_experiment import (  # noqa: E402
     assistant_payload,
     create_fresh_output,
@@ -27,6 +29,7 @@ from run_experiment import (  # noqa: E402
     render_generation_prompt,
     safe_calculate,
     supervised_samples,
+    validate_training_step_config,
 )
 from training_bridge import BRIDGE_VERSION, render_tool_schema  # noqa: E402
 from validate_data import read_jsonl, validate_suite  # noqa: E402
@@ -75,6 +78,37 @@ class StructureTests(unittest.TestCase):
             )
             self.assertTrue(validation["valid"])
             self.assertEqual(validation["train_eval_overlap"], 0)
+
+    def test_training_step_config_accepts_zero_warmup_and_rejects_booleans(self) -> None:
+        valid = {
+            "max_steps": 1,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 1,
+            "warmup_steps": 0,
+        }
+        validate_training_step_config(valid)
+        for knob in valid:
+            invalid = {**valid, knob: True}
+            with self.subTest(knob=knob):
+                with self.assertRaises(ValueError):
+                    validate_training_step_config(invalid)
+
+    def test_setup_failure_publishes_a_terminal_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "run"
+            args = SimpleNamespace(output=output, cache_dir=root / "cache", local_files_only=True)
+            with (
+                patch.object(runner, "parse_args", return_value=args),
+                patch.object(runner, "require_ignored_path", side_effect=lambda path, _repository, _label: Path(path)),
+                patch.object(runner, "prepare_experiment", side_effect=RuntimeError("controlled setup failure")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "controlled setup failure"):
+                    runner.main()
+            state = json.loads((output / "run-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["error_type"], "RuntimeError")
+            self.assertEqual(state["error"], "controlled setup failure")
 
     def test_dataset_examples_only_target_assistant_completions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

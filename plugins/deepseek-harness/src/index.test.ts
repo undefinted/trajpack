@@ -195,6 +195,68 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     });
   });
 
+  it("locates a resumed-seed end marker at firstLiveSeq - 1 instead of missing it", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const firstLiveSeq = 5;
+    // A seed that already ends in session/end-seed is not re-marked, so on
+    // resume the marker sits at firstLiveSeq - 1 rather than firstLiveSeq.
+    const resumed = {
+      id: "session-1",
+      firstLiveSeq,
+      events: Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === firstLiveSeq - 1
+        ? { type: "session/end-seed", seq, time: 1, data: {} }
+        : undefined),
+      header: {
+        version: 0,
+        id: "session-1",
+        seedLength: firstLiveSeq,
+        parentSession: "parent-1",
+        origin: "subagent",
+        delegationDepth: 1,
+        agentPreset: "researcher",
+      },
+      privateTranscript: "MUST_NOT_BE_SERIALIZED",
+    };
+    installed.eventListener(resumed, event("turn/start", firstLiveSeq, { turn: 1 }));
+    await installed.flushListener(resumed);
+
+    const [, init] = fetch.mock.calls[0] as unknown as [URL, RequestInit];
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(payload.session_header.unpublished_boundary_marker).toEqual({
+      type: "session/end-seed",
+      seq: firstLiveSeq - 1,
+    });
+  });
+
+  it("scans an immutable resumed seed only once per live session", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const installed = install();
+    const firstLiveSeq = 5;
+    let indexedReads = 0;
+    const seedEvents = Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === firstLiveSeq - 1
+      ? { type: "session/end-seed", seq, time: 1, data: {} }
+      : undefined);
+    const resumed = session(0, firstLiveSeq);
+    resumed.events = new Proxy(seedEvents, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/u.test(property)) indexedReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    for (let offset = 0; offset < 10; offset += 1) {
+      installed.eventListener(resumed, event("turn/start", firstLiveSeq + offset, { turn: offset }));
+    }
+    await installed.flushListener(resumed);
+    expect(indexedReads).toBe(2);
+  });
+
   it("treats a non-2xx response as a failed durability checkpoint", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
@@ -253,6 +315,28 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     await Promise.resolve();
     expect(drained).toBe(false);
     release(new Response(null, { status: 202 }));
+    await pending;
+    expect(drained).toBe(true);
+  });
+
+  it("keeps a session flush open for a queue tail admitted while it is draining", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    const releases: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { releases.push(resolve); }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const liveSession = session();
+
+    installed.eventListener(liveSession, event("turn/start", 0, { turn: 0 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    let drained = false;
+    const pending = installed.flushListener(liveSession).then(() => { drained = true; });
+    installed.eventListener(liveSession, event("turn/end", 1, { turn: 0, reason: "completed" }));
+    releases.shift()!(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(drained).toBe(false);
+    releases.shift()!(new Response(null, { status: 204 }));
     await pending;
     expect(drained).toBe(true);
   });
@@ -384,14 +468,16 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses non-loopback collectors", async () => {
+  it("refuses non-loopback collectors and fails the durability checkpoint", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "https://collector.example/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "token";
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
     const installed = install();
     installed.eventListener(session(), event("turn/start", 0, { turn: 0 }));
-    await installed.controller.flush();
+    // Present-but-invalid collector configuration must fail the flush loudly
+    // instead of silently producing an empty vault.
+    await expect(installed.controller.flush()).rejects.toThrow(/loopback/iu);
     expect(fetch).not.toHaveBeenCalled();
   });
 });

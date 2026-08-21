@@ -18,6 +18,7 @@ const toneMap: Record<string, StatusTone> = {
   unknown: "neutral",
   locked: "neutral",
   cancelled: "neutral",
+  quarantined: "negative",
   include: "accent",
   redact: "warning",
   exclude: "neutral",

@@ -162,6 +162,16 @@ def load_model(
     return model, resolved_revision
 
 
+def validate_training_step_config(train_config: dict[str, Any]) -> None:
+    for knob in ("max_steps", "micro_batch_size", "gradient_accumulation_steps"):
+        value = train_config.get(knob)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"train.{knob} must be a positive integer")
+    warmup_steps = train_config.get("warmup_steps")
+    if isinstance(warmup_steps, bool) or not isinstance(warmup_steps, int) or warmup_steps < 0:
+        raise ValueError("train.warmup_steps must be a non-negative integer")
+
+
 def train_adapter(
     stack: dict[str, Any],
     model: Any,
@@ -173,6 +183,7 @@ def train_adapter(
     adapter_dir: Path,
 ) -> tuple[Any, dict[str, Any]]:
     torch = stack["torch"]
+    validate_training_step_config(train_config)
     samples, token_stats = supervised_samples(records, tokenizer, int(train_config["max_length"]))
     lora = stack["LoraConfig"](
         task_type=stack["TaskType"].CAUSAL_LM,
@@ -540,13 +551,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    experiment_dir = Path(__file__).resolve().parent
-    repository = experiment_dir.parents[1]
-    output = require_ignored_path(args.output, repository, "output")
-    cache_dir = require_ignored_path(args.cache_dir, repository, "cache-dir")
-    create_fresh_output(output)
+def prepare_experiment(
+    args: argparse.Namespace,
+    experiment_dir: Path,
+    repository: Path,
+    cache_dir: Path,
+) -> dict[str, Any]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(cache_dir)
     if args.local_files_only:
@@ -557,6 +567,9 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or not isinstance(config.get("train"), dict):
+        raise ValueError("config.train must be an object")
+    validate_training_step_config(config["train"])
     validation = validate_suite(args.answer_only, args.complete, args.eval)
     answer_records = read_jsonl(args.answer_only)
     complete_records = read_jsonl(args.complete)
@@ -616,7 +629,67 @@ def main() -> None:
         "validation": validation,
         "environment": environment,
     }
+    return {
+        "stack": stack,
+        "torch": torch,
+        "seed": seed,
+        "device": device,
+        "tokenizer": tokenizer,
+        "config": config,
+        "answer_records": answer_records,
+        "complete_records": complete_records,
+        "eval_records": eval_records,
+        "config_hash": config_hash,
+        "input_hashes": input_hashes,
+        "run_header": run_header,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    experiment_dir = Path(__file__).resolve().parent
+    repository = experiment_dir.parents[1]
+    output = require_ignored_path(args.output, repository, "output")
+    cache_dir = require_ignored_path(args.cache_dir, repository, "cache-dir")
+    create_fresh_output(output)
+    # Write a status record immediately so any setup failure below leaves a
+    # diagnostic run-state.json instead of an empty directory. The full header
+    # is written once environment/config collection succeeds.
+    run_header: dict[str, Any] = {
+        "schema_version": "trajectory-utility-run/0.1",
+        "status": "running",
+        "seed": None,
+        "config_sha256": None,
+        "input_sha256": None,
+        "model": None,
+        "validation": None,
+        "environment": None,
+    }
     atomic_json(output / "run-state.json", run_header)
+    try:
+        prepared = prepare_experiment(args, experiment_dir, repository, cache_dir)
+        run_header = prepared["run_header"]
+        atomic_json(output / "run-state.json", run_header)
+    except BaseException as error:
+        atomic_json(output / "run-state.json", {
+            **run_header,
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+        })
+        raise
+
+    stack = prepared["stack"]
+    torch = prepared["torch"]
+    seed = prepared["seed"]
+    device = prepared["device"]
+    tokenizer = prepared["tokenizer"]
+    config = prepared["config"]
+    answer_records = prepared["answer_records"]
+    complete_records = prepared["complete_records"]
+    eval_records = prepared["eval_records"]
+    config_hash = prepared["config_hash"]
+    input_hashes = prepared["input_hashes"]
 
     arm_results: dict[str, Any] = {}
     arm_training_records = {

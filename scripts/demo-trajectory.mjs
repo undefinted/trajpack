@@ -44,7 +44,9 @@ function parseArguments(argv) {
     } else if (argument === "--output") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new Error("--output requires a directory");
-      result.output = resolve(value);
+      // Resolve relative to the demo directory (consistent with DEFAULT_OUTPUT)
+      // so --output artifacts and --clean agree regardless of the caller cwd.
+      result.output = isAbsolute(value) ? resolve(value) : resolve(DEMO_ROOT, value);
       index += 1;
     } else {
       throw new Error(`Unknown demo argument: ${argument}`);
@@ -157,8 +159,16 @@ async function prepareOutput(output, clean) {
     await assertCleanPathHasNoIndirection(output);
     await rm(output, { recursive: true, force: false });
   }
-  await mkdir(output, { recursive: false, mode: 0o700 });
-  await writeFile(join(output, ".trajpack-demo-output"), OUTPUT_MARKER, { flag: "wx", mode: 0o600 });
+  // Recursive creation so `--output a/b/c` works when the parent does not
+  // already exist; indirection checks run before this point.
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  const markerPath = join(output, ".trajpack-demo-output");
+  if (await exists(markerPath)) {
+    // A previous run without --clean left a managed marker behind. Fail with a
+    // clear instruction instead of a raw EEXIST from the exclusive write below.
+    throw new Error(`Demo output already exists: ${output}; re-run with --clean to rebuild it`);
+  }
+  await writeFile(markerPath, OUTPUT_MARKER, { flag: "wx", mode: 0o600 });
 }
 
 async function importBuilt(relativePath) {

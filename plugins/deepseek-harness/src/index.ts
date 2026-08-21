@@ -33,6 +33,8 @@ interface ForwardState {
   readonly sessionId: string;
   /** First sequence actually delivered through the observable event feed. */
   readonly firstObservedSeq: number;
+  /** Seed topology is immutable for one live session; compute it only once. */
+  readonly boundaryMarker: { type: "session/end-seed"; seq: number } | null;
   route: Route | null;
   queue: Promise<void>;
   failure: unknown;
@@ -43,6 +45,11 @@ interface ForwardState {
 interface CollectorConfiguration {
   endpoint: URL;
   token: string;
+}
+
+interface CollectorSetup {
+  configuration: CollectorConfiguration | null;
+  failure: CollectorForwardError | null;
 }
 
 interface SerializedCapsule {
@@ -91,14 +98,25 @@ function loopbackUrl(value: string): URL | null {
   }
 }
 
-function collectorConfiguration(): CollectorConfiguration | null {
+function collectorSetup(): CollectorSetup {
   const collector = process.env.TRAJPACK_COLLECTOR_URL;
   const token = process.env.TRAJPACK_CAPTURE_TOKEN;
+  if (collector === undefined && token === undefined) {
+    return { configuration: null, failure: null };
+  }
   if (typeof collector !== "string" || typeof token !== "string" || token.length === 0 || token.length > 4096) {
-    return null;
+    return {
+      configuration: null,
+      failure: new CollectorForwardError(null, "Trajpack collector configuration is invalid"),
+    };
   }
   const endpoint = loopbackUrl(collector);
-  return endpoint === null ? null : { endpoint, token };
+  return endpoint === null
+    ? {
+        configuration: null,
+        failure: new CollectorForwardError(null, "Trajpack collector URL must be an HTTP loopback origin"),
+      }
+    : { configuration: { endpoint, token }, failure: null };
 }
 
 function validEvent(value: unknown): value is JsonObject {
@@ -118,7 +136,6 @@ function sessionIdentity(value: unknown): {
   header: JsonObject;
   sessionId: string;
   firstLiveSeq: number;
-  boundaryMarker: { type: "session/end-seed"; seq: number } | null;
 } | null {
   const session = record(value);
   const header = session === null ? null : record(session.header);
@@ -128,12 +145,27 @@ function sessionIdentity(value: unknown): {
     session === null || header === null || sessionId === null || firstLiveSeq === null ||
     header.version !== sessionFormatVersion || (header.id !== undefined && header.id !== sessionId)
   ) return null;
+  return { session, header, sessionId, firstLiveSeq };
+}
+
+function seedBoundaryMarker(
+  session: JsonObject,
+  firstLiveSeq: number,
+): { type: "session/end-seed"; seq: number } | null {
   const events = Array.isArray(session.events) ? session.events : [];
-  const marker = record(events[firstLiveSeq]);
-  const boundaryMarker = marker?.type === "session/end-seed" && marker.seq === firstLiveSeq
-    ? { type: "session/end-seed" as const, seq: firstLiveSeq }
-    : null;
-  return { session, header, sessionId, firstLiveSeq, boundaryMarker };
+  // The harness contract locates the LAST session/end-seed marker, which for a
+  // resumed seed may sit at firstLiveSeq - 1 (a seed that already ended is not
+  // re-marked). Only scanning events[firstLiveSeq] would miss it and report a
+  // wrong live boundary.
+  let boundaryMarker: { type: "session/end-seed"; seq: number } | null = null;
+  for (let index = Math.min(firstLiveSeq, events.length - 1); index >= 0; index -= 1) {
+    const marker = record(events[index]);
+    if (marker?.type === "session/end-seed" && marker.seq === index && index <= firstLiveSeq) {
+      boundaryMarker = { type: "session/end-seed" as const, seq: index };
+      break;
+    }
+  }
+  return boundaryMarker;
 }
 
 function routeFromEvent(event: JsonObject): Route | null {
@@ -170,7 +202,7 @@ function capsule(state: ForwardState, identity: NonNullable<ReturnType<typeof se
       id: identity.sessionId,
       first_live_seq: identity.firstLiveSeq,
       first_observed_seq: state.firstObservedSeq,
-      unpublished_boundary_marker: identity.boundaryMarker,
+      unpublished_boundary_marker: state.boundaryMarker,
       seed_length: safeInteger(identity.header.seedLength),
       parent_session: text(identity.header.parentSession),
       origin: text(identity.header.origin),
@@ -241,10 +273,11 @@ function sanitizedTerminalFailure(failure: unknown): CollectorForwardError {
  * admission first and await one final queue drain during profile disposal.
  */
 export function apply(ctx: HarnessContext): HarnessCaptureController {
-  const configuration = collectorConfiguration();
+  const setup = collectorSetup();
+  const configuration = setup.configuration;
   const bySession = new WeakMap<object, ForwardState>();
   const liveStates = new Set<ForwardState>();
-  let terminalFailure: CollectorForwardError | null = null;
+  let terminalFailure: CollectorForwardError | null = setup.failure;
   let pendingEvents = 0;
   let pendingBytes = 0;
 
@@ -259,7 +292,15 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
 
   const drainStates = async (states: Iterable<ForwardState>): Promise<void> => {
     const snapshot = [...states];
-    await Promise.all(snapshot.map(async (state) => state.queue));
+    // `session/flush` is a durability barrier: events admitted while it runs
+    // append a new queue tail that must also be awaited before draining.
+    await Promise.all(snapshot.map(async (state) => {
+      for (;;) {
+        const tail = state.queue;
+        await tail;
+        if (tail === state.queue) break;
+      }
+    }));
     const failures = failureFrom(snapshot);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, "Trajpack collector drain failed");
@@ -301,6 +342,7 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
         session: identity.session,
         sessionId: identity.sessionId,
         firstObservedSeq: eventValue.seq as number,
+        boundaryMarker: seedBoundaryMarker(identity.session, identity.firstLiveSeq),
         route: null,
         queue: Promise.resolve(),
         failure: null,

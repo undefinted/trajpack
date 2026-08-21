@@ -43,7 +43,13 @@ function parseRecipeInput(): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+// Monotonic generation token so a stale in-flight capture can never
+// re-populate pending state after the user reset it (recipe edit, attestation
+// change, or a second capture click).
+let captureGeneration = 0;
+
 function resetPendingCapture(): void {
+  captureGeneration += 1;
   pendingEnvelope = null;
   pendingRecipe = null;
   uploadButton.disabled = true;
@@ -60,6 +66,7 @@ async function hashRecipe(): Promise<void> {
 }
 
 async function captureForPreview(): Promise<void> {
+  const generation = captureGeneration + 1;
   resetPendingCapture();
   if (!attestationInput.checked) throw new Error("Confirm that you are authorized to collect from this site");
   const recipe = await validateAuthorizedSelectorRecipe(parseRecipeInput());
@@ -76,7 +83,11 @@ async function captureForPreview(): Promise<void> {
   });
   const capture = results[0]?.result;
   if (!capture) throw new Error("The page returned no capture result");
-  pendingEnvelope = await createBrowserRawEnvelope(capture);
+  const envelope = await createBrowserRawEnvelope(capture);
+  // A reset (recipe edit, attestation change, or a newer capture) superseded
+  // this invocation; discard the stale result instead of re-enabling upload.
+  if (generation !== captureGeneration) return;
+  pendingEnvelope = envelope;
   pendingRecipe = recipe;
   await chrome.storage.local.set({ authorizedSelectorRecipe: recipeInput.value });
 
@@ -139,4 +150,4 @@ attestationInput.addEventListener("change", resetPendingCapture);
 void chrome.storage.local.get(["authorizedSelectorRecipe"]).then((stored) => {
   const saved = stored["authorizedSelectorRecipe"];
   if (typeof saved === "string") recipeInput.value = saved;
-});
+}).catch(() => undefined);

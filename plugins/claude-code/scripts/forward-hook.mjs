@@ -1,6 +1,7 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants, realpathSync } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import process from "node:process";
 
 const HOST = "claude_code";
@@ -33,16 +34,29 @@ async function armConfiguration() {
     if (!directoryDetails.isDirectory() || directoryDetails.isSymbolicLink()) return null;
     if (process.platform !== "win32"
       && (directoryDetails.uid !== process.getuid?.() || (directoryDetails.mode & 0o077) !== 0)) return null;
-    const details = await lstat(path);
-    if (!details.isFile() || details.isSymbolicLink() || details.size > 8192) return null;
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 8192) return null;
     if (process.platform !== "win32"
-      && (details.uid !== process.getuid?.() || (details.mode & 0o077) !== 0)) return null;
-    const descriptor = JSON.parse(await readFile(path, "utf8"));
-    const expiresAt = Date.parse(descriptor.expires_at);
-    if (descriptor.version !== 1 || descriptor.host !== HOST
-      || typeof descriptor.url !== "string" || typeof descriptor.token !== "string") return null;
-    if (typeof descriptor.cwd !== "string" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
-    return { url: descriptor.url, token: descriptor.token, cwd: descriptor.cwd };
+      && (before.uid !== process.getuid?.() || (before.mode & 0o077) !== 0)) return null;
+    const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+    // Open with O_NOFOLLOW and fstat the fd so a same-user symlink swap between
+    // the directory check and the read cannot redirect the descriptor source.
+    const handle = await open(path, constants.O_RDONLY | noFollow);
+    try {
+      const details = await handle.stat();
+      if (!details.isFile() || details.dev !== before.dev || details.ino !== before.ino
+        || details.size !== before.size || details.size > 8192) return null;
+      if (process.platform !== "win32"
+        && (details.uid !== process.getuid?.() || (details.mode & 0o077) !== 0)) return null;
+      const descriptor = JSON.parse(await handle.readFile({ encoding: "utf8" }));
+      const expiresAt = Date.parse(descriptor.expires_at);
+      if (descriptor.version !== 1 || descriptor.host !== HOST
+        || typeof descriptor.url !== "string" || typeof descriptor.token !== "string") return null;
+      if (typeof descriptor.cwd !== "string" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
+      return { url: descriptor.url, token: descriptor.token, cwd: descriptor.cwd };
+    } finally {
+      await handle.close();
+    }
   } catch {
     return null;
   }
@@ -65,7 +79,10 @@ async function readJsonInput() {
 }
 
 function sameDirectory(left, right) {
-  const normalize = (value) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
+  // realpath returns the actual on-disk canonical path, so case-insensitive
+  // APFS mounts compare equal regardless of input case while genuinely distinct
+  // directories on case-sensitive volumes stay distinct.
+  const normalize = (value) => process.platform === "win32" ? realpathSync(value).toLowerCase() : realpathSync(value);
   try { return normalize(left) === normalize(right); } catch { return false; }
 }
 

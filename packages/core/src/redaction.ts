@@ -164,7 +164,11 @@ export function scanStructured(value: unknown, rootPath = "$", seen = new WeakSe
 
 export function redactStructured(value: unknown): { value: unknown; findings: StructuredRedactionFinding[] } {
   const findings: StructuredRedactionFinding[] = [];
-  const visit = (entry: unknown, path: string, seen: WeakSet<object>): unknown => {
+  // Track only the objects on the current branch so a shared (non-circular)
+  // reference is redacted normally instead of being replaced with a cyclic
+  // marker the second time it appears.
+  const ancestors = new Set<object>();
+  const visit = (entry: unknown, path: string): unknown => {
     if (isSafeIntegrityDigest(path, entry)) return entry;
     const sensitiveKind = sensitiveKeyKind(path);
     if (sensitiveKind && entry !== null && entry !== undefined && !alreadyRedacted(entry)) {
@@ -178,13 +182,16 @@ export function redactStructured(value: unknown): { value: unknown; findings: St
       return matches.length ? redactText(entry, matches) : entry;
     }
     if (!entry || typeof entry !== "object") return entry;
-    if (seen.has(entry)) return "[REDACTED:cyclic_reference]";
-    seen.add(entry);
-    if (Array.isArray(entry)) return entry.map((item, index) => visit(item, `${path}[${index}]`, seen));
-    return Object.fromEntries(Object.entries(entry as Record<string, unknown>)
-      .map(([key, item]) => [key, visit(item, `${path}.${key}`, seen)]));
+    if (ancestors.has(entry)) return "[REDACTED:cyclic_reference]";
+    ancestors.add(entry);
+    const result = Array.isArray(entry)
+      ? entry.map((item, index) => visit(item, `${path}[${index}]`))
+      : Object.fromEntries(Object.entries(entry as Record<string, unknown>)
+        .map(([key, item]) => [key, visit(item, `${path}.${key}`)]));
+    ancestors.delete(entry);
+    return result;
   };
-  return { value: visit(value, "$", new WeakSet<object>()), findings };
+  return { value: visit(value, "$"), findings };
 }
 
 function sanitizePart(part: ContentPart): ContentPart {
