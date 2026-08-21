@@ -28,8 +28,9 @@ redaction, and review dispositions.
 
 ## Versioned HF/TRL training-view recipes
 
-An approved single managed trace can be compiled into one of seven narrower HF/TRL views
-with `trajpack export <trace-id> --format hf-trl --recipe <recipe> ...`. The raw
+Approved managed traces can be compiled into one of seven narrower HF/TRL views
+with `trajpack export <trace-id> --format hf-trl --recipe <recipe> ...`, or by
+freezing the same recipe in `trajpack dataset plan ... --recipe <recipe>`. The raw
 vault and canonical bundle are not rewritten. The exporter records the recipe,
 recipe version, compiler version, source/target/evidence event IDs, component
 loss targets, exclusions, and compilation hash in the dataset and
@@ -50,9 +51,10 @@ conversation/tool fields when they are present and review-included. Every
 recipe requires passing automated checks, target-scoped human training
 approval, privacy-cleared selected content, and fresh approval fingerprints.
 If no candidate satisfies the recipe, export fails rather than emitting an
-empty or synthetically labelled training file. Recipe export is single-trace
-in v0.1. Frozen multi-trace dataset builds may continue to use their audited
-`trace_full` view for sources with an unambiguous projection. DeepSeek Harness
+empty or synthetically labelled training file. A multi-trace build freezes one
+recipe and compiler version for every selected trace. Exact and near-duplicate
+gates run per compiled example; legacy `trace_full` is also decomposed into
+its session/branch examples for contamination analysis. DeepSeek Harness
 HF/TRL exports must name an explicit versioned recipe; `trace_full` is rejected
 because it cannot safely represent request epochs, surface replacement,
 multi-route subagents, and the three-layer tool lifecycle.
@@ -98,14 +100,15 @@ observable evidence into reproducible post-training views.
 
 Single-trace and multi-trace exports are published through a private staging
 directory and receive a `COMPLETE` marker before an atomic same-parent rename.
-A multi-trace `dataset/0.1` export also writes its frozen `selection.json`,
+A multi-trace `dataset/0.2` export also writes its frozen `selection.json`,
 `dataset-manifest.json`, `dataset-stats.json`, a dataset-level contamination
 report, per-split files, and checksums. The manifest freezes view, quality, and
-dedupe compiler versions. `dataset-audit/0.2` includes exact training-view
+dedupe compiler versions. `dataset-audit/0.3` includes a `(trace_id, view_id)`
+record for every compiled example, exact training-view
 hashes, only the part hashes that actually collide, and a frozen
 canonical-shingle near-duplicate pass. Near-duplicate entries
-contain only trace IDs, assigned splits, integer Jaccard basis points, and a
-pair signature hash; source shingles and content are not serialized. The audit
+contain only trace/view IDs, assigned splits, integer Jaccard basis points, and
+a pair signature hash; source shingles and content are not serialized. The audit
 also binds the algorithm, 80% threshold, resource-limit digest, record/feature
 counts, candidate/comparison counts, and complete/fail-closed status. HF split
 files are directly loadable as `train`, `validation`, and `test`; the original per-trace canonical lineage remains
@@ -133,7 +136,12 @@ template hash, truncation, and packing configuration.
 
 Run `trajpack validate <export-directory>` before loading a multi-trace dataset.
 The result `self_consistent: true` means its checksums, frozen compilers,
-canonical selected views, statistics, audit, splits, JSONL, and Parquet agree.
+canonical selected views, recipe reports, statistics, audit, splits, JSONL,
+and Parquet agree. Canonical-event recipes are independently recompiled.
+`deepseek_epoch_sft` additionally depends on encrypted raw capsules that are not
+present in a plaintext dataset, so offline validation binds its report to
+canonical event references and internal hashes but does not independently
+replay the raw request epochs.
 It deliberately does not mean `training_ready: true`: current authorization is
 rechecked only while exporting from the managed encrypted traces.
 

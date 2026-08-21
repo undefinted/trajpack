@@ -9,6 +9,7 @@ import {
   harnessCompatibility,
   interfaceVersion,
   name,
+  queueLimits,
   sessionFormatVersion,
   type HarnessCaptureController,
 } from "./index.js";
@@ -231,6 +232,31 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     });
   });
 
+  it("scans an immutable resumed seed only once per live session", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const installed = install();
+    const firstLiveSeq = 5;
+    let indexedReads = 0;
+    const seedEvents = Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === firstLiveSeq - 1
+      ? { type: "session/end-seed", seq, time: 1, data: {} }
+      : undefined);
+    const resumed = session(0, firstLiveSeq);
+    resumed.events = new Proxy(seedEvents, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/u.test(property)) indexedReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    for (let offset = 0; offset < 10; offset += 1) {
+      installed.eventListener(resumed, event("turn/start", firstLiveSeq + offset, { turn: offset }));
+    }
+    await installed.flushListener(resumed);
+    expect(indexedReads).toBe(2);
+  });
+
   it("treats a non-2xx response as a failed durability checkpoint", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
@@ -244,6 +270,36 @@ describe("DeepSeek Harness rc.6 plugin", () => {
       status: 409,
     } satisfies Partial<CollectorForwardError>);
     await expect(installed.lifecycleDispose()).rejects.toThrow("HTTP 409");
+  });
+
+  it("releases many disposed failed sessions while retaining one global failure", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    const fetch = vi.fn(async () => new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const sessionCount = 128;
+
+    for (let index = 0; index < sessionCount; index += 1) {
+      const failedSession = session();
+      failedSession.id = `failed-session-${index}`;
+      (failedSession.header as Record<string, unknown>).id = `failed-session-${index}`;
+      installed.eventListener(failedSession, event("turn/start", 0, { turn: index }));
+      installed.disposedListener(failedSession);
+    }
+
+    expect(installed.controller.liveStateCount()).toBe(sessionCount);
+    await vi.waitFor(() => expect(installed.controller.liveStateCount()).toBe(0));
+    expect(installed.controller.queueUsage()).toEqual({ events: 0, bytes: 0 });
+    expect(fetch).toHaveBeenCalledTimes(sessionCount);
+    await expect(installed.controller.flush()).rejects.toMatchObject({
+      name: "CollectorForwardError",
+      status: 503,
+    } satisfies Partial<CollectorForwardError>);
+
+    installed.eventListener(session(), event("turn/start", 0, { turn: 0 }));
+    expect(installed.controller.liveStateCount()).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(sessionCount);
   });
 
   it("drains an admitted tail event through the Cordis dispose effect", async () => {
@@ -261,6 +317,155 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     release(new Response(null, { status: 202 }));
     await pending;
     expect(drained).toBe(true);
+  });
+
+  it("keeps a session flush open for a queue tail admitted while it is draining", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    const releases: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { releases.push(resolve); }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const liveSession = session();
+
+    installed.eventListener(liveSession, event("turn/start", 0, { turn: 0 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    let drained = false;
+    const pending = installed.flushListener(liveSession).then(() => { drained = true; });
+    installed.eventListener(liveSession, event("turn/end", 1, { turn: 0, reason: "completed" }));
+    releases.shift()!(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(drained).toBe(false);
+    releases.shift()!(new Response(null, { status: 204 }));
+    await pending;
+    expect(drained).toBe(true);
+  });
+
+  it("latches a bounded-queue failure during a slow collector burst", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    let release!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const liveSession = session();
+
+    installed.eventListener(liveSession, event("turn/start", 0, { turn: 0 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    for (let index = 1; index <= queueLimits.perSessionEvents; index += 1) {
+      installed.eventListener(liveSession, event("turn/start", index, { turn: index }));
+    }
+
+    expect(installed.controller.queueUsage().events).toBe(queueLimits.perSessionEvents);
+    release(new Response(null, { status: 204 }));
+    await expect(installed.flushListener(liveSession)).rejects.toThrow("bounded capacity");
+    expect(installed.controller.queueUsage()).toEqual({ events: 0, bytes: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    installed.eventListener(liveSession, event("turn/start", queueLimits.perSessionEvents + 1, { turn: 0 }));
+    await expect(installed.controller.flush(liveSession)).rejects.toThrow("bounded capacity");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces the global event cap across concurrent slow sessions", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    let release!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const sessions = Array.from({ length: 4 }, (_, index) => {
+      const liveSession = session();
+      liveSession.id = `session-${index}`;
+      (liveSession.header as Record<string, unknown>).id = `session-${index}`;
+      return liveSession;
+    });
+
+    installed.eventListener(sessions[0], event("turn/start", 0, { turn: 0 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
+      const firstSeq = sessionIndex === 0 ? 1 : 0;
+      for (let seq = firstSeq; seq < queueLimits.perSessionEvents; seq += 1) {
+        installed.eventListener(sessions[sessionIndex], event("turn/start", seq, { turn: seq }));
+      }
+    }
+    expect(installed.controller.queueUsage().events).toBe(queueLimits.globalEvents);
+
+    const overflowSession = session();
+    overflowSession.id = "session-overflow";
+    (overflowSession.header as Record<string, unknown>).id = "session-overflow";
+    installed.eventListener(overflowSession, event("turn/start", 0, { turn: 0 }));
+    for (const liveSession of sessions) {
+      installed.eventListener(liveSession, event("turn/start", queueLimits.perSessionEvents, { turn: 0 }));
+    }
+
+    await expect(installed.controller.flush(overflowSession)).rejects.toThrow("bounded capacity");
+    release(new Response(null, { status: 204 }));
+    await expect(installed.controller.flush()).rejects.toBeInstanceOf(AggregateError);
+    expect(installed.controller.queueUsage()).toEqual({ events: 0, bytes: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps strongly retained live sessions and drains them after disposal", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    let release!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const sessions: Record<string, unknown>[] = [];
+
+    const firstSession = session();
+    firstSession.id = "live-session-0";
+    (firstSession.header as Record<string, unknown>).id = "live-session-0";
+    sessions.push(firstSession);
+    installed.eventListener(firstSession, event("turn/start", 0, { turn: 0 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+    for (let index = 1; index < queueLimits.globalSessions; index += 1) {
+      const liveSession = session();
+      liveSession.id = `live-session-${index}`;
+      (liveSession.header as Record<string, unknown>).id = `live-session-${index}`;
+      sessions.push(liveSession);
+      installed.eventListener(liveSession, event("turn/start", 0, { turn: index }));
+    }
+    expect(installed.controller.liveStateCount()).toBe(queueLimits.globalSessions);
+
+    const overflowSession = session();
+    overflowSession.id = "live-session-overflow";
+    (overflowSession.header as Record<string, unknown>).id = "live-session-overflow";
+    installed.eventListener(overflowSession, event("turn/start", 0, { turn: 0 }));
+    expect(installed.controller.liveStateCount()).toBe(queueLimits.globalSessions);
+    await expect(installed.controller.flush(sessions[1])).rejects.toThrow("forwarding failed");
+    for (const liveSession of sessions) installed.disposedListener(liveSession);
+
+    release(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(installed.controller.liveStateCount()).toBe(0));
+    expect(installed.controller.queueUsage()).toEqual({ events: 0, bytes: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await expect(installed.controller.flush()).rejects.toThrow("forwarding failed");
+  });
+
+  it("bounds queued plaintext bytes and releases accounting after failure", async () => {
+    process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
+    process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    let release!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const installed = install();
+    const liveSession = session();
+    const largeText = "x".repeat(6 * 1024 * 1024);
+
+    installed.eventListener(liveSession, event("user/message", 0, { message: { role: "user", content: largeText } }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    installed.eventListener(liveSession, event("user/message", 1, { message: { role: "user", content: largeText } }));
+    installed.eventListener(liveSession, event("user/message", 2, { message: { role: "user", content: largeText } }));
+
+    expect(installed.controller.queueUsage().bytes).toBeLessThanOrEqual(queueLimits.perSessionBytes);
+    release(new Response(null, { status: 204 }));
+    await expect(installed.flushListener(liveSession)).rejects.toThrow("bounded capacity");
+    expect(installed.controller.queueUsage()).toEqual({ events: 0, bytes: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("refuses non-loopback collectors and fails the durability checkpoint", async () => {

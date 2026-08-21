@@ -33,13 +33,18 @@ async function armConfiguration() {
     if (!directoryDetails.isDirectory() || directoryDetails.isSymbolicLink()) return null;
     if (process.platform !== "win32"
       && (directoryDetails.uid !== process.getuid?.() || (directoryDetails.mode & 0o077) !== 0)) return null;
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 8192) return null;
+    if (process.platform !== "win32"
+      && (before.uid !== process.getuid?.() || (before.mode & 0o077) !== 0)) return null;
     const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
     // Open with O_NOFOLLOW and fstat the fd so a same-user symlink swap between
     // the directory check and the read cannot redirect the descriptor source.
     const handle = await open(path, constants.O_RDONLY | noFollow);
     try {
       const details = await handle.stat();
-      if (!details.isFile() || details.size > 8192) return null;
+      if (!details.isFile() || details.dev !== before.dev || details.ino !== before.ino
+        || details.size !== before.size || details.size > 8192) return null;
       if (process.platform !== "win32"
         && (details.uid !== process.getuid?.() || (details.mode & 0o077) !== 0)) return null;
       const descriptor = JSON.parse(await handle.readFile({ encoding: "utf8" }));
@@ -86,7 +91,7 @@ if (configuration && endpoint && configuration.token.length > 0 && configuration
   const input = await readJsonInput();
   if (input && (!configuration.cwd || (typeof input.value.cwd === "string" && sameDirectory(input.value.cwd, configuration.cwd)))) {
     try {
-      await fetch(endpoint, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "authorization": `Bearer ${configuration.token}`,
@@ -96,11 +101,15 @@ if (configuration && endpoint && configuration.token.length > 0 && configuration
         },
         body: input.body,
         cache: "no-store",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(2500)
       });
+      if (!response.ok) {
+        process.stderr.write(`trajpack ${HOST} hook: collector rejected the event with HTTP ${response.status}\n`);
+        process.exitCode = 1;
+      }
     } catch {
-      // Capture hooks are observational. Collector errors never affect Gemini CLI.
+      // An unavailable collector is an observational no-op; reachable HTTP rejections are reported above.
     }
   }
 }

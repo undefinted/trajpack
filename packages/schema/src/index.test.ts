@@ -7,6 +7,7 @@ import {
   datasetExampleSchema,
   datasetManifestSchema,
   decisionStatusSchema,
+  migrateDatasetBuild,
   migrateTraceBundle,
   reasoningMetadataSchema,
   traceBundleSchema,
@@ -41,15 +42,18 @@ describe("schema primitives", () => {
   it("validates deterministic dataset build scopes", () => {
     const build = {
       record_type: "dataset_build",
-      schema_version: "dataset-build/0.1",
+      schema_version: "dataset-build/0.2",
       name: "research-set",
       policy_version: "policy/fixture",
       mode: "training_competitive_distillation",
       target: { model_owner: "lab", product: "student" },
+      view_recipe: "trace_full",
+      view_recipe_version: "trace-full-view/0.2",
       compiler_versions: {
-        view: "trace-full-view/0.2",
+        view: "dataset-view-selector/0.3",
+        training_view: null,
         quality: "trajectory-quality/0.1",
-        dedupe: "canonical-training-view+shingle-jaccard/0.3",
+        dedupe: "compiled-example+canonical-shingle-jaccard/0.4",
       },
       split_policy: {
         algorithm: "sha256-group-threshold-v1",
@@ -67,10 +71,61 @@ describe("schema primitives", () => {
     };
     expect(datasetBuildSchema.parse(build).quality_profile).toBe("research_strict");
     expect(() => datasetBuildSchema.parse({ ...build, target: null })).toThrow("exact target");
+    expect(datasetBuildSchema.parse({
+      ...build,
+      view_recipe: "deepseek_epoch_sft",
+      view_recipe_version: "deepseek-exact-request-epoch-sft/0.1",
+      compiler_versions: { ...build.compiler_versions, training_view: "training-view-compiler/0.2" },
+    }).view_recipe)
+      .toBe("deepseek_epoch_sft");
+    expect(() => datasetBuildSchema.parse({
+      ...build,
+      mode: "archive",
+      target: null,
+      view_recipe: "answer_sft",
+      view_recipe_version: "answer-sft/0.1",
+      compiler_versions: { ...build.compiler_versions, training_view: "training-view-compiler/0.2" },
+    })).toThrow("require a training dataset mode");
     expect(() => datasetBuildSchema.parse({
       ...build,
       traces: [...build.traces, ...build.traces],
     })).toThrow("cannot contain a trace more than once");
+  });
+
+  it("migrates historical trace_full dataset builds only through an explicit step", () => {
+    const current = migrateDatasetBuild({
+      record_type: "dataset_build",
+      schema_version: "dataset-build/0.1",
+      name: "legacy-set",
+      policy_version: "policy/fixture",
+      mode: "archive",
+      target: null,
+      view_recipe: "trace_full",
+      quality_profile: "sft_basic",
+      compiler_versions: {
+        view: "trace-full-view/0.2",
+        quality: "trajectory-quality/0.1",
+        dedupe: "canonical-training-view+shingle-jaccard/0.3",
+      },
+      split_policy: {
+        algorithm: "sha256-group-threshold-v1",
+        seed: "legacy",
+        ratios_bp: { train: 10000, validation: 0, test: 0 },
+      },
+      traces: [{
+        trace_id: "a".repeat(32),
+        split_group_id: "b".repeat(64),
+        group_basis: "trace_fallback",
+        source_bundle_sha256: "c".repeat(64),
+        approval_scope_sha256: "d".repeat(64),
+        eligibility_decision_id: "legacy-decision",
+      }],
+    });
+    expect(current).toMatchObject({
+      schema_version: "dataset-build/0.2",
+      view_recipe_version: "trace-full-view/0.2",
+      compiler_versions: { view: "dataset-view-selector/0.3", training_view: null },
+    });
   });
 
   it("rejects misaligned or non-assistant loss masks", () => {
@@ -242,7 +297,7 @@ describe("schema primitives", () => {
     };
     const manifest = {
       record_type: "dataset_manifest",
-      schema_version: "dataset/0.1",
+      schema_version: "dataset/0.2",
       dataset_id: "f".repeat(64),
       name: "research-set",
       created_at: "2026-08-16T00:00:00.000Z",
@@ -252,11 +307,13 @@ describe("schema primitives", () => {
       target: { model_owner: "lab", product: "student" },
       policy_version: "policy/fixture",
       view_recipe: "trace_full",
+      view_recipe_version: "trace-full-view/0.2",
       quality_profile: "research_strict",
       compiler_versions: {
-        view: "trace-full-view/0.2",
+        view: "dataset-view-selector/0.3",
+        training_view: null,
         quality: "trajectory-quality/0.1",
-        dedupe: "canonical-training-view+shingle-jaccard/0.3",
+        dedupe: "compiled-example+canonical-shingle-jaccard/0.4",
       },
       split_policy: {
         algorithm: "sha256-group-threshold-v1",

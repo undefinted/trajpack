@@ -89,6 +89,60 @@ Wrapper-mode authoritative JSON stdout and provider stderr are consumed without
 being echoed. Only sanitized byte counts, trace IDs, and check status are logged;
 redirecting `trajpack capture` therefore does not create a plaintext event log.
 
+## Opaque provider reasoning state
+
+Claude thinking signatures and `redacted_thinking.data`, OpenAI reasoning
+`encrypted_content`, and Gemini thought signatures are provider protocol state,
+not training text. Official provider documentation requires clients to preserve
+or replay these values only as specified for the originating conversation; it
+does not document them as a plaintext reasoning interface:
+
+- [Anthropic extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking)
+- [OpenAI reasoning models](https://developers.openai.com/api/docs/guides/reasoning)
+- [Gemini thinking](https://ai.google.dev/gemini-api/docs/thinking)
+
+The responsibly disclosed study
+[Stealing Reasoning Traces from Proprietary LLM APIs](https://arxiv.org/abs/2608.09867)
+reported historical replay/transcription attacks against opaque reasoning
+state. The result is security-relevant, but its token-count, determinism,
+marker, and behavioral checks are proxy signals rather than authenticated raw
+plaintext for every trace. The paper also states that the reported attacks were
+no longer reproducible after provider mitigations as of August 2026.
+
+Because an opaque protocol ciphertext/signature field may encode reasoning
+derived from prompts, private files, credentials, or tool results—and because
+its contents cannot be scanned before provider-side decryption—trajpack treats
+recognized fields such as `signature`, `redacted_thinking.data`,
+`encrypted_content`, and `thoughtSignature` as potential secrets:
+
+- it may exist only inside an encrypted raw vault under an allowed archive
+  decision;
+- the protocol value is never rendered as content, written to logs, projected into canonical
+  events, used as a loss target, copied into an export sidecar, or redistributed;
+- diagnostics and lineage may retain only a digest, byte count, source field,
+  adapter version, and tombstone;
+- the bounded raw inventory blocks export if its scan cannot finish; pinned
+  adapter/interface drift also blocks publication rather than guessing a new
+  projection.
+
+The taxonomy label `opaque_reasoning_state` is broader than a ciphertext key.
+For example, a visible but unverifiable Codex App Server reasoning delta may be
+kept in the encrypted canonical review layer under that label. Reviewers can
+inspect that visible text locally, but `include_in_loss=false` and export
+selection remove it from training content. This does not weaken the stricter
+vault-only rule for actual protocol signatures/ciphertexts.
+
+trajpack does not implement or facilitate signature replay, cross-model
+routing, decoding prompts, plaintext probing, or protection bypasses. Text
+reconstructed from answers, summaries, or observable behavior is
+`generated_rationale`; length agreement or behavioral similarity does not
+upgrade it to authenticated raw CoT. See the
+[Claude signature boundary](claude-thinking-signatures.md) for the evidence
+taxonomy. This technical boundary is independent of the provider/account,
+interface-authorization, training-purpose, target-model, and redistribution
+policy gates; a published security result supplies no permission to reproduce
+it against a service.
+
 ## Browser restrictions
 
 The extension requests only `activeTab`, `scripting`, local extension storage,

@@ -563,19 +563,28 @@ export const datasetExampleSchema = z.object({
 });
 export type DatasetExample = z.infer<typeof datasetExampleSchema>;
 
-export const DATASET_BUILD_VERSION = "dataset-build/0.1" as const;
-export const DATASET_MANIFEST_VERSION = "dataset/0.1" as const;
-export const DATASET_VIEW_COMPILER_VERSION = "trace-full-view/0.2" as const;
+export const DATASET_BUILD_VERSION = "dataset-build/0.2" as const;
+export const DATASET_MANIFEST_VERSION = "dataset/0.2" as const;
+/**
+ * Freezes how a dataset build selects either the conservative full canonical
+ * trace projection or one of the versioned training-view compilers. Recipe
+ * implementations remain versioned in each emitted training-view report; any
+ * change to recipe routing or dataset preflight requires this selector version
+ * to change as well.
+ */
+export const DATASET_VIEW_COMPILER_VERSION = "dataset-view-selector/0.3" as const;
+export const DATASET_TRAINING_VIEW_COMPILER_VERSION = "training-view-compiler/0.2" as const;
 export const DATASET_QUALITY_COMPILER_VERSION = "trajectory-quality/0.1" as const;
 /**
  * Freezes both exact canonical-view hashing and the privacy-preserving
  * token/code/tool shingle/Jaccard near-duplicate pass. A change to normalization,
  * shingling, thresholds, or resource limits requires a new compiler version.
  */
-export const DATASET_DEDUPE_COMPILER_VERSION = "canonical-training-view+shingle-jaccard/0.3" as const;
+export const DATASET_DEDUPE_COMPILER_VERSION = "compiled-example+canonical-shingle-jaccard/0.4" as const;
 
 export const datasetCompilerVersionsSchema = z.object({
   view: z.literal(DATASET_VIEW_COMPILER_VERSION),
+  training_view: z.literal(DATASET_TRAINING_VIEW_COMPILER_VERSION).nullable(),
   quality: z.literal(DATASET_QUALITY_COMPILER_VERSION),
   dedupe: z.literal(DATASET_DEDUPE_COMPILER_VERSION),
 }).strict();
@@ -589,6 +598,29 @@ export const datasetTargetSchema = z.object({
   product: z.string().trim().min(1),
 }).strict();
 export type DatasetTarget = z.infer<typeof datasetTargetSchema>;
+
+export const datasetViewRecipeSchema = z.enum([
+  "trace_full",
+  "answer_sft",
+  "reasoning_sft",
+  "tool_use_sft",
+  "deepseek_epoch_sft",
+  "failure_recovery",
+  "subagent_handoff",
+  "pointwise_reward_rl_ready",
+]);
+export type DatasetViewRecipe = z.infer<typeof datasetViewRecipeSchema>;
+
+export const DATASET_VIEW_RECIPE_VERSIONS: Readonly<Record<DatasetViewRecipe, string>> = Object.freeze({
+  trace_full: "trace-full-view/0.2",
+  answer_sft: "answer-sft/0.1",
+  reasoning_sft: "provider-exposed-reasoning-sft/0.1",
+  tool_use_sft: "native-tool-use-sft/0.1",
+  deepseek_epoch_sft: "deepseek-exact-request-epoch-sft/0.1",
+  failure_recovery: "evidenced-failure-recovery-sft/0.1",
+  subagent_handoff: "subagent-handoff-sft/0.1",
+  pointwise_reward_rl_ready: "verified-pointwise-reward/0.1",
+});
 
 export const datasetSplitPolicySchema = z.object({
   algorithm: z.literal("sha256-group-threshold-v1"),
@@ -616,9 +648,8 @@ export const datasetBuildSchema = z.object({
   policy_version: z.string().min(1),
   mode: approvalModeSchema,
   target: datasetTargetSchema.nullable(),
-  // v0.1 intentionally exposes only the topology-preserving full trace view.
-  // Additional recipes need their own versioned compiler and golden fixtures.
-  view_recipe: z.literal("trace_full").default("trace_full"),
+  view_recipe: datasetViewRecipeSchema.default("trace_full"),
+  view_recipe_version: z.string().min(1),
   quality_profile: z.enum(["sft_basic", "tool_agent_strict", "research_strict"]).default("research_strict"),
   compiler_versions: datasetCompilerVersionsSchema,
   split_policy: datasetSplitPolicySchema,
@@ -639,6 +670,30 @@ export const datasetBuildSchema = z.object({
       message: training ? "Training dataset builds require an exact target" : "Archive and redistribution builds cannot declare a training target",
     });
   }
+  if (!training && build.view_recipe !== "trace_full") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["view_recipe"],
+      message: "Versioned training-view recipes require a training dataset mode",
+    });
+  }
+  if (build.view_recipe_version !== DATASET_VIEW_RECIPE_VERSIONS[build.view_recipe]) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["view_recipe_version"],
+      message: "Dataset view recipe version does not match the frozen recipe registry",
+    });
+  }
+  const expectedTrainingCompiler = build.view_recipe === "trace_full"
+    ? null
+    : DATASET_TRAINING_VIEW_COMPILER_VERSION;
+  if (build.compiler_versions.training_view !== expectedTrainingCompiler) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["compiler_versions", "training_view"],
+      message: "Dataset training-view compiler does not match the selected recipe",
+    });
+  }
   const traceIds = new Set<string>();
   for (const [index, trace] of build.traces.entries()) {
     if (traceIds.has(trace.trace_id)) {
@@ -652,6 +707,53 @@ export const datasetBuildSchema = z.object({
   }
 });
 export type DatasetBuild = z.infer<typeof datasetBuildSchema>;
+
+const legacyDatasetBuildV01Schema = z.object({
+  record_type: z.literal("dataset_build"),
+  schema_version: z.literal("dataset-build/0.1"),
+  name: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u),
+  policy_version: z.string().min(1),
+  mode: approvalModeSchema,
+  target: datasetTargetSchema.nullable(),
+  view_recipe: z.literal("trace_full").default("trace_full"),
+  quality_profile: z.enum(["sft_basic", "tool_agent_strict", "research_strict"]).default("research_strict"),
+  compiler_versions: z.object({
+    view: z.literal("trace-full-view/0.2"),
+    quality: z.literal(DATASET_QUALITY_COMPILER_VERSION),
+    dedupe: z.literal("canonical-training-view+shingle-jaccard/0.3"),
+  }).strict(),
+  split_policy: datasetSplitPolicySchema,
+  traces: z.array(z.object({
+    trace_id: z.string().regex(/^[a-f0-9]{32}$/u),
+    split_group_id: z.string().regex(/^[a-f0-9]{64}$/u),
+    group_basis: z.enum(["explicit_hmac", "trace_fallback"]),
+    source_bundle_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    approval_scope_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    eligibility_decision_id: z.string().min(1),
+  }).strict()).min(1).max(10_000),
+}).strict();
+
+export const DATASET_BUILD_MIGRATION_PATHS = Object.freeze({
+  "dataset-build/0.1": DATASET_BUILD_VERSION,
+} as const);
+
+/** Explicitly migrate a frozen v0.1 trace_full selection into v0.2. */
+export function migrateDatasetBuild(input: unknown): DatasetBuild {
+  const current = datasetBuildSchema.safeParse(input);
+  if (current.success) return current.data;
+  const legacy = legacyDatasetBuildV01Schema.parse(input);
+  return datasetBuildSchema.parse({
+    ...legacy,
+    schema_version: DATASET_BUILD_VERSION,
+    view_recipe_version: DATASET_VIEW_RECIPE_VERSIONS.trace_full,
+    compiler_versions: {
+      view: DATASET_VIEW_COMPILER_VERSION,
+      training_view: null,
+      quality: DATASET_QUALITY_COMPILER_VERSION,
+      dedupe: DATASET_DEDUPE_COMPILER_VERSION,
+    },
+  });
+}
 
 export const datasetManifestEntrySchema = z.object({
   trace_id: z.string().regex(/^[a-f0-9]{32}$/u),
@@ -688,7 +790,8 @@ export const datasetManifestSchema = z.object({
   mode: approvalModeSchema,
   target: datasetTargetSchema.nullable(),
   policy_version: z.string().min(1),
-  view_recipe: z.literal("trace_full"),
+  view_recipe: datasetViewRecipeSchema,
+  view_recipe_version: z.string().min(1),
   quality_profile: z.enum(["sft_basic", "tool_agent_strict", "research_strict"]),
   compiler_versions: datasetCompilerVersionsSchema,
   split_policy: datasetSplitPolicySchema,
@@ -703,6 +806,46 @@ export const datasetManifestSchema = z.object({
     bytes: z.number().int().nonnegative(),
   }).strict()).default([]),
 }).strict().superRefine((manifest, context) => {
+  const training = manifest.mode === "training_noncompetitive"
+    || manifest.mode === "training_competitive_distillation";
+  if (training !== (manifest.target !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target"],
+      message: training ? "Training dataset manifests require an exact target" : "Archive and redistribution manifests cannot declare a training target",
+    });
+  }
+  if (manifest.format === "hf-trl" && !training) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["format"],
+      message: "HF/TRL dataset manifests require a training mode",
+    });
+  }
+  if (manifest.view_recipe !== "trace_full" && manifest.format !== "hf-trl") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["view_recipe"],
+      message: "Versioned training-view recipes require HF/TRL dataset format",
+    });
+  }
+  if (manifest.view_recipe_version !== DATASET_VIEW_RECIPE_VERSIONS[manifest.view_recipe]) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["view_recipe_version"],
+      message: "Dataset manifest recipe version does not match the frozen recipe registry",
+    });
+  }
+  const expectedTrainingCompiler = manifest.view_recipe === "trace_full"
+    ? null
+    : DATASET_TRAINING_VIEW_COMPILER_VERSION;
+  if (manifest.compiler_versions.training_view !== expectedTrainingCompiler) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["compiler_versions", "training_view"],
+      message: "Dataset manifest training-view compiler does not match the selected recipe",
+    });
+  }
   const traceIds = new Set<string>();
   const exampleIds = new Set<string>();
   for (const [entryIndex, entry] of manifest.entries.entries()) {

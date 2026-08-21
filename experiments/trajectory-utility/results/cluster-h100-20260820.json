@@ -1,0 +1,169 @@
+{
+  "schema_version": "trajectory-utility-reference-summary/0.1",
+  "reference_id": "qwen2-0.5b-seed3407-cluster-h100-2026-08-20",
+  "status": "complete",
+  "claim_scope": "Independent cluster replication of one narrow synthetic calculator tool-use smoke; not a general proof of trajectory utility.",
+  "model": {
+    "id": "Qwen/Qwen2-0.5B-Instruct",
+    "revision": "c540970f9e29518b1d8f06ab8b24cba66ad77b6d",
+    "model_safetensors_sha256": "130282af0dfa9fe5840737cc49a0d339d06075f83c5a315c3372c9a0740d0b96",
+    "trust_remote_code": false,
+    "local_files_only": true
+  },
+  "seeds": {
+    "data": 20260817,
+    "paired_arm": 3407
+  },
+  "data": {
+    "license": "Apache-2.0",
+    "provenance": "Project-authored deterministic synthetic calculator tasks; no model-generated teacher data.",
+    "training_tasks_per_sft_arm": 96,
+    "held_out_tasks": 32,
+    "train_eval_task_overlap": 0,
+    "input_sha256": {
+      "answer_only": "94d3953866987774bbd23fb28bff53e76ac60a40e6c3217e98dbcc9d3b7c639e",
+      "complete_trajectory": "cf323c771759102a2eafe6a5df445ee6273fa85c75822208209d7940bb2afbd9",
+      "evaluation": "4f3ebc5ac292ac5186862af0b730935c732d133073cc9f03f164a2311ba5c9c2"
+    }
+  },
+  "environment": {
+    "os": "Rocky Linux 8-compatible cluster kernel, x86_64",
+    "python": "3.12.2",
+    "torch": "2.4.0",
+    "cuda_runtime": "12.4",
+    "gpu": "NVIDIA H100 PCIe",
+    "gpu_memory_bytes": 85017493504,
+    "transformers": "4.46.3",
+    "peft": "0.13.2",
+    "deterministic_algorithms": true,
+    "model_loading": "strict_local_files_only",
+    "cluster_egress_observed_during_online_attempt": "unavailable"
+  },
+  "integrity": {
+    "deployed_git_base_revision": "b90c3de",
+    "git_revision_at_run": null,
+    "git_revision_null_reason": "The minimal GPU image did not include git; exact executed code is bound by the source-tree hash.",
+    "experiment_source_tree_sha256": "33bddaf37ec1378a2fa608557e1cc7c60090f1771d6db7f5b2dd4809c90c009b",
+    "config_sha256": "466bfa032576d788d0d09022d2dc8b03be71fbeb8f4bb1311012d03c285a2006",
+    "full_results_sha256": "9d4dced70e4c72d82435cca3b80c92156ed3462cab1d7f02b817d87a81e7db8a",
+    "run_state_sha256": "e98871b35bd29b14908b8aa65882584ec0ac484a4065ab159dde2b3d7a307968",
+    "source_hash_independently_verified": true,
+    "artifact_hashes_verified": {
+      "matched": 10,
+      "total": 10
+    },
+    "raw_predictions_committed": false,
+    "adapter_weights_committed": false
+  },
+  "budget": {
+    "optimizer_steps_per_sft_arm": 60,
+    "micro_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "answer_only_seen_target_tokens": 4140,
+    "complete_trajectory_seen_target_tokens": 6806,
+    "complete_to_answer_token_ratio": 1.643961352657005,
+    "target_token_budget_matched": false
+  },
+  "arms": {
+    "base": {
+      "training": null,
+      "wall_seconds": 24.13702549994923,
+      "peak_gpu_memory_allocated_bytes": 1034261504,
+      "peak_gpu_memory_reserved_bytes": 1080033280,
+      "evaluation_denominator": 32,
+      "counts": {
+        "tool_json_valid": 0,
+        "tool_json_exact": 0,
+        "tool_executable": 0,
+        "tool_outcome_correct": 0,
+        "final_accuracy": 0,
+        "end_to_end_success": 0
+      }
+    },
+    "answer_only_sft": {
+      "optimizer_steps": 60,
+      "supervised_samples": 96,
+      "seen_target_tokens": 4140,
+      "final_loss": 0.316955778747797,
+      "wall_seconds": 125.55840807897039,
+      "training_seconds": 71.62717342702672,
+      "peak_gpu_memory_allocated_bytes": 1646999552,
+      "peak_gpu_memory_reserved_bytes": 1933574144,
+      "adapter_tree_sha256": "f0980a680c4c007edabfe48f12817d4656213b182e598ed4b4b03cbdd4d2a966",
+      "evaluation_denominator": 32,
+      "counts": {
+        "tool_json_valid": 0,
+        "tool_json_exact": 0,
+        "tool_executable": 0,
+        "tool_outcome_correct": 0,
+        "final_accuracy": 1,
+        "end_to_end_success": 0
+      }
+    },
+    "complete_trajectory_sft": {
+      "optimizer_steps": 60,
+      "supervised_samples": 192,
+      "seen_target_tokens": 6806,
+      "final_loss": 0.004343510518083349,
+      "wall_seconds": 166.2591316238977,
+      "training_seconds": 71.97632402786985,
+      "peak_gpu_memory_allocated_bytes": 1902363136,
+      "peak_gpu_memory_reserved_bytes": 2915041280,
+      "adapter_tree_sha256": "dd4fc00ab8a1dfdcab2b57a07731e6006d41302359c22bff4a5f90a74314c8e1",
+      "evaluation_denominator": 32,
+      "counts": {
+        "tool_json_valid": 32,
+        "tool_json_exact": 27,
+        "tool_executable": 32,
+        "tool_outcome_correct": 31,
+        "final_accuracy": 31,
+        "end_to_end_success": 31
+      }
+    }
+  },
+  "paired_complete_vs_answer_only": {
+    "final_accuracy": {
+      "complete_only": 30,
+      "answer_only_only": 0,
+      "both": 1,
+      "neither": 1
+    },
+    "tool_outcome_correct": {
+      "complete_only": 31,
+      "answer_only_only": 0,
+      "both": 0,
+      "neither": 1
+    },
+    "end_to_end_success": {
+      "complete_only": 31,
+      "answer_only_only": 0,
+      "both": 0,
+      "neither": 1
+    }
+  },
+  "adjacent_raw_to_export_evidence": {
+    "scope": "The synthetic DeepSeek Harness demo artifacts were copied to the same cluster persistent volume and rehashed there. They were not the training inputs for this run.",
+    "root_manifest_files_verified": 20,
+    "hf_manifest_files_verified": 10,
+    "dataset_jsonl_sha256": "2594bc5c25d0e9c3c31449b12ac21938c8b9f3abb0cd02ce133a02295fa4a341",
+    "dataset_parquet_sha256": "dd480380ea63060fe641cbc0bf7994fd3119db17258d695557c3681b9faddfca",
+    "lineage_sha256": "1337d0f6a2ab315b2bda126fe6f8a864e51dfa1bbb8bed672a0f672f6bf2d3ae",
+    "provenance_sha256": "ca1347c3dd6c59bf7eb78e11250ad3ba927d841ce5600539ffafb9c9381eb16e",
+    "training_view_report_sha256": "551bdc626c6a61c62ca1687bba31887de1547ccacaa7e93425d1ec1d5f7dd6d3",
+    "trained_by_this_run": false
+  },
+  "total_arm_wall_seconds": 315.9545652028173,
+  "limitations": [
+    "One model revision and one paired seed; no variance estimate across seeds.",
+    "Train and held-out examples are disjoint but share the same synthetic calculator template families.",
+    "Complete-trajectory SFT saw 64.4% more target tokens than answer-only SFT, so the difference is not a causal estimate of representation alone.",
+    "The H100 and RTX 4060 source-tree hashes differ, including the missing-git robustness fix; their agreement is directional rather than a bitwise exact rerun.",
+    "The training records are project-authored DatasetExample fixtures, not captured production DeepSeek Harness trajectories.",
+    "No claim about coding agents, RL, broad reasoning, hidden chain of thought, or provider signature recovery follows from this result."
+  ],
+  "engineering_findings": [
+    "The cluster chart changed from alpha to med and changed GPU keys; the first rendered pod was detected as CPU-only and was not treated as a successful GPU allocation.",
+    "The cluster blocks outbound Hugging Face access; the pinned snapshot was transferred and verified by SHA-256, then the run used strict local-files-only mode.",
+    "The minimal GPU image omitted git; the runner now records a null git revision while retaining a deterministic source-tree hash."
+  ]
+}

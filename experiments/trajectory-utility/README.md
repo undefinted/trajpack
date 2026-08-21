@@ -20,6 +20,21 @@ answers and 0/32 tool successes; base reached 0/32 accuracy. Read the result
 card's limits before citing it: this is a single-seed synthetic smoke test, and
 the complete arm saw 64.4% more target tokens than answer-only.
 
+An independent [H100 cluster replication](results/cluster-h100-20260820.md)
+reached 31/32 tool-using end-to-end successes for complete-trajectory SFT,
+versus 0/32 for answer-only and base. It used the same pinned model, inputs,
+seed, and optimizer-step budget under a different PyTorch/CUDA stack. This is a
+useful engineering replication, but it retains the same single-seed and
+target-token-mismatch limitations.
+
+Both GPU runs consume deterministic DatasetExamples written directly by
+`generate_data.py`; they are not the output of a live provider capture or a
+managed-vault export. The committed two-epoch synthetic Harness artifact is
+separately checked through the exporter-compatible JSONL/Parquet → strict
+ChatML bridge. This separates downstream utility evidence from ETL fidelity
+evidence and avoids claiming a real-provider raw-vault-to-GPU run that has not
+yet been performed.
+
 ## Three controlled arms
 
 | Arm | Training view | Assistant loss targets |
@@ -79,6 +94,16 @@ node experiments/trajectory-utility/validate_with_trajpack.mjs `
 ```
 
 Linux/macOS use the same commands without PowerShell backticks.
+
+The unittest suite also hashes and consumes the committed, completed
+`examples/deepseek-research-demo/artifacts/hf-trl/dataset.jsonl` artifact. It
+passes both exact DeepSeek Harness request epochs through the same strict
+`DatasetExample` → ChatML bridge used by the smoke trainer, then verifies that
+the native tool schema, tool-call target, action/observation context, exposed
+reasoning target, and final answer survive. Deliberately damaged component
+targets fail closed. The demo payload is authored synthetic content; this is
+structural end-to-end evidence for the exporter/trainer boundary, not an
+additional model-quality result.
 
 ## Reproducible GPU run
 

@@ -36,7 +36,7 @@ the original raw envelopes remain present in the rewritten vault.
 - `apps/cli`: capture wrappers, one-shot arm descriptors, collectors, commands,
   and the reviewer server.
 - `apps/reviewer`: local React workbench.
-- `plugins/*`: Codex, Claude Code, and DeepSeek Harness integration bundles.
+- `plugins/*`: Codex, Claude Code, Gemini CLI, and DeepSeek Harness integration bundles.
 - `extensions/chromium`: authorized-site MV3 capture.
 
 ## Determinism and versioning
@@ -47,13 +47,15 @@ adapter and interface versions; DeepSeek Harness compatibility is pinned to
 the `0.1.0-rc.6` interface profile and persistence format 0. Unknown
 persistence versions fail closed.
 
-`dataset-build/0.1` is an immutable recipe rather than a list of mutable paths.
+`dataset-build/0.2` is an immutable recipe rather than a list of mutable paths.
 It binds exact managed trace IDs, source/approval/decision hashes, target model,
 quality profile, group hashes, split ratios, and seed. Split assignment is
 `uint64_be(SHA256(domain || seed || group_id)) mod 10000`; adding an unrelated
-group does not move existing groups. `dataset/0.1` binds the derived view hashes
-and artifact checksums without putting wall-clock time or output paths into the
-dataset identity.
+group does not move existing groups. It freezes a versioned view recipe and its
+compiler. `dataset/0.2` binds the derived view hashes and artifact checksums
+without putting wall-clock time or output paths into the dataset identity;
+`dataset-audit/0.3` fingerprints every compiled `(trace_id, view_id)` example,
+including each `trace_full` session/branch.
 
 Schema upgrades require an explicit migration. A normalizer must never silently
 rewrite an existing `trajectory/0.1` vault.

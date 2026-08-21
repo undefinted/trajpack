@@ -153,6 +153,89 @@ describe("exporters", () => {
     expect(publicCore).not.toHaveProperty("compileTrainingView");
   });
 
+  it("inventories opaque provider state while keeping its bytes out of plaintext export", async () => {
+    const secret = "opaque-provider-state-must-never-escape-the-vault";
+    const bundle = genericExportBundle("observable answer");
+    const payload = {
+      type: "assistant",
+      content: [
+        { type: "thinking", thinking: "provider summary", signature: secret },
+        { type: "redacted_thinking", data: `${secret}-redacted` },
+      ],
+    };
+    bundle.manifest.source.interface_version = "generic_json";
+    bundle.raw = [{
+      envelope_version: "raw/0.1",
+      adapter: "manual_import",
+      adapter_version: "0.1.0",
+      interface_version: "generic_json",
+      captured_at: "2026-08-21T00:00:00.000Z",
+      sequence: 0,
+      source_event_id: "opaque-fixture-0",
+      session_id: "opaque-fixture",
+      turn_id: null,
+      payload_sha256: sha256(canonicalJson(payload)),
+      payload,
+    }];
+    bundle.manifest.lineage.raw_sha256 = sha256(canonicalJson(bundle.raw));
+    reapprove(bundle);
+
+    const root = await mkdtemp(join(tmpdir(), "trajpack-opaque-export-"));
+    try {
+      const output = join(root, "canonical");
+      const result = await exportApprovedBundle(bundle, {
+        format: "canonical",
+        mode: "archive",
+        outputDirectory: output,
+      });
+      const report = JSON.parse(await readFile(join(output, "opaque-reasoning-report.json"), "utf8")) as {
+        total_count: number;
+        handling: string;
+      };
+      expect(report).toMatchObject({ total_count: 2, handling: "vault_only" });
+      for (const path of result.files) {
+        expect(await readFile(path, "utf8")).not.toContain(secret);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed without publishing output when the opaque-state scan is truncated", async () => {
+    const bundle = genericExportBundle("observable answer");
+    let payload: Record<string, unknown> = { terminal: "value" };
+    for (let depth = 0; depth < 66; depth += 1) payload = { nested: payload };
+    bundle.manifest.source.interface_version = "generic_json";
+    bundle.raw = [{
+      envelope_version: "raw/0.1",
+      adapter: "manual_import",
+      adapter_version: "0.1.0",
+      interface_version: "generic_json",
+      captured_at: "2026-08-21T00:00:00.000Z",
+      sequence: 0,
+      source_event_id: "opaque-depth-fixture-0",
+      session_id: "opaque-depth-fixture",
+      turn_id: null,
+      payload_sha256: sha256(canonicalJson(payload)),
+      payload,
+    }];
+    bundle.manifest.lineage.raw_sha256 = sha256(canonicalJson(bundle.raw));
+    reapprove(bundle);
+
+    const root = await mkdtemp(join(tmpdir(), "trajpack-opaque-truncated-"));
+    try {
+      const output = join(root, "canonical");
+      await expect(exportApprovedBundle(bundle, {
+        format: "canonical",
+        mode: "archive",
+        outputDirectory: output,
+      })).rejects.toThrow("opaque provider-state inventory exceeded its scan limits");
+      await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("exports an explicit provider-exposed reasoning recipe with its evidence report", async () => {
     const bundle = fixtureBundle("Inspect the repository first.");
     bundle.manifest.source.host = "manual_import";

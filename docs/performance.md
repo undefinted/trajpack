@@ -33,23 +33,23 @@ TRAJPACK_BENCH_EVENTS=50000 pnpm bench:scale
 
 | Path / 路径 | events/s | MiB/s | peak RSS delta |
 |---|---:|---:|---:|
-| Legacy JSONL `map().join()` | 378,582 | 109.0 | 109.4 MiB |
-| Current 1 MiB streaming JSONL | 382,818 | 110.2 | 8.5 MiB |
-| Legacy whole-array lineage hash | 543,984 | 156.6 | 85.1 MiB |
-| Current incremental lineage hash | 556,443 | 160.1 | 1.0 MiB |
-| Legacy vault, one write per frame | 7,847 | 4.8 | 265.6 MiB |
-| Current vault, 1 MiB ciphertext batches | 43,368 | 26.8 | 331.4 MiB |
+| Legacy JSONL `map().join()` | 741,510 | 213.4 | 108.5 MiB |
+| Current 1 MiB streaming JSONL | 691,817 | 199.1 | 7.6 MiB |
+| Legacy whole-array lineage hash | 845,260 | 243.3 | 85.6 MiB |
+| Current incremental lineage hash | 949,705 | 273.3 | 0.6 MiB |
+| Legacy vault, one write per frame | 30,543 | 18.8 | 265.4 MiB |
+| Current vault, 1 MiB ciphertext batches | 85,887 | 53.0 | 325.2 MiB |
 
 The old and incremental lineage hashes were identical:
 `94fcc0dfcd4f68e3b3e6ff335b8ad0ffab75ae33df8ba5fc5589e6c9ae71896b`.
 Streaming JSONL produced the same byte count. Vault RSS includes Argon2id memory;
 the ciphertext batch itself is bounded to 1 MiB. This run measured comparable
-JSONL throughput and roughly 92% lower RSS overhead; the implementation treats
+JSONL throughput and roughly 93% lower RSS overhead; the implementation treats
 bounded memory, rather than a throughput increase, as the portable guarantee.
 
 新旧 lineage hash 完全一致；流式 JSONL 的字节数也一致。Vault RSS 包含
 Argon2id 内存，密文批缓冲本身限制为 1 MiB。本次 JSONL 吞吐接近且实测 RSS
-开销降低约 92%；跨机器可承诺的是有界内存，而不是一定提高吞吐。
+开销降低约 93%；跨机器可承诺的是有界内存，而不是一定提高吞吐。
 
 ## Hard bounds and degradation / 硬上限与退化策略
 
@@ -60,6 +60,11 @@ Argon2id 内存，密文批缓冲本身限制为 1 MiB。本次 JSONL 吞吐接�
 - CaptureSession: at most 1,024 pending direct ingests by default, configurable
   to 65,536. DeepSeek sequence state is O(sessions), while dedupe remains
   content-bound and bounded by the event limit.
+- DeepSeek Harness plugin pre-collector queue: 1,024 events/16 MiB per session,
+  4,096 events/64 MiB process-wide, and at most 1,024 live session states. A
+  quota, serialization, or delivery failure latches the capture and makes both
+  session-scoped and global `session/flush` fail instead of growing an
+  unbounded promise chain.
 - Vault: 512 MiB file, 1,000,000 records, 96 MiB per authenticated frame.
   Ciphertext flush batches default to 1 MiB and cannot exceed 8 MiB.
 - Reviewer: 2 active Argon2/decrypted requests and 16 FIFO waiters by default;
@@ -67,21 +72,28 @@ Argon2id 内存，密文批缓冲本身限制为 1 MiB。本次 JSONL 吞吐接�
   and cannot retain a lease.
 - Dataset JSONL: fixed 64 KiB read buffer and 64 MiB row limit. Whole split
   size is streamed up to Node's exact file-size range; callers may tighten the
-  bound. v0.1 dataset planning still has a 256 MiB estimated resident-bundle
-  budget, and standalone dataset-directory validation has a 4 GiB aggregate
-  inspection budget. Split larger experiments or raise these explicit future
-  compiler/validator budgets rather than bypassing them.
+  bound. Dataset planning and standalone validation use a 256 MiB estimated
+  resident budget covering selected bundles, per-trace examples, recipe
+  reports, authenticated compilations, and aggregate Parquet-comparison rows.
+  Directory hashing additionally has a 4 GiB aggregate inspection budget.
+  Split larger experiments or raise explicit future compiler/validator budgets
+  rather than bypassing them.
 
 - Collector 默认同时解析 4 个请求（最高 64），接受事件 100,000 条、raw
   128 MiB、无效尝试 64 次；可配置上限分别为 1,000,000、192 MiB、1,024。
   hook/browser 请求体上限为 8/20 MiB。
 - CaptureSession 默认最多积压 1,024 个直接 ingest（最高 65,536）。
+- DeepSeek Harness 插件在 collector 之前限制为单 session 1,024 条/16 MiB、
+  全进程 4,096 条/64 MiB，且最多保留 1,024 个活跃 session 状态；超限或传输
+  失败会 latch，并使 session 级与全局 flush 都失败。
 - Vault 上限为 512 MiB、1,000,000 条记录、单认证 frame 96 MiB；密文批写
   默认 1 MiB，最高 8 MiB。
 - Reviewer 默认 2 个活跃解密任务和 16 个 FIFO 等待者（最高 8/128）；断连
   等待者会取消，不会泄漏并发槽。
 - Dataset JSONL 使用固定 64 KiB 缓冲和 64 MiB 单行上限，整个 split 流式读取。
-  v0.1 仍有 256 MiB bundle 常驻估算预算，独立目录验证总检查预算为 4 GiB。
+  planning/validation 的 256 MiB 常驻估算同时覆盖 bundle、per-trace
+  example、recipe report、compilation 和 Parquet 对照行；目录哈希另有 4 GiB
+  总检查预算。
 
 HTTP degradation is explicit:
 

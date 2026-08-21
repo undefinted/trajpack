@@ -69,7 +69,11 @@ event-specific projections:
 - `BeforeAgent.prompt` and `AfterAgent.prompt_response` become visible user and
   assistant messages.
 - `BeforeModel.llm_request` / `BeforeToolSelection.llm_request` and
-  `AfterModel.llm_response` retain the stable model projection and usage.
+  `AfterModel.llm_response` retain a reviewable observation and usage, but are
+  excluded from training. Gemini CLI's current hook translator can collapse
+  `{text, thought?}` parts into plain strings, so these records cannot reliably
+  distinguish answer text from thought summaries. `AfterAgent.prompt_response`
+  is the authoritative final answer used by generic recipes.
 - `BeforeTool.tool_name` + `tool_input` and `AfterTool.tool_response` retain
   tool I/O. The stable hook schema has no tool-call ID, so the adapter uses a
   deterministic synthetic correlation ID and marks it as synthetic.
@@ -82,10 +86,11 @@ Gemini sanitizes extension environments. `trajpack capture gemini` and
 `trajpack arm gemini` therefore place an expiring, cwd-bound capability at
 `~/.trajpack/runtime/arm-gemini_cli.json`; direct `TRAJPACK_*` variables remain
 supported for controlled tests and compatible launches. The forwarder accepts
-only authenticated loopback HTTP, rejects unsafe file permissions, expiry and
-cwd mismatch, emits only Gemini's inert JSON hook response, and never creates a
-plaintext spool. Hooks expose neither hidden reasoning nor a stable subagent
-topology, so this adapter emits no reasoning or fabricated child-agent events.
+only authenticated loopback HTTP, rejects expiry and cwd mismatch, validates
+owner/mode permissions on POSIX, relies on the user's profile ACL on Windows,
+emits only Gemini's inert JSON hook response, and never creates a plaintext
+spool. Hooks expose neither hidden reasoning nor a stable subagent topology, so
+this adapter emits no reasoning or fabricated child-agent events.
 
 ## DeepSeek Harness
 
@@ -146,6 +151,12 @@ failures reject the checkpoint. The durable `request/header.data.header.config`
 provider/model pair is reconciled with the capsule route and the declared
 teacher; the evidence digest is recorded in the manifest without claiming a
 provider signature.
+
+The plugin queue is bounded before HTTP delivery: 1,024 events/16 MiB per
+session and 4,096 events/64 MiB across the process. Serialization, quota, or
+transport failure latches the affected capture, rejects its flush, and admits
+no later events. This bounds slow/offline-collector memory instead of allowing
+an unbounded promise-chain backlog.
 
 ## Native compatibility and validation status
 

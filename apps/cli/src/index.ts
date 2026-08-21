@@ -15,7 +15,7 @@ import {
 } from "./commands.js";
 import { runImport } from "./import-command.js";
 import { runDoctor } from "./doctor.js";
-import { runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
+import { runDatasetMigrate, runDatasetPlan, type DatasetPlanOptions } from "./dataset-command.js";
 import {
   DEFAULT_MAX_CONCURRENT_REVIEW_VAULT_REQUESTS,
   DEFAULT_MAX_QUEUED_REVIEW_VAULT_REQUESTS,
@@ -186,6 +186,9 @@ dataset.command("plan")
   .option("--validation <basis-points>", "validation ratio in basis points", "1000")
   .option("--test <basis-points>", "test ratio in basis points", "1000")
   .option("--group-map <json>", "private trace-id to repo/task-family alias map; aliases are hashed before storage")
+  .addOption(new Option("--recipe <recipe>", "frozen dataset view; non-trace_full recipes require a training mode and HF/TRL export")
+    .choices(["trace_full", "answer_sft", "reasoning_sft", "tool_use_sft", "deepseek_epoch_sft", "failure_recovery", "subagent_handoff", "pointwise_reward_rl_ready"])
+    .default("trace_full"))
   .addOption(new Option("--quality-profile <profile>").choices(["sft_basic", "tool_agent_strict", "research_strict"]).default("research_strict"))
   .option("--target-model-owner <name>")
   .option("--target-product <name>")
@@ -193,6 +196,12 @@ dataset.command("plan")
 For multi-trace research_strict builds, --group-map must cover every selected
 trace exactly once. The output parent must exist and the build file must be new.`)
   .action(async (traceIds: string[], options: DatasetPlanOptions) => { await runDatasetPlan(traceIds, options); });
+
+dataset.command("migrate")
+  .description("Explicitly migrate a historical frozen dataset build into the current schema")
+  .argument("<input>", "historical dataset-build JSON")
+  .requiredOption("--output <file>", "new migrated dataset-build JSON file")
+  .action(async (input: string, options: { output: string }) => { await runDatasetMigrate(input, options.output); });
 
 const policy = program.command("policy").description("Explain and manage scoped policy evidence");
 policy.command("explain").argument("<selection>").action(runPolicyExplain);

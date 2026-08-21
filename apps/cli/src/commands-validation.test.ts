@@ -1,13 +1,14 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DatasetBuild } from "@trajpack/schema";
+import type { DatasetBuild, TraceBundle } from "@trajpack/schema";
 import {
   POLICY_VERSION,
   CURRENT_DATASET_COMPILER_VERSIONS,
   approvalFingerprint,
   canonicalJson,
   createApprovalScope,
+  datasetCompilerVersionsForRecipe,
   exportApprovedDataset,
   explicitGroupId,
   sha256,
@@ -56,12 +57,13 @@ describe("dataset directory validation", () => {
     const scope = bundle.manifest.review.approval_scope!;
     const build: DatasetBuild = {
       record_type: "dataset_build",
-      schema_version: "dataset-build/0.1",
+      schema_version: "dataset-build/0.2",
       name: "validation-fixture",
       policy_version: POLICY_VERSION,
       mode: "archive",
       target: null,
       view_recipe: "trace_full",
+      view_recipe_version: "trace-full-view/0.2",
       quality_profile: "sft_basic",
       compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
       split_policy: {
@@ -81,7 +83,7 @@ describe("dataset directory validation", () => {
     const output = join(root, "dataset");
     await exportApprovedDataset(build, [bundle], { format: "canonical", outputDirectory: output });
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    expect(await runValidate(output)).toBe(true);
+    expect(await runValidate(output), String(stdout.mock.calls.at(-1)?.[0])).toBe(true);
     expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining('"integrity_valid": true'));
     expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining('"self_consistent": true'));
     expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining('"training_eligibility_attestation_present": false'));
@@ -137,12 +139,13 @@ describe("dataset directory validation", () => {
     const scope = bundle.manifest.review.approval_scope!;
     const build: DatasetBuild = {
       record_type: "dataset_build",
-      schema_version: "dataset-build/0.1",
+      schema_version: "dataset-build/0.2",
       name: "rederive-fixture",
       policy_version: POLICY_VERSION,
       mode: "archive",
       target: null,
       view_recipe: "trace_full",
+      view_recipe_version: "trace-full-view/0.2",
       quality_profile: "sft_basic",
       compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
       split_policy: {
@@ -230,12 +233,13 @@ describe("dataset directory validation", () => {
     const scope = bundle.manifest.review.approval_scope!;
     const build: DatasetBuild = {
       record_type: "dataset_build",
-      schema_version: "dataset-build/0.1",
+      schema_version: "dataset-build/0.2",
       name: "validation-hf-fixture",
       policy_version: POLICY_VERSION,
       mode: "training_competitive_distillation",
       target: { model_owner: "owner", product: "open-model" },
       view_recipe: "trace_full",
+      view_recipe_version: "trace-full-view/0.2",
       quality_profile: "sft_basic",
       compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
       split_policy: {
@@ -255,7 +259,7 @@ describe("dataset directory validation", () => {
     const output = join(root, "dataset");
     await exportApprovedDataset(build, [bundle], { format: "hf-trl", outputDirectory: output });
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    expect(await runValidate(output)).toBe(true);
+    expect(await runValidate(output), String(stdout.mock.calls.at(-1)?.[0])).toBe(true);
 
     const jsonlPath = join(output, "splits", "train", "dataset.jsonl");
     const example = JSON.parse((await readFile(jsonlPath, "utf8")).trim()) as {
@@ -276,5 +280,65 @@ describe("dataset directory validation", () => {
     await rebindChecksums(output, `lineage/traces/${bundle.manifest.trace_id}/provenance.json`);
     expect(await runValidate(output)).toBe(false);
     expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining(`selected_bundle:${bundle.manifest.trace_id}`));
+  });
+
+  it("validates the committed two-epoch DeepSeek dataset report without reopening raw capsules", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dataset-validate-deepseek-"));
+    temporaryDirectories.push(root);
+    const fixturePath = new URL("../../../examples/deepseek-research-demo/artifacts/approved/approved.trace.json", import.meta.url);
+    const bundle = JSON.parse(await readFile(fixturePath, "utf8")) as TraceBundle;
+    const scope = bundle.manifest.review.approval_scope!;
+    const build: DatasetBuild = {
+      record_type: "dataset_build",
+      schema_version: "dataset-build/0.2",
+      name: "deepseek-two-epoch-validation",
+      policy_version: POLICY_VERSION,
+      mode: "training_competitive_distillation",
+      target: { model_owner: "trajpack-demo", product: "local-research-student" },
+      view_recipe: "deepseek_epoch_sft",
+      view_recipe_version: "deepseek-exact-request-epoch-sft/0.1",
+      quality_profile: "sft_basic",
+      compiler_versions: datasetCompilerVersionsForRecipe("deepseek_epoch_sft"),
+      split_policy: {
+        algorithm: "sha256-group-threshold-v1",
+        seed: "deepseek-two-epoch-validation",
+        ratios_bp: { train: 10_000, validation: 0, test: 0 },
+      },
+      traces: [{
+        trace_id: bundle.manifest.trace_id,
+        split_group_id: explicitGroupId("deepseek-two-epoch", Buffer.alloc(32, 0x47)),
+        group_basis: "explicit_hmac",
+        source_bundle_sha256: approvalFingerprint(bundle),
+        approval_scope_sha256: sha256(canonicalJson(scope)),
+        eligibility_decision_id: bundle.manifest.eligibility.training_competitive_distillation.decision_id,
+      }],
+    };
+    const output = join(root, "dataset");
+    await exportApprovedDataset(build, [bundle], { format: "hf-trl", outputDirectory: output });
+    const audit = JSON.parse(await readFile(join(output, "dataset-audit.json"), "utf8")) as {
+      schema_version: string;
+      training_views: unknown[];
+      near_duplicate_scan: { record_count: number };
+    };
+    expect(audit).toMatchObject({
+      schema_version: "dataset-audit/0.3",
+      near_duplicate_scan: { record_count: 2 },
+    });
+    expect(audit.training_views).toHaveLength(2);
+
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(await runValidate(output), String(stdout.mock.calls.at(-1)?.[0])).toBe(true);
+    expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining("encrypted raw request epochs"));
+
+    const reportRelative = `lineage/traces/${bundle.manifest.trace_id}/training-view-report.json`;
+    const reportPath = join(output, ...reportRelative.split("/"));
+    const report = JSON.parse(await readFile(reportPath, "utf8")) as {
+      views: Array<{ metadata: Record<string, unknown> }>;
+    };
+    report.views[0]!.metadata.epoch_input_sha256 = "f".repeat(64);
+    await writeFile(reportPath, `${canonicalJson(report)}\n`);
+    await rebindChecksums(output, reportRelative);
+    expect(await runValidate(output)).toBe(false);
+    expect(stdout).toHaveBeenLastCalledWith(expect.stringContaining(`training_view_report:${bundle.manifest.trace_id}`));
   });
 });

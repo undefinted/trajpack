@@ -2,17 +2,18 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DatasetBuild, TraceBundle } from "@trajpack/schema";
+import { DATASET_BUILD_VERSION, DATASET_VIEW_RECIPE_VERSIONS, type DatasetBuild, type TraceBundle } from "@trajpack/schema";
 import { ParquetReader } from "@dsnp/parquetjs";
 import { describe, expect, it } from "vitest";
 import { approvalFingerprint, createApprovalScope, POLICY_VERSION } from "./policy.js";
 import { canonicalJson, sha256 } from "./canonical.js";
 import {
-  CURRENT_DATASET_COMPILER_VERSIONS,
   DATASET_NEAR_DUPLICATE_CONFIG,
   computeDatasetId,
+  datasetCompilerVersionsForRecipe,
   explicitGroupId,
   exportApprovedDataset,
+  inspectDatasetBuild,
   inspectDatasetNearDuplicateFeatureSets,
   MAX_DATASET_STAGING_JSONL_BYTES,
   readDatasetJsonLines,
@@ -69,6 +70,11 @@ function appendMessage(bundle: TraceBundle, text: string, suffix: string): void 
   });
 }
 
+function appendAssistantMessage(bundle: TraceBundle, text: string, suffix: string): void {
+  appendMessage(bundle, text, suffix);
+  bundle.events.at(-1)!.actor = "assistant";
+}
+
 function appendToolPair(bundle: TraceBundle, argument: string, result: string, suffix: string): void {
   const base = bundle.events[0]!;
   const callId = `call_${suffix}`;
@@ -102,22 +108,48 @@ function groupForSplit(policy: DatasetBuild["split_policy"], split: "train" | "t
   throw new Error(`Unable to find deterministic ${split} fixture group`);
 }
 
+function branchingBundle(traceId: string, uniqueAnswer: string): TraceBundle {
+  const bundle = distinctBundle(traceId, "shared branch prompt", true);
+  const root = bundle.events[0]!;
+  root.actor = "user";
+  root.source_session_id = `session-${traceId}`;
+  root.metadata.source_parent_message_id = null;
+  const answer = (value: string, suffix: string, sequence: number) => {
+    const event = structuredClone(root);
+    event.event_id = `branch-${traceId}-${suffix}`;
+    event.span_id = sha256(`branch:${traceId}:${suffix}`).slice(0, 16);
+    event.parent_span_id = root.span_id;
+    event.sequence = sequence;
+    event.actor = "assistant" as const;
+    event.source_event_id = `source-${traceId}-${suffix}`;
+    event.content[0]!.value = value;
+    event.content[0]!.sha256 = sha256(value);
+    event.metadata.source_parent_message_id = root.event_id;
+    return event;
+  };
+  bundle.events = [root, answer("shared branch answer", "shared", 1), answer(uniqueAnswer, "unique", 2)];
+  reapprove(bundle);
+  return bundle;
+}
+
 function buildFor(
   bundles: TraceBundle[],
   overrides: Partial<DatasetBuild> = {},
   explicit = true,
 ): DatasetBuild {
   const mode = overrides.mode ?? "archive";
+  const viewRecipe = overrides.view_recipe ?? "trace_full";
   return {
     record_type: "dataset_build",
-    schema_version: "dataset-build/0.1",
+    schema_version: DATASET_BUILD_VERSION,
     name: "fixture-dataset",
     policy_version: POLICY_VERSION,
     mode,
     target: mode.startsWith("training_") ? { model_owner: "owner", product: "open-model" } : null,
-    view_recipe: "trace_full",
+    view_recipe: viewRecipe,
+    view_recipe_version: DATASET_VIEW_RECIPE_VERSIONS[viewRecipe],
     quality_profile: "sft_basic",
-    compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
+    compiler_versions: datasetCompilerVersionsForRecipe(viewRecipe),
     split_policy: {
       algorithm: "sha256-group-threshold-v1",
       seed: "fixture-seed",
@@ -558,6 +590,128 @@ describe("research dataset builds", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("freezes and exports one versioned training recipe across a multi-trace dataset", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dataset-recipe-"));
+    const bundles = [
+      distinctBundle("a".repeat(32), "first licensed assistant answer", true),
+      distinctBundle("b".repeat(32), "second licensed assistant answer", true),
+    ];
+    const build = buildFor(bundles, {
+      mode: "training_competitive_distillation",
+      target: { model_owner: "owner", product: "open-model" },
+      view_recipe: "answer_sft",
+      quality_profile: "sft_basic",
+      split_policy: {
+        algorithm: "sha256-group-threshold-v1",
+        seed: "recipe-fixture",
+        ratios_bp: { train: 10_000, validation: 0, test: 0 },
+      },
+    });
+    const output = join(root, "dataset");
+    try {
+      const result = await exportApprovedDataset(build, bundles, {
+        format: "hf-trl",
+        outputDirectory: output,
+        createdAt: new Date("2026-08-16T04:00:00.000Z"),
+      });
+      expect(result.manifest.view_recipe).toBe("answer_sft");
+      const rows = (await readFile(join(output, "splits", "train", "dataset.jsonl"), "utf8"))
+        .split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ metadata: expect.objectContaining({
+          view: expect.objectContaining({ recipe: "answer_sft", recipe_version: "answer-sft/0.1" }),
+        }) }),
+      ]));
+      for (const bundle of bundles) {
+        const report = JSON.parse(await readFile(join(
+          output,
+          "lineage",
+          "traces",
+          bundle.manifest.trace_id,
+          "training-view-report.json",
+        ), "utf8")) as Record<string, unknown>;
+        expect(report).toMatchObject({ recipe: "answer_sft", recipe_version: "answer-sft/0.1" });
+      }
+      await expect(exportApprovedDataset(build, bundles, {
+        format: "canonical",
+        outputDirectory: join(root, "not-hf"),
+      })).rejects.toThrow("available only for HF/TRL");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("audits every compiled view and blocks a duplicated answer view across splits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dataset-recipe-view-dedupe-"));
+    const left = distinctBundle("1".repeat(32), "shared licensed answer", true);
+    const right = distinctBundle("2".repeat(32), "shared licensed answer", true);
+    appendAssistantMessage(left, "left-only continuation", "answer-left");
+    appendAssistantMessage(right, "right-only continuation", "answer-right");
+    reapprove(left);
+    reapprove(right);
+    const splitPolicy: DatasetBuild["split_policy"] = {
+      algorithm: "sha256-group-threshold-v1",
+      seed: "recipe-view-cross-split",
+      ratios_bp: { train: 5000, validation: 0, test: 5000 },
+    };
+    const build = buildFor([left, right], {
+      mode: "training_competitive_distillation",
+      target: { model_owner: "owner", product: "open-model" },
+      view_recipe: "answer_sft",
+      quality_profile: "sft_basic",
+      split_policy: splitPolicy,
+    });
+    build.traces[0]!.split_group_id = groupForSplit(splitPolicy, "train");
+    build.traces[1]!.split_group_id = groupForSplit(splitPolicy, "test");
+    try {
+      const audit = inspectDatasetBuild(build, [left, right]);
+      expect(audit.training_views).toHaveLength(4);
+      expect(audit.near_duplicate_scan.record_count).toBe(4);
+      expect(audit.blocked_reasons).toContain("DATASET_EXACT_CROSS_SPLIT_DUPLICATE");
+      await expect(exportApprovedDataset(build, [left, right], {
+        format: "hf-trl",
+        outputDirectory: join(root, "blocked"),
+      })).rejects.toThrow("DATASET_EXACT_CROSS_SPLIT_DUPLICATE");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates each trace_full branch instead of hiding overlap in the whole trace", () => {
+    const left = branchingBundle("3".repeat(32), "left-only branch");
+    const right = branchingBundle("4".repeat(32), "right-only branch");
+    const splitPolicy: DatasetBuild["split_policy"] = {
+      algorithm: "sha256-group-threshold-v1",
+      seed: "trace-full-branch-cross-split",
+      ratios_bp: { train: 5000, validation: 0, test: 5000 },
+    };
+    const build = buildFor([left, right], {
+      mode: "training_competitive_distillation",
+      target: { model_owner: "owner", product: "open-model" },
+      view_recipe: "trace_full",
+      quality_profile: "sft_basic",
+      split_policy: splitPolicy,
+    });
+    build.traces[0]!.split_group_id = groupForSplit(splitPolicy, "train");
+    build.traces[1]!.split_group_id = groupForSplit(splitPolicy, "test");
+    const audit = inspectDatasetBuild(build, [left, right]);
+    expect(audit.training_views).toHaveLength(4);
+    expect(audit.near_duplicate_scan.record_count).toBe(4);
+    expect(audit.blocked_reasons).toContain("DATASET_EXACT_CROSS_SPLIT_DUPLICATE");
+  });
+
+  it("blocks a frozen recipe when a selected trace has no eligible view", () => {
+    const bundle = distinctBundle("c".repeat(32), "answer-only trace", true);
+    const build = buildFor([bundle], {
+      mode: "training_competitive_distillation",
+      target: { model_owner: "owner", product: "open-model" },
+      view_recipe: "tool_use_sft",
+      quality_profile: "sft_basic",
+    });
+    expect(() => inspectDatasetBuild(build, [bundle])).toThrow("VIEW_RECIPE_NO_ELIGIBLE_VIEWS");
   });
 
   it.skipIf(!HAS_HF_PYTHON)("loads native nested Parquet with Hugging Face Datasets when the optional Python stack is installed", async () => {

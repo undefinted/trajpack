@@ -20,12 +20,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from training_bridge import (
+    BRIDGE_VERSION,
+    assistant_payload,
+    render_generation_prompt,
+    supervised_samples,
+)
 from validate_data import read_jsonl, validate_suite
 
 
-RUNNER_VERSION = "trajectory-utility-runner/0.1"
+RUNNER_VERSION = "trajectory-utility-runner/0.2"
 ARM_ORDER = ("base", "answer_only_sft", "complete_trajectory_sft")
 
 
@@ -77,72 +83,6 @@ def create_fresh_output(path: Path) -> None:
 
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def assistant_payload(message: dict[str, Any]) -> str:
-    calls = message.get("tool_calls")
-    if calls is not None:
-        if not isinstance(calls, list) or len(calls) != 1:
-            raise ValueError("the smoke renderer requires exactly one tool call per assistant turn")
-        function = calls[0]["function"]
-        arguments = json.loads(function["arguments"])
-        return compact_json({"name": function["name"], "arguments": arguments})
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise ValueError("assistant target content must be text or a single native tool call")
-    return content
-
-
-def message_payload(message: dict[str, Any]) -> str:
-    role = message["role"]
-    if role == "assistant":
-        return assistant_payload(message)
-    if role == "tool":
-        return compact_json({
-            "tool_call_id": message["tool_call_id"],
-            "output": str(message.get("content", "")),
-        })
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise ValueError(f"{role} message content must be text")
-    return content
-
-
-def render_message(message: dict[str, Any]) -> str:
-    return f"<|im_start|>{message['role']}\n{message_payload(message)}<|im_end|>\n"
-
-
-def render_generation_prompt(messages: Iterable[dict[str, Any]]) -> str:
-    return "".join(render_message(message) for message in messages) + "<|im_start|>assistant\n"
-
-
-def supervised_samples(records: list[dict[str, Any]], tokenizer: Any, max_length: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    samples: list[dict[str, Any]] = []
-    prompt_tokens = 0
-    target_tokens = 0
-    for record in records:
-        messages = record["messages"]
-        for index, enabled in enumerate(record["assistant_loss_mask"]):
-            if not enabled:
-                continue
-            prompt = render_generation_prompt(messages[:index])
-            completion = assistant_payload(messages[index]) + "<|im_end|>\n"
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            completion_ids = tokenizer.encode(completion, add_special_tokens=False)
-            if len(completion_ids) >= max_length:
-                raise ValueError(f"target for {record['id']} exceeds max_length")
-            if len(prompt_ids) + len(completion_ids) > max_length:
-                prompt_ids = prompt_ids[-(max_length - len(completion_ids)):]
-            input_ids = prompt_ids + completion_ids
-            labels = [-100] * len(prompt_ids) + completion_ids
-            if not completion_ids or all(label == -100 for label in labels):
-                raise ValueError(f"empty assistant completion for {record['id']}")
-            samples.append({"input_ids": input_ids, "labels": labels, "source_id": record["id"]})
-            prompt_tokens += len(prompt_ids)
-            target_tokens += len(completion_ids)
-    if not samples:
-        raise ValueError("training data has no assistant loss targets")
-    return samples, {"samples": len(samples), "prompt_tokens": prompt_tokens, "target_tokens": target_tokens}
 
 
 class SupervisedDataset:
@@ -222,6 +162,16 @@ def load_model(
     return model, resolved_revision
 
 
+def validate_training_step_config(train_config: dict[str, Any]) -> None:
+    for knob in ("max_steps", "micro_batch_size", "gradient_accumulation_steps"):
+        value = train_config.get(knob)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"train.{knob} must be a positive integer")
+    warmup_steps = train_config.get("warmup_steps")
+    if isinstance(warmup_steps, bool) or not isinstance(warmup_steps, int) or warmup_steps < 0:
+        raise ValueError("train.warmup_steps must be a non-negative integer")
+
+
 def train_adapter(
     stack: dict[str, Any],
     model: Any,
@@ -233,9 +183,7 @@ def train_adapter(
     adapter_dir: Path,
 ) -> tuple[Any, dict[str, Any]]:
     torch = stack["torch"]
-    for knob in ("max_steps", "micro_batch_size", "gradient_accumulation_steps", "warmup_steps"):
-        if knob not in train_config or not isinstance(train_config[knob], int) or train_config[knob] < 1:
-            raise ValueError(f"train.{knob} must be a positive integer")
+    validate_training_step_config(train_config)
     samples, token_stats = supervised_samples(records, tokenizer, int(train_config["max_length"]))
     lora = stack["LoraConfig"](
         task_type=stack["TaskType"].CAUSAL_LM,
@@ -339,8 +287,16 @@ def strip_model_text(value: str) -> str:
     return value.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
 
 
-def generate_text(torch: Any, model: Any, tokenizer: Any, messages: list[dict[str, Any]], device: Any, max_new_tokens: int) -> str:
-    prompt = render_generation_prompt(messages)
+def generate_text(
+    torch: Any,
+    model: Any,
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    device: Any,
+    max_new_tokens: int,
+) -> str:
+    prompt = render_generation_prompt(messages, tools)
     encoded = tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").to(device)
     attention = torch.ones_like(encoded)
     terminator = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -368,6 +324,14 @@ def parse_tool_call(text: str) -> tuple[bool, str | None, str | None]:
         value = json.loads(text)
     except json.JSONDecodeError as error:
         return False, None, f"invalid_json:{error.msg}"
+    if isinstance(value, dict) and value.get("protocol") == "trajpack-assistant-envelope/0.2":
+        calls = value.get("tool_calls")
+        if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+            return False, None, "wrong_envelope_tool_call_count"
+        function = calls[0].get("function")
+        if not isinstance(function, dict):
+            return False, None, "wrong_envelope_tool_shape"
+        value = {"name": function.get("name"), "arguments": function.get("arguments")}
     if not isinstance(value, dict) or set(value) != {"name", "arguments"}:
         return False, None, "wrong_top_level_shape"
     arguments = value.get("arguments")
@@ -411,6 +375,14 @@ def parse_final(text: str) -> tuple[bool, int | None, str | None]:
         value = json.loads(text)
     except json.JSONDecodeError as error:
         return False, None, f"invalid_json:{error.msg}"
+    if isinstance(value, dict) and value.get("protocol") == "trajpack-assistant-envelope/0.2":
+        content = value.get("content")
+        if not isinstance(content, str):
+            return False, None, "missing_envelope_content"
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError as error:
+            return False, None, f"invalid_envelope_content:{error.msg}"
     if not isinstance(value, dict) or set(value) != {"answer"}:
         return False, None, "wrong_final_shape"
     answer = value["answer"]
@@ -428,7 +400,8 @@ def evaluate(torch: Any, model: Any, tokenizer: Any, records: list[dict[str, Any
         evaluation = record["metadata"]["evaluation"]
         expected_expression = evaluation["expected_expression"]
         gold_answer = int(evaluation["gold_answer"])
-        tool_text = generate_text(torch, model, tokenizer, context, device, int(config["max_tool_tokens"]))
+        tools = record.get("tools", [])
+        tool_text = generate_text(torch, model, tokenizer, context, tools, device, int(config["max_tool_tokens"]))
         valid_tool_json, expression, tool_error = parse_tool_call(tool_text)
         direct_final_valid, direct_final_answer, direct_final_error = parse_final(tool_text)
         direct_final_accuracy = bool(direct_final_valid and direct_final_answer == gold_answer)
@@ -462,7 +435,7 @@ def evaluate(torch: Any, model: Any, tokenizer: Any, records: list[dict[str, Any
                 },
                 {"role": "tool", "name": "calculator", "tool_call_id": call_id, "content": str(observed)},
             ])
-            final_text = generate_text(torch, model, tokenizer, context, device, int(config["max_final_tokens"]))
+            final_text = generate_text(torch, model, tokenizer, context, tools, device, int(config["max_final_tokens"]))
             final_valid, final_answer, final_error = parse_final(final_text)
         rows.append({
             "id": record["id"],
@@ -524,9 +497,15 @@ def dependency_versions() -> dict[str, str | None]:
 
 
 def git_revision(repository: Path) -> str | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repository, text=True, capture_output=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True, capture_output=True, check=False,
+        )
+    except OSError:
+        # Minimal GPU images often omit the git executable. Source identity is
+        # still bound by source_tree_hash; an unavailable convenience field
+        # must not make an otherwise reproducible offline run impossible.
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -572,26 +551,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    experiment_dir = Path(__file__).resolve().parent
-    repository = experiment_dir.parents[1]
-    output = require_ignored_path(args.output, repository, "output")
-    cache_dir = require_ignored_path(args.cache_dir, repository, "cache-dir")
-    create_fresh_output(output)
-    # Write a status record immediately so any setup failure below leaves a
-    # diagnostic run-state.json instead of an empty directory. The full header
-    # is written once environment/config collection succeeds.
-    atomic_json(output / "run-state.json", {
-        "schema_version": "trajectory-utility-run/0.1",
-        "status": "running",
-        "seed": None,
-        "config_sha256": None,
-        "input_sha256": None,
-        "model": None,
-        "validation": None,
-        "environment": None,
-    })
+def prepare_experiment(
+    args: argparse.Namespace,
+    experiment_dir: Path,
+    repository: Path,
+    cache_dir: Path,
+) -> dict[str, Any]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(cache_dir)
     if args.local_files_only:
@@ -602,6 +567,9 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or not isinstance(config.get("train"), dict):
+        raise ValueError("config.train must be an object")
+    validate_training_step_config(config["train"])
     validation = validate_suite(args.answer_only, args.complete, args.eval)
     answer_records = read_jsonl(args.answer_only)
     complete_records = read_jsonl(args.complete)
@@ -637,6 +605,7 @@ def main() -> None:
 
     environment = {
         "runner_version": RUNNER_VERSION,
+        "training_bridge_version": BRIDGE_VERSION,
         "python": sys.version,
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -660,7 +629,67 @@ def main() -> None:
         "validation": validation,
         "environment": environment,
     }
+    return {
+        "stack": stack,
+        "torch": torch,
+        "seed": seed,
+        "device": device,
+        "tokenizer": tokenizer,
+        "config": config,
+        "answer_records": answer_records,
+        "complete_records": complete_records,
+        "eval_records": eval_records,
+        "config_hash": config_hash,
+        "input_hashes": input_hashes,
+        "run_header": run_header,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    experiment_dir = Path(__file__).resolve().parent
+    repository = experiment_dir.parents[1]
+    output = require_ignored_path(args.output, repository, "output")
+    cache_dir = require_ignored_path(args.cache_dir, repository, "cache-dir")
+    create_fresh_output(output)
+    # Write a status record immediately so any setup failure below leaves a
+    # diagnostic run-state.json instead of an empty directory. The full header
+    # is written once environment/config collection succeeds.
+    run_header: dict[str, Any] = {
+        "schema_version": "trajectory-utility-run/0.1",
+        "status": "running",
+        "seed": None,
+        "config_sha256": None,
+        "input_sha256": None,
+        "model": None,
+        "validation": None,
+        "environment": None,
+    }
     atomic_json(output / "run-state.json", run_header)
+    try:
+        prepared = prepare_experiment(args, experiment_dir, repository, cache_dir)
+        run_header = prepared["run_header"]
+        atomic_json(output / "run-state.json", run_header)
+    except BaseException as error:
+        atomic_json(output / "run-state.json", {
+            **run_header,
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+        })
+        raise
+
+    stack = prepared["stack"]
+    torch = prepared["torch"]
+    seed = prepared["seed"]
+    device = prepared["device"]
+    tokenizer = prepared["tokenizer"]
+    config = prepared["config"]
+    answer_records = prepared["answer_records"]
+    complete_records = prepared["complete_records"]
+    eval_records = prepared["eval_records"]
+    config_hash = prepared["config_hash"]
+    input_hashes = prepared["input_hashes"]
 
     arm_results: dict[str, Any] = {}
     arm_training_records = {
