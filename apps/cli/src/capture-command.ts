@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Host } from "@trajpack/schema";
 import {
@@ -58,13 +58,13 @@ function safeWindowsCommandProcessor(environment: NodeJS.ProcessEnv): string {
   const configured = environment.ComSpec;
   if (typeof configured === "string" && configured.length > 0
     && !/[\u0000-\u001f\u007f]/u.test(configured)
-    && basename(configured).toLowerCase() === "cmd.exe") {
+    && win32.basename(configured).toLowerCase() === "cmd.exe") {
     return configured;
   }
   const systemRoot = environment.SystemRoot;
   return typeof systemRoot === "string" && systemRoot.length > 0
     && !/[\u0000-\u001f\u007f]/u.test(systemRoot)
-    ? join(systemRoot, "System32", "cmd.exe")
+    ? win32.join(systemRoot, "System32", "cmd.exe")
     : "cmd.exe";
 }
 
