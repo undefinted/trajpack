@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type { Eligibility, EligibilityDecision, TraceBundle } from "@trajpack/schema";
+import type { DatasetViewRecipe, Eligibility, EligibilityDecision, TraceBundle } from "@trajpack/schema";
 import {
   datasetBuildSchema,
   datasetExampleSchema,
   datasetManifestSchema,
+  datasetViewRecipeSchema,
   eligibilityDecisionSchema,
   termsSnapshotSchema,
   traceBundleSchema,
@@ -13,13 +14,14 @@ import {
   trajectoryEventSchema,
 } from "@trajpack/schema";
 import {
-  CURRENT_DATASET_COMPILER_VERSIONS,
   DATASET_EXPORT_MAPPING,
   DATASET_NEAR_DUPLICATE_CONFIG,
   POLICY_VERSION,
   approvalFingerprint,
+  assertTrainingViewReportExamples,
   canonicalJson,
   computeDatasetId,
+  datasetCompilerVersionsForRecipe,
   deleteTrace,
   deriveDatasetAuditFromSelectedViews,
   deriveDatasetStatsFromSelectedViews,
@@ -33,6 +35,7 @@ import {
   splitForGroup,
   stableId,
   type ExportFormat,
+  type TrainingViewCompilation,
   type TrainingViewRecipe,
   type TrainingMode,
   validateHfParquetFile,
@@ -309,18 +312,24 @@ function expectedFormatArtifacts(
 ): Promise<{
   observedBySplit: Record<"train" | "validation" | "test", string[]>;
   selectedBundles: Map<string, TraceBundle>;
+  trainingCompilations: Map<string, TrainingViewCompilation>;
 }> {
   return (async () => {
     const observed: Record<"train" | "validation" | "test", string[]> = {
       train: [], validation: [], test: [],
     };
     const selectedBundles = new Map<string, TraceBundle>();
-    let selectedBundleBytes = 0;
-    const retainSelectedBundle = (traceId: string, bundle: TraceBundle): void => {
-      selectedBundleBytes += estimateResidentBytes(bundle);
-      if (selectedBundleBytes > MAX_DATASET_RESIDENT_ESTIMATE_BYTES) {
-        throw new Error("Selected canonical views exceed the bounded validation memory budget");
+    const perTraceExamples = new Map<string, ReturnType<typeof datasetExampleSchema.parse>[]>();
+    const trainingCompilations = new Map<string, TrainingViewCompilation>();
+    let residentBytes = 0;
+    const retainResident = (value: unknown, label: string): void => {
+      residentBytes += estimateResidentBytes(value);
+      if (residentBytes > MAX_DATASET_RESIDENT_ESTIMATE_BYTES) {
+        throw new Error(`${label} exceed the bounded validation memory budget`);
       }
+    };
+    const retainSelectedBundle = (traceId: string, bundle: TraceBundle): void => {
+      retainResident(bundle, "Selected canonical views");
       selectedBundles.set(traceId, bundle);
     };
     for (const split of ["train", "validation", "test"] as const) {
@@ -357,6 +366,47 @@ function expectedFormatArtifacts(
           retainSelectedBundle(entry.trace_id, selected.bundle);
           if (selected.fingerprint !== entry.selected_bundle_sha256) mismatches.push(`selected_bundle:${entry.trace_id}`);
         }
+        if (format === "hf-trl" && actualFileSet.has(required)) {
+          const examples: ReturnType<typeof datasetExampleSchema.parse>[] = [];
+          await readJsonLines(join(absolute, ...required.split("/")), MAX_SELECTED_VIEW_FILE_BYTES, (value) => {
+            const example = datasetExampleSchema.parse(value);
+            retainResident(example, "Per-trace HF examples");
+            examples.push(example);
+          });
+          perTraceExamples.set(entry.trace_id, examples);
+          if (canonicalJson(examples.map((example) => example.id)) !== canonicalJson(entry.example_ids)) {
+            mismatches.push(`hf_per_trace_examples:${entry.trace_id}`);
+          }
+          if (manifest.view_recipe !== "trace_full") {
+            const reportPath = `lineage/traces/${entry.trace_id}/training-view-report.json`;
+            if (!actualFileSet.has(reportPath)) {
+              mismatches.push(`missing:${reportPath}`);
+            } else {
+              const selectedBundle = selectedBundles.get(entry.trace_id);
+              if (selectedBundle === undefined) {
+                mismatches.push(`training_view_report:selected_bundle:${entry.trace_id}`);
+              } else {
+                try {
+                  const report = await readSmallJson(
+                    join(absolute, ...reportPath.split("/")),
+                    MAX_SELECTED_VIEW_FILE_BYTES,
+                  );
+                  retainResident(report, "Training-view reports");
+                  const compilation = assertTrainingViewReportExamples(
+                    report,
+                    selectedBundle,
+                    examples,
+                    manifest.view_recipe as TrainingViewRecipe,
+                  );
+                  retainResident(compilation, "Authenticated training-view compilations");
+                  trainingCompilations.set(entry.trace_id, compilation);
+                } catch {
+                  mismatches.push(`training_view_report:${entry.trace_id}`);
+                }
+              }
+            }
+          }
+        }
       }
       if (format === "hf-trl") {
         const jsonl = `splits/${split}/dataset.jsonl`;
@@ -364,14 +414,10 @@ function expectedFormatArtifacts(
         if (!actualFileSet.has(jsonl)) mismatches.push(`missing:${jsonl}`);
         if (!actualFileSet.has(parquet)) mismatches.push(`missing:${parquet}`);
         const examples: ReturnType<typeof datasetExampleSchema.parse>[] = [];
-        let exampleResidentBytes = 0;
         if (actualFileSet.has(jsonl)) {
           await readJsonLines(join(absolute, ...jsonl.split("/")), 512 * 1024 * 1024, (value) => {
             const example = datasetExampleSchema.parse(value);
-            exampleResidentBytes += estimateResidentBytes(example);
-            if (exampleResidentBytes > MAX_DATASET_RESIDENT_ESTIMATE_BYTES) {
-              throw new Error("HF examples exceed the bounded Parquet comparison memory budget");
-            }
+            retainResident(example, "HF examples and Parquet comparison rows");
             examples.push(example);
             observed[split].push(example.id);
             const metadata = example.metadata;
@@ -384,6 +430,21 @@ function expectedFormatArtifacts(
               || metadata.source_bundle_sha256 !== entry.source_bundle_sha256
               || metadata.selected_bundle_sha256 !== entry.selected_bundle_sha256) {
               mismatches.push(`hf_lineage_binding:${example.id}`);
+            } else {
+              const source = perTraceExamples.get(entry.trace_id)?.find((candidate) => candidate.id === example.id);
+              const sourceMetadata = { ...metadata };
+              for (const key of [
+                "dataset_id",
+                "dataset_split",
+                "split_group_id",
+                "source_bundle_sha256",
+                "selected_bundle_sha256",
+                "training_contract",
+              ]) delete sourceMetadata[key];
+              const aggregateBase = datasetExampleSchema.parse({ ...example, metadata: sourceMetadata });
+              if (source === undefined || canonicalJson(aggregateBase) !== canonicalJson(source)) {
+                mismatches.push(`hf_aggregate_binding:${example.id}`);
+              }
             }
           });
         }
@@ -438,13 +499,15 @@ function expectedFormatArtifacts(
         }
       }
     }
-    return { observedBySplit: observed, selectedBundles };
+    return { observedBySplit: observed, selectedBundles, trainingCompilations };
   })();
 }
 
 function usesSupportedDatasetCompilers(value: unknown): boolean {
-  return isRecord(value)
-    && canonicalJson(value.compiler_versions) === canonicalJson(CURRENT_DATASET_COMPILER_VERSIONS);
+  if (!isRecord(value)) return false;
+  const recipe = datasetViewRecipeSchema.safeParse(value.view_recipe);
+  return recipe.success
+    && canonicalJson(value.compiler_versions) === canonicalJson(datasetCompilerVersionsForRecipe(recipe.data));
 }
 
 async function validateDatasetDirectory(root: string): Promise<boolean> {
@@ -465,7 +528,10 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
       self_consistent: false,
       compiler_supported: false,
       source_authenticity_verified: false,
-      current_compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
+      current_compiler_versions: Object.fromEntries(datasetViewRecipeSchema.options.map((recipe) => [
+        recipe,
+        datasetCompilerVersionsForRecipe(recipe as DatasetViewRecipe),
+      ])),
       training_ready: false,
       validation_scope: "fail closed: this trajpack version cannot rederive the dataset's frozen compiler output",
       mismatches: unsupportedCompilers,
@@ -530,6 +596,7 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
   compare(canonicalJson(manifest.target) === canonicalJson(build.target), "manifest:target");
   compare(manifest.policy_version === build.policy_version, "manifest:policy_version");
   compare(manifest.view_recipe === build.view_recipe, "manifest:view_recipe");
+  compare(manifest.view_recipe_version === build.view_recipe_version, "manifest:view_recipe_version");
   compare(manifest.quality_profile === build.quality_profile, "manifest:quality_profile");
   compare(canonicalJson(manifest.compiler_versions) === canonicalJson(build.compiler_versions), "manifest:compiler_versions");
   compare(canonicalJson(manifest.split_policy) === canonicalJson(build.split_policy), "manifest:split_policy");
@@ -558,30 +625,42 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
   }
 
   const audit = requireRecord(await readSmallJson(join(absolute, "dataset-audit.json"), 64 * 1024 * 1024), "dataset audit");
-  compare(audit.schema_version === "dataset-audit/0.2", "audit:schema_version");
+  compare(audit.schema_version === "dataset-audit/0.3", "audit:schema_version");
   compare(audit.profile === build.quality_profile, "audit:profile");
   compare(canonicalJson(audit.compiler_versions) === canonicalJson(build.compiler_versions), "audit:compiler_versions");
   compare(audit.trace_count === manifest.entries.length, "audit:trace_count");
   compare(audit.fallback_group_count === build.traces.filter((trace) => trace.group_basis === "trace_fallback").length, "audit:fallback_group_count");
   const blockedReasons = expectStringArray(audit, "blocked_reasons", "dataset audit");
   compare(blockedReasons.length === 0, "audit:blocked_reasons");
-  if (!Array.isArray(audit.training_views) || audit.training_views.length !== manifest.entries.length) {
+  const manifestBoundTrainingViewCount = manifest.view_recipe !== "trace_full" || manifest.format === "hf-trl"
+    ? manifest.entries.reduce((sum, entry) => sum + entry.example_ids.length, 0)
+    : null;
+  const observedViews = new Set<string>();
+  if (!Array.isArray(audit.training_views)
+    || (manifestBoundTrainingViewCount !== null && audit.training_views.length !== manifestBoundTrainingViewCount)
+    || (manifestBoundTrainingViewCount === null && audit.training_views.length < manifest.entries.length)) {
     mismatches.push("audit:training_views");
   } else {
-    const observedViews = new Set<string>();
     for (const value of audit.training_views) {
       const view = requireRecord(value, "dataset audit training view");
-      if (typeof view.trace_id !== "string" || typeof view.view_sha256 !== "string"
+      if (typeof view.trace_id !== "string" || typeof view.view_id !== "string" || view.view_id.length === 0
+        || view.view_id.length > 512 || /[\u0000-\u001f\u007f]/u.test(view.view_id)
+        || typeof view.view_sha256 !== "string"
         || !/^[a-f0-9]{64}$/u.test(view.view_sha256)
         || typeof view.part_count !== "number" || !Number.isSafeInteger(view.part_count) || view.part_count < 0
         || typeof view.near_shingle_count !== "number" || !Number.isSafeInteger(view.near_shingle_count)
         || view.near_shingle_count < 0) {
         throw new Error("Dataset audit training view is malformed");
       }
-      if (observedViews.has(view.trace_id)) mismatches.push(`audit:duplicate_training_view:${view.trace_id}`);
-      observedViews.add(view.trace_id);
+      const identity = `${view.trace_id}\0${view.view_id}`;
+      if (observedViews.has(identity)) mismatches.push(`audit:duplicate_training_view:${view.trace_id}:${view.view_id}`);
+      observedViews.add(identity);
       const entry = manifest.entries.find((candidate) => candidate.trace_id === view.trace_id);
-      if (!entry || view.split !== entry.split) mismatches.push(`audit:training_view_binding:${view.trace_id}`);
+      const expectedViewIds = entry === undefined ? []
+        : manifest.view_recipe !== "trace_full" || manifest.format === "hf-trl" ? entry.example_ids : [view.view_id];
+      if (!entry || view.split !== entry.split || !expectedViewIds.includes(view.view_id)) {
+        mismatches.push(`audit:training_view_binding:${view.trace_id}:${view.view_id}`);
+      }
     }
   }
   for (const key of ["exact_within_split_duplicates", "exact_cross_split_duplicates", "partial_content_overlap", "same_repo_commit_cross_split", "lineage_cross_split", "near_duplicate_candidates", "warnings"] as const) {
@@ -592,7 +671,8 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
   compare(nearScan.shingle_version === DATASET_NEAR_DUPLICATE_CONFIG.shingle_version, "audit:near_scan_shingles");
   compare(nearScan.threshold_bp === DATASET_NEAR_DUPLICATE_CONFIG.threshold_bp, "audit:near_scan_threshold");
   compare(nearScan.status === "complete" && nearScan.reason_code === null, "audit:near_scan_status");
-  compare(nearScan.record_count === manifest.entries.length, "audit:near_scan_record_count");
+  const observedTrainingViewCount = Array.isArray(audit.training_views) ? audit.training_views.length : -1;
+  compare(nearScan.record_count === observedTrainingViewCount, "audit:near_scan_record_count");
   compare(nearScan.resource_limits_sha256 === sha256(canonicalJson(DATASET_NEAR_DUPLICATE_CONFIG)), "audit:near_scan_limits");
   for (const key of ["feature_count", "candidate_pair_count", "compared_pair_count"] as const) {
     if (typeof nearScan[key] !== "number" || !Number.isSafeInteger(nearScan[key]) || nearScan[key] < 0) {
@@ -608,13 +688,22 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
       || candidate.similarity_bp < DATASET_NEAR_DUPLICATE_CONFIG.threshold_bp || candidate.similarity_bp > 10_000
       || !Array.isArray(candidate.trace_ids) || candidate.trace_ids.length !== 2
       || candidate.trace_ids.some((traceId) => typeof traceId !== "string")
+      || !Array.isArray(candidate.view_ids) || candidate.view_ids.length !== 2
+      || candidate.view_ids.some((viewId) => typeof viewId !== "string" || viewId.length === 0)
       || !Array.isArray(candidate.splits) || candidate.splits.length < 1) {
       throw new Error("Dataset audit near-duplicate candidate is malformed");
     }
     if (nearSignatures.has(candidate.signature_sha256)) mismatches.push(`audit:duplicate_near_signature:${candidate.signature_sha256}`);
     nearSignatures.add(candidate.signature_sha256);
     const traceIds = candidate.trace_ids as string[];
-    const entries = traceIds.map((traceId) => manifest.entries.find((entry) => entry.trace_id === traceId));
+    const viewIds = candidate.view_ids as string[];
+    const entries = traceIds.map((traceId, index) => manifest.entries.find((entry) => {
+      if (entry.trace_id !== traceId) return false;
+      if (manifest.view_recipe !== "trace_full" || manifest.format === "hf-trl") {
+        return entry.example_ids.includes(viewIds[index]!);
+      }
+      return observedViews.has(`${traceId}\0${viewIds[index]}`);
+    }));
     if (entries.some((entry) => entry === undefined)
       || canonicalJson(candidate.splits) !== canonicalJson([...new Set(entries.map((entry) => entry!.split))].sort())) {
       mismatches.push(`audit:near_candidate_binding:${candidate.signature_sha256}`);
@@ -660,6 +749,8 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
   compare(complete.example_count === expectedExampleCount, "complete:example_count");
   compare(complete.format === manifest.format, "complete:format");
   compare(complete.mode === manifest.mode, "complete:mode");
+  compare(complete.view_recipe === manifest.view_recipe, "complete:view_recipe");
+  compare(complete.view_recipe_version === manifest.view_recipe_version, "complete:view_recipe_version");
   compare(canonicalJson(complete.splits) === canonicalJson(manifest.splits), "complete:splits");
   compare(canonicalJson(complete.compiler_versions) === canonicalJson(build.compiler_versions), "complete:compiler_versions");
   compare(complete.selection_sha256 === sha256(canonicalJson(build)), "complete:selection_sha256");
@@ -683,8 +774,17 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
   if (selectedViews.length !== manifest.entries.length) {
     mismatches.push("derived:selected_view_membership");
   } else {
-    const derivedAudit = deriveDatasetAuditFromSelectedViews(build, selectedViews.map((entry) => entry.bundle));
-    compare(canonicalJson(audit) === canonicalJson(derivedAudit), "audit:derived_selected_views");
+    if (build.view_recipe === "trace_full"
+      || formatInspection.trainingCompilations.size === manifest.entries.length) {
+      const derivedAudit = deriveDatasetAuditFromSelectedViews(
+        build,
+        selectedViews.map((entry) => entry.bundle),
+        formatInspection.trainingCompilations,
+      );
+      compare(canonicalJson(audit) === canonicalJson(derivedAudit), "audit:derived_selected_views");
+    } else {
+      mismatches.push("derived:training_view_reports");
+    }
     const derivedStats = deriveDatasetStatsFromSelectedViews(selectedViews);
     compare(canonicalJson(stats) === canonicalJson(derivedStats), "stats:derived_selected_views");
   }
@@ -693,6 +793,9 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
     .every(([path, value]) => checksums.get(path) === value.sha256);
   const derivedIntegrityInvalid = mismatches.some((mismatch) => mismatch.startsWith("selected_bundle:")
     || mismatch.startsWith("derived:")
+    || mismatch.startsWith("training_view_report:")
+    || mismatch.startsWith("hf_per_trace_examples:")
+    || mismatch.startsWith("hf_aggregate_binding:")
     || mismatch === "audit:derived_selected_views"
     || mismatch === "stats:derived_selected_views");
   const integrityValid = checksumSelfConsistent && !derivedIntegrityInvalid;
@@ -709,7 +812,9 @@ async function validateDatasetDirectory(root: string): Promise<boolean> {
     training_eligibility_attestation_present: selfConsistent && trainingMode,
     current_policy_rechecked: false,
     training_ready: false,
-    validation_scope: "checksums establish only internal file consistency; integrity additionally rederives stats and audit fingerprints from canonical selected views; managed traces and current policy were not reopened",
+    validation_scope: manifest.view_recipe === "deepseek_epoch_sft"
+      ? "checksums establish internal file consistency; integrity binds DeepSeek report rows to canonical-event references and rederives dataset audit fingerprints, but encrypted raw request epochs and current managed policy were not reopened"
+      : "checksums establish only internal file consistency; integrity additionally recompiles canonical-event training recipes and rederives stats and audit fingerprints; managed traces and current policy were not reopened",
     dataset_id: manifest.dataset_id,
     traces: manifest.entries.length,
     splits: manifest.splits,
@@ -823,10 +928,10 @@ export async function runExport(selection: string, options: ExportCommandOptions
   if (!options.plaintext) throw new Error("Plaintext export requires --plaintext and an explicit output directory");
   const output = resolve(options.output);
   if (!/^[a-f0-9]{32}$/.test(selection)) {
-    if (options.recipe !== undefined) {
-      throw new Error("Versioned training recipes currently require a single managed trace; batch recipe builds are planned separately");
-    }
     const build = await readDatasetBuildFile(selection);
+    if (options.recipe !== undefined && options.recipe !== build.view_recipe) {
+      throw new Error(`Dataset build is frozen to recipe ${build.view_recipe}; --recipe cannot override it`);
+    }
     if (options.mode !== undefined && options.mode !== build.mode) {
       throw new Error(`Dataset build is frozen to ${build.mode}; --mode cannot change it`);
     }

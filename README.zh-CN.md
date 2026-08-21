@@ -48,8 +48,8 @@
 | **Codex 交互式/富客户端** | 一次性 `arm` + 插件 hooks；可离线映射固定版本的 App Server v2 记录 | 🟡 受限 | v0.1 不启动或代理 App Server stdio，也不解析不稳定的本地 transcript。 |
 | **[Claude Code headless](https://code.claude.com/docs/en/headless)** | 包装器强制加入 `--print --output-format stream-json --verbose` | ✅ 原生 | 可见 thinking 只会分类为 provider summary 或 opaque state，不会声称是原始 CoT。 |
 | **Claude Code 交互会话** | 一次性 `arm` + 生命周期、工具和子 Agent hooks | 🟡 受限 | 通过绑定验证的 transcript 只能作为加密 opaque artifact 保存；不解析其私有 JSONL schema。 |
-| **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | 通过 `capture gemini` 或一次性 `arm gemini` 接入基于官方文档化 hook 的插件 | ✅ 原生 hooks | 固定接口为 `gemini-cli-hook/1`；只保留可观察 hook payload，不声称恢复隐藏 thinking。 |
-| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | 面向 DeepSeek AI 官方 Developer Preview 的原生类型化 `session/event` 插件 | ✅ 原生预览（A−） | 固定并通过 Harness `0.1.0-rc.6` fixture 测试；已支持精确 request-epoch SFT，而序列缺口、resumed partial context、冲突重复、路由冲突和未知接口都会 fail closed。 |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | 通过 `capture gemini` 或一次性 `arm gemini` 接入基于官方文档化 hook 的插件 | ✅ 原生 hooks | 固定接口为 `gemini-cli-hook/1`；语义不明确的 `AfterModel` text/thought chunk 仅供审阅并排除训练，`AfterAgent` 才是权威最终答案。 |
+| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | 面向 DeepSeek AI 官方 Developer Preview 的原生类型化 `session/event` 插件 | ✅ 原生预览（A−） | 固定 Harness `0.1.0-rc.6`；已测试精确 request-epoch SFT 与有界 collector 前队列，序列缺口、过载、resumed partial context、冲突重复、路由冲突和未知接口都会 fail closed。 |
 | **已保存的 Harness session** | 使用 `--source-hint dsh-session` 导入官方 unpacked session JSONL | ✅ 导入（B） | 只接受未压缩、未打包的 persistence v0。Artifact 标记为 `user_supplied`；packed row 与 zstd 输入会被拒绝。 |
 | **已保存的 DeepSeek API 响应** | 离线导入 JSON/流式 JSONL | ✅ 导入 | 结构验证不等于提供商认证；在单独提供证据前，导入内容仍属于 user-supplied。 |
 | **ChatGPT 网页版** | 用户主动下载的官方 ZIP/JSON/HTML 导出 | 🟡 归档/导入 | 没有实时网页 selector、网络拦截、cookie 访问或自动网页采集。 |
@@ -165,7 +165,7 @@ capture/import → policy explain → 必要时执行基于证据的 override
 → review 并批准 → dataset plan → export → validate → 在外部训练/评测
 ```
 
-对于已经批准的单个 trace，可以使用版本化 HF/TRL recipe 派生目标明确的训练视图，而不改变加密证据层：
+对于已经批准的 trace，可以使用版本化 HF/TRL recipe 派生目标明确的训练视图，而不改变加密证据层：
 
 ```bash
 pnpm trajpack export <trace-id> \
@@ -176,7 +176,7 @@ pnpm trajpack export <trace-id> \
   --plaintext
 ```
 
-七种 recipe 分别为 `answer_sft`、`reasoning_sft`、`tool_use_sft`、`deepseek_epoch_sft`、`failure_recovery`、`subagent_handoff` 和 `pointwise_reward_rl_ready`。对于完整且固定版本的 Harness trace，`deepseek_epoch_sft` 是 fidelity 最高的路径：它把 rc.6 raw durable log 重放为 request epoch，并要求 provider/model route、request header、system prompt、原生 tool、compaction-aware 的模型可见 surface 和完整 output 与经过审阅纳入、隐私检查通过的 canonical projection 精确对齐。`reasoning_sft` 只接受完整的 `provider_exposed_reasoning`；summary、opaque state、unavailable reasoning 和只有 partial stream 的数据都会被排除。`pointwise_reward_rl_ready` 输出带版本化 verifier provenance 和 reviewer 确认的标量 reward 证据，供下游 reward-model/RL 科研使用；它不会伪造 chosen/rejected DPO pair、step reward 或 success label。v0.1 的 recipe 导出仅支持单 trace。冻结的多 trace build 只对拓扑能够无歧义表达的来源使用经审计的 `trace_full` 视图；DeepSeek Harness 的 HF/TRL 导出必须显式选择版本化 recipe，并会有意拒绝 `trace_full`。
+七种 recipe 分别为 `answer_sft`、`reasoning_sft`、`tool_use_sft`、`deepseek_epoch_sft`、`failure_recovery`、`subagent_handoff` 和 `pointwise_reward_rl_ready`。对于完整且固定版本的 Harness trace，`deepseek_epoch_sft` 是 fidelity 最高的路径：它把 rc.6 raw durable log 重放为 request epoch，并要求 provider/model route、request header、system prompt、原生 tool、compaction-aware 的模型可见 surface 和完整 output 与经过审阅纳入、隐私检查通过的 canonical projection 精确对齐。`reasoning_sft` 只接受完整的 `provider_exposed_reasoning`；summary、opaque state、unavailable reasoning 和只有 partial stream 的数据都会被排除。`pointwise_reward_rl_ready` 输出带版本化 verifier provenance 和 reviewer 确认的标量 reward 证据，供下游 reward-model/RL 科研使用；它不会伪造 chosen/rejected DPO pair、step reward 或 success label。多 trace HF/TRL build 现在会对所有 trace 冻结同一 recipe；去重与污染关卡按每个编译后样本执行，包括旧 `trace_full` 的每个 session/branch，而不是只检查父 trace 一次。DeepSeek Harness 的 HF/TRL 导出仍必须显式选择版本化 recipe，并会有意拒绝 `trace_full`。
 
 跨适配器通用 recipe 不会猜测 Harness context。对于 Harness trace，`firstLiveSeq > 0` 的 resumed session 会阻断全部训练 recipe；必须重新采集或导入从 sequence zero 开始的完整 log。目标之前存在 `surfaceOp: replace` 时，通用 recipe 会阻断，并引导完整 trace 使用 `deepseek_epoch_sft` 重放 replacement。缺少 `request/header`、provider/model 不一致、raw/canonical 漂移或 epoch 无法重建时也会 fail closed。
 
@@ -188,6 +188,7 @@ pnpm trajpack dataset plan <trace-id> <trace-id> \
   --mode training_competitive_distillation \
   --target-model-owner my-lab \
   --target-product student-v1 \
+  --recipe deepseek_epoch_sft \
   --seed paper-ablation-1 \
   --group-map ./private-groups.json \
   --quality-profile research_strict \
@@ -225,6 +226,9 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 
 [TraceLab](https://github.com/uw-syfi/TraceLab) 是分析设计的借鉴对象，不是运行时依赖。TraceLab 侧重研究 Agent serving workload；trajpack 侧重把可观察证据经过治理和审阅，转换为版本化 SFT 或 verifier-backed pointwise-RL 视图。Canonical 内容、权利、redaction、拓扑和 lineage 始终留在 trajpack 的治理边界内，TraceLab-shaped 投影只携带聚合或摘要级 workload 字段。
 
+双语[可行性证据矩阵](docs/feasibility-validation.md)给出了 TraceLab 审计对照、
+各采集面的实际验证等级，以及达到论文级证明仍需完成的实验。
+
 能导出数据不等于已经证明数据能提升模型。[轨迹效用评测协议](docs/trajectory-utility-evaluation.md)明确区分 pipeline smoke test、小模型窄域学习验证、matched benchmark 消融和外部复现。可以先运行[可复现的合成 DeepSeek Harness 全流程 Demo](docs/demo.md)，再执行可审计的[base / answer-only / 完整轨迹小模型对照实验](experiments/trajectory-utility/README.md)。有界并发、硬上限和 10 万事件实测见[性能与规模说明](docs/performance.md)。
 
 <p align="center">
@@ -243,6 +247,12 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 达到 31/32 工具闭环，answer-only 与 base 仍为 0/32。[集群结果卡](experiments/trajectory-utility/results/cluster-h100-20260820.zh-CN.md)
 记录了独立的源码哈希、软件栈、产物校验、启动阶段失败，以及相同的非因果
 局限。
+
+GPU ablation 使用的是 `generate_data.py` 确定性生成的 DatasetExample，并非
+真实 provider capture。仓库另外把两 epoch 的合成 Harness 产物贯通到
+exporter-compatible JSONL/Parquet 与严格 ChatML bridge。二者共同提供“窄域
+效用证据 + raw-to-training 结构兼容性”，但尚不是一次真实 provider 的
+raw vault 直通 GPU 实验。
 
 ### 使用 Hugging Face Datasets 和 TRL 加载
 
@@ -311,7 +321,7 @@ trajpack delete <trace-id> --yes
 
 ## 已知边界
 
-- 不恢复隐藏推理，不拦截浏览器网络，不读取 token/cookie，也不提供商业站点 DOM preset。Claude thinking signature 是 opaque 的提供商协议状态，不是跨模型训练数据源；详见 [支持边界](docs/claude-thinking-signatures.md)。
+- 不恢复隐藏推理，不拦截浏览器网络，不读取 token/cookie，也不提供商业站点 DOM preset。[2026 年 8 月的披露论文](https://arxiv.org/abs/2608.09867)曾实证 opaque state 的历史重放路径，但作者说明厂商缓解后已无法复现；其中的代理信号也不是经过认证的原始 CoT。trajpack 将这类状态视为潜在秘密，只保存在加密 vault 中，绝不重放或解码；详见 [支持边界](docs/claude-thinking-signatures.md)。
 - Gemini Takeout 导入只是 B 级扁平活动快照；不会编造缺失的 turn、工具边或时间关系。
 - 当前 Gemini CLI hook 可能不提供厂商 tool-call ID；trajpack 会记录确定性合成配对键，因此完全相同的并发调用属于已知 fidelity 边界。
 - Codex App Server 支持属于离线固定版本 mapper，不是实时 App Server proxy。

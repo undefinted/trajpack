@@ -20,12 +20,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from training_bridge import (
+    BRIDGE_VERSION,
+    assistant_payload,
+    render_generation_prompt,
+    supervised_samples,
+)
 from validate_data import read_jsonl, validate_suite
 
 
-RUNNER_VERSION = "trajectory-utility-runner/0.1"
+RUNNER_VERSION = "trajectory-utility-runner/0.2"
 ARM_ORDER = ("base", "answer_only_sft", "complete_trajectory_sft")
 
 
@@ -77,72 +83,6 @@ def create_fresh_output(path: Path) -> None:
 
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def assistant_payload(message: dict[str, Any]) -> str:
-    calls = message.get("tool_calls")
-    if calls is not None:
-        if not isinstance(calls, list) or len(calls) != 1:
-            raise ValueError("the smoke renderer requires exactly one tool call per assistant turn")
-        function = calls[0]["function"]
-        arguments = json.loads(function["arguments"])
-        return compact_json({"name": function["name"], "arguments": arguments})
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise ValueError("assistant target content must be text or a single native tool call")
-    return content
-
-
-def message_payload(message: dict[str, Any]) -> str:
-    role = message["role"]
-    if role == "assistant":
-        return assistant_payload(message)
-    if role == "tool":
-        return compact_json({
-            "tool_call_id": message["tool_call_id"],
-            "output": str(message.get("content", "")),
-        })
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise ValueError(f"{role} message content must be text")
-    return content
-
-
-def render_message(message: dict[str, Any]) -> str:
-    return f"<|im_start|>{message['role']}\n{message_payload(message)}<|im_end|>\n"
-
-
-def render_generation_prompt(messages: Iterable[dict[str, Any]]) -> str:
-    return "".join(render_message(message) for message in messages) + "<|im_start|>assistant\n"
-
-
-def supervised_samples(records: list[dict[str, Any]], tokenizer: Any, max_length: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    samples: list[dict[str, Any]] = []
-    prompt_tokens = 0
-    target_tokens = 0
-    for record in records:
-        messages = record["messages"]
-        for index, enabled in enumerate(record["assistant_loss_mask"]):
-            if not enabled:
-                continue
-            prompt = render_generation_prompt(messages[:index])
-            completion = assistant_payload(messages[index]) + "<|im_end|>\n"
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            completion_ids = tokenizer.encode(completion, add_special_tokens=False)
-            if len(completion_ids) >= max_length:
-                raise ValueError(f"target for {record['id']} exceeds max_length")
-            if len(prompt_ids) + len(completion_ids) > max_length:
-                prompt_ids = prompt_ids[-(max_length - len(completion_ids)):]
-            input_ids = prompt_ids + completion_ids
-            labels = [-100] * len(prompt_ids) + completion_ids
-            if not completion_ids or all(label == -100 for label in labels):
-                raise ValueError(f"empty assistant completion for {record['id']}")
-            samples.append({"input_ids": input_ids, "labels": labels, "source_id": record["id"]})
-            prompt_tokens += len(prompt_ids)
-            target_tokens += len(completion_ids)
-    if not samples:
-        raise ValueError("training data has no assistant loss targets")
-    return samples, {"samples": len(samples), "prompt_tokens": prompt_tokens, "target_tokens": target_tokens}
 
 
 class SupervisedDataset:
@@ -336,8 +276,16 @@ def strip_model_text(value: str) -> str:
     return value.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
 
 
-def generate_text(torch: Any, model: Any, tokenizer: Any, messages: list[dict[str, Any]], device: Any, max_new_tokens: int) -> str:
-    prompt = render_generation_prompt(messages)
+def generate_text(
+    torch: Any,
+    model: Any,
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    device: Any,
+    max_new_tokens: int,
+) -> str:
+    prompt = render_generation_prompt(messages, tools)
     encoded = tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt").to(device)
     attention = torch.ones_like(encoded)
     terminator = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -365,6 +313,14 @@ def parse_tool_call(text: str) -> tuple[bool, str | None, str | None]:
         value = json.loads(text)
     except json.JSONDecodeError as error:
         return False, None, f"invalid_json:{error.msg}"
+    if isinstance(value, dict) and value.get("protocol") == "trajpack-assistant-envelope/0.2":
+        calls = value.get("tool_calls")
+        if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+            return False, None, "wrong_envelope_tool_call_count"
+        function = calls[0].get("function")
+        if not isinstance(function, dict):
+            return False, None, "wrong_envelope_tool_shape"
+        value = {"name": function.get("name"), "arguments": function.get("arguments")}
     if not isinstance(value, dict) or set(value) != {"name", "arguments"}:
         return False, None, "wrong_top_level_shape"
     arguments = value.get("arguments")
@@ -408,6 +364,14 @@ def parse_final(text: str) -> tuple[bool, int | None, str | None]:
         value = json.loads(text)
     except json.JSONDecodeError as error:
         return False, None, f"invalid_json:{error.msg}"
+    if isinstance(value, dict) and value.get("protocol") == "trajpack-assistant-envelope/0.2":
+        content = value.get("content")
+        if not isinstance(content, str):
+            return False, None, "missing_envelope_content"
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError as error:
+            return False, None, f"invalid_envelope_content:{error.msg}"
     if not isinstance(value, dict) or set(value) != {"answer"}:
         return False, None, "wrong_final_shape"
     answer = value["answer"]
@@ -425,7 +389,8 @@ def evaluate(torch: Any, model: Any, tokenizer: Any, records: list[dict[str, Any
         evaluation = record["metadata"]["evaluation"]
         expected_expression = evaluation["expected_expression"]
         gold_answer = int(evaluation["gold_answer"])
-        tool_text = generate_text(torch, model, tokenizer, context, device, int(config["max_tool_tokens"]))
+        tools = record.get("tools", [])
+        tool_text = generate_text(torch, model, tokenizer, context, tools, device, int(config["max_tool_tokens"]))
         valid_tool_json, expression, tool_error = parse_tool_call(tool_text)
         direct_final_valid, direct_final_answer, direct_final_error = parse_final(tool_text)
         direct_final_accuracy = bool(direct_final_valid and direct_final_answer == gold_answer)
@@ -459,7 +424,7 @@ def evaluate(torch: Any, model: Any, tokenizer: Any, records: list[dict[str, Any
                 },
                 {"role": "tool", "name": "calculator", "tool_call_id": call_id, "content": str(observed)},
             ])
-            final_text = generate_text(torch, model, tokenizer, context, device, int(config["max_final_tokens"]))
+            final_text = generate_text(torch, model, tokenizer, context, tools, device, int(config["max_final_tokens"]))
             final_valid, final_answer, final_error = parse_final(final_text)
         rows.append({
             "id": record["id"],
@@ -627,6 +592,7 @@ def main() -> None:
 
     environment = {
         "runner_version": RUNNER_VERSION,
+        "training_bridge_version": BRIDGE_VERSION,
         "python": sys.version,
         "platform": platform.platform(),
         "machine": platform.machine(),

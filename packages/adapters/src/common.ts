@@ -40,6 +40,60 @@ export interface NormalizedBatch {
 
 type JsonObject = Record<string, unknown>;
 
+export interface OpaqueProviderStateSanitization {
+  value: unknown;
+  removed: number;
+  truncated: boolean;
+}
+
+const OPAQUE_SCAN_MAX_NODES = 100_000;
+const OPAQUE_SCAN_MAX_DEPTH = 64;
+
+/**
+ * Remove provider-encrypted reasoning protocol fields before any canonical
+ * projection. The original object remains available only in encrypted raw.
+ */
+export function sanitizeOpaqueProviderState(input: unknown): OpaqueProviderStateSanitization {
+  let removed = 0;
+  let nodes = 0;
+  let truncated = false;
+  const active = new WeakSet<object>();
+  const visit = (value: unknown, depth: number): unknown => {
+    nodes += 1;
+    if (nodes > OPAQUE_SCAN_MAX_NODES || depth > OPAQUE_SCAN_MAX_DEPTH) {
+      truncated = true;
+      return null;
+    }
+    if (value === null || typeof value !== "object") return value;
+    if (active.has(value)) {
+      truncated = true;
+      return null;
+    }
+    active.add(value);
+    try {
+      if (Array.isArray(value)) return value.map((item) => visit(item, depth + 1));
+      const source = value as JsonObject;
+      const type = typeof source.type === "string" ? source.type : null;
+      const result: JsonObject = {};
+      for (const [key, entry] of Object.entries(source)) {
+        const opaque = key === "thoughtSignature" || key === "thought_signature"
+          || key === "encrypted_content" || key === "encryptedContent"
+          || (key === "signature" && (type === "thinking" || type === "signature_delta"))
+          || (key === "data" && type === "redacted_thinking");
+        if (opaque) {
+          if (typeof entry === "string" && entry.length > 0) removed += 1;
+          continue;
+        }
+        result[key] = visit(entry, depth + 1);
+      }
+      return result;
+    } finally {
+      active.delete(value);
+    }
+  };
+  return { value: visit(input, 0), removed, truncated };
+}
+
 export function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

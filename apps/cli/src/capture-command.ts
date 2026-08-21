@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Host } from "@trajpack/schema";
 import {
@@ -34,6 +34,151 @@ const HOSTS: Record<string, Host> = {
 };
 
 const DEFAULT_COMMAND: Record<string, string> = { codex: "codex", claude: "claude", gemini: "gemini", dsh: "dsh" };
+
+const WINDOWS_CAPTURE_SHIMS = new Set(["codex", "claude", "gemini", "dsh"]);
+const WINDOWS_BATCH_EXTENSIONS = new Set([".cmd", ".bat"]);
+const WINDOWS_EXECUTABLE_EXTENSIONS = new Set([".exe", ".com", ".cmd", ".bat"]);
+const WINDOWS_CMD_META = /([()\][%!^"`<>&|;, *?])/gu;
+
+export interface CaptureProcessLaunch {
+  command: string;
+  args: string[];
+  windowsVerbatimArguments: boolean;
+  resolvedExecutable: string;
+  viaCommandProcessor: boolean;
+}
+
+function windowsShimName(value: string): string {
+  const extension = extname(value).toLowerCase();
+  const name = basename(value).slice(0, extension.length === 0 ? undefined : -extension.length);
+  return name.toLowerCase();
+}
+
+function safeWindowsCommandProcessor(environment: NodeJS.ProcessEnv): string {
+  const configured = environment.ComSpec;
+  if (typeof configured === "string" && configured.length > 0
+    && !/[\u0000-\u001f\u007f]/u.test(configured)
+    && basename(configured).toLowerCase() === "cmd.exe") {
+    return configured;
+  }
+  const systemRoot = environment.SystemRoot;
+  return typeof systemRoot === "string" && systemRoot.length > 0
+    && !/[\u0000-\u001f\u007f]/u.test(systemRoot)
+    ? join(systemRoot, "System32", "cmd.exe")
+    : "cmd.exe";
+}
+
+function escapeWindowsCommand(value: string): string {
+  return value.replace(WINDOWS_CMD_META, "^$1");
+}
+
+function escapeWindowsArgument(value: string): string {
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error("Windows batch capture arguments cannot contain control characters");
+  }
+  // Quote for CommandLineToArgvW, then escape cmd.exe metacharacters twice:
+  // once for our command processor and once for the npm/pnpm .cmd shim.
+  let escaped = value.replace(/(\\*)"/gu, "$1$1\\\"");
+  escaped = escaped.replace(/(\\*)$/u, "$1$1");
+  escaped = `"${escaped}"`;
+  escaped = escaped.replace(WINDOWS_CMD_META, "^$1");
+  return escaped.replace(WINDOWS_CMD_META, "^$1");
+}
+
+/**
+ * Build the fixed cmd.exe invocation required for a trusted npm/pnpm batch
+ * shim. The command and every argument are escaped separately; no caller text
+ * is interpolated as an unescaped shell fragment.
+ */
+export function windowsBatchLaunch(
+  executable: string,
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv = process.env,
+): CaptureProcessLaunch {
+  const extension = extname(executable).toLowerCase();
+  if (!WINDOWS_BATCH_EXTENSIONS.has(extension) || !WINDOWS_CAPTURE_SHIMS.has(windowsShimName(executable))) {
+    throw new Error("Windows batch capture is restricted to codex, claude, gemini, or dsh shims");
+  }
+  if (executable.length === 0 || /[\u0000-\u001f\u007f]/u.test(executable)) {
+    throw new Error("Windows capture shim path is invalid");
+  }
+  const shellCommand = [
+    escapeWindowsCommand(executable),
+    ...args.map((argument) => escapeWindowsArgument(argument)),
+  ].join(" ");
+  return {
+    command: safeWindowsCommandProcessor(environment),
+    args: ["/d", "/v:off", "/s", "/c", `"${shellCommand}"`],
+    windowsVerbatimArguments: true,
+    resolvedExecutable: executable,
+    viaCommandProcessor: true,
+  };
+}
+
+function pathLikeWindowsExecutable(value: string): boolean {
+  return isAbsolute(value) || value.includes("\\") || value.includes("/");
+}
+
+function locateWindowsCaptureExecutable(
+  executable: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): string {
+  const requestedName = windowsShimName(executable);
+  const extension = extname(executable).toLowerCase();
+  if (pathLikeWindowsExecutable(executable)) return resolve(cwd, executable);
+  if (!WINDOWS_CAPTURE_SHIMS.has(requestedName)) return executable;
+  if (extension.length > 0 && !WINDOWS_EXECUTABLE_EXTENSIONS.has(extension)) return executable;
+  const located = spawnSync("where.exe", [executable], {
+    cwd,
+    env: scrubHostEnvironment(environment),
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+    timeout: 10_000,
+  });
+  if (located.status !== 0 || located.error !== undefined) return executable;
+  const candidates = String(located.stdout ?? "")
+    .split(/\r?\n/u)
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.length > 0
+      && !/[\u0000-\u001f\u007f]/u.test(candidate)
+      && isAbsolute(candidate)
+      && WINDOWS_EXECUTABLE_EXTENSIONS.has(extname(candidate).toLowerCase())
+      && windowsShimName(candidate) === requestedName);
+  return candidates[0] ?? executable;
+}
+
+/** Resolve a capture command without enabling a general-purpose shell. */
+export function captureProcessLaunch(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): CaptureProcessLaunch {
+  if (platform !== "win32") {
+    return {
+      command: executable,
+      args: [...args],
+      windowsVerbatimArguments: false,
+      resolvedExecutable: executable,
+      viaCommandProcessor: false,
+    };
+  }
+  const resolvedExecutable = locateWindowsCaptureExecutable(executable, cwd, environment);
+  const extension = extname(resolvedExecutable).toLowerCase();
+  if (WINDOWS_BATCH_EXTENSIONS.has(extension)) {
+    return windowsBatchLaunch(resolvedExecutable, args, environment);
+  }
+  return {
+    command: resolvedExecutable,
+    args: [...args],
+    windowsVerbatimArguments: false,
+    resolvedExecutable,
+    viaCommandProcessor: false,
+  };
+}
 
 /** Expand a leading `~` so `--cwd "~/proj"` resolves to the user home instead of a literal `~/proj` directory. */
 function resolveCwd(value: string): string {
@@ -78,12 +223,14 @@ export function captureChildEnvironment(
 export function assertPinnedDeepSeekHarness(executable: string, cwd: string, environment: NodeJS.ProcessEnv): void {
   const pinned = /deepseek-harness@([^/]+)\//.exec(DEEPSEEK_HARNESS_INTERFACE_VERSION)?.[1];
   if (!pinned) throw new Error("Invalid pinned DeepSeek Harness interface version");
-  const result = spawnSync(executable, ["--version"], {
+  const launch = captureProcessLaunch(executable, ["--version"], cwd, environment);
+  const result = spawnSync(launch.command, launch.args, {
     cwd,
     env: scrubHostEnvironment(environment),
     encoding: "utf8",
     windowsHide: true,
     shell: false,
+    windowsVerbatimArguments: launch.windowsVerbatimArguments,
     timeout: 10_000,
   });
   const reported = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
@@ -345,16 +492,19 @@ export async function runCapture(hostName: string, words: string[], options: Cap
       })}\n`);
       wrapperDescriptorWritten = true;
     }
-    const spawned = spawn(executable, args, {
+    const childEnvironment = captureChildEnvironment(process.env, {
+      url: `${server.url}/v1/hooks/events`,
+      token,
+      host,
+    });
+    const launch = captureProcessLaunch(executable, args, cwd, childEnvironment);
+    const spawned = spawn(launch.command, launch.args, {
       cwd,
-      env: captureChildEnvironment(process.env, {
-        url: `${server.url}/v1/hooks/events`,
-        token,
-        host,
-      }),
+      env: childEnvironment,
       stdio: ["inherit", "pipe", "pipe"],
       windowsHide: true,
       shell: false,
+      windowsVerbatimArguments: launch.windowsVerbatimArguments,
     }) as ChildProcess;
     child = spawned;
     const parse = splitUtf8Lines((line) => {

@@ -6,6 +6,13 @@ export const sessionFormatVersion = 0;
 export const interfaceVersion = "deepseek-harness@0.1.0-rc.6/session-event/0";
 
 const MAX_EVENT_BYTES = 8 * 1024 * 1024;
+export const queueLimits = Object.freeze({
+  perSessionEvents: 1_024,
+  perSessionBytes: 16 * 1024 * 1024,
+  globalSessions: 1_024,
+  globalEvents: 4_096,
+  globalBytes: 64 * 1024 * 1024,
+});
 
 type JsonObject = Record<string, unknown>;
 
@@ -29,11 +36,27 @@ interface ForwardState {
   route: Route | null;
   queue: Promise<void>;
   failure: unknown;
+  pendingEvents: number;
+  pendingBytes: number;
+}
+
+interface CollectorConfiguration {
+  endpoint: URL;
+  token: string;
+}
+
+interface SerializedCapsule {
+  body: string;
+  bytes: number;
 }
 
 export interface HarnessCaptureController {
   /** Await all admitted events, or only the queue belonging to `session`. */
   flush(session?: unknown): Promise<void>;
+  /** Aggregate in-memory plaintext queue usage; exposed for local diagnostics. */
+  queueUsage(): Readonly<{ events: number; bytes: number }>;
+  /** Number of session objects currently retained by an active forwarding state. */
+  liveStateCount(): number;
 }
 
 export class CollectorForwardError extends Error {
@@ -66,6 +89,16 @@ function loopbackUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+function collectorConfiguration(): CollectorConfiguration | null {
+  const collector = process.env.TRAJPACK_COLLECTOR_URL;
+  const token = process.env.TRAJPACK_CAPTURE_TOKEN;
+  if (typeof collector !== "string" || typeof token !== "string" || token.length === 0 || token.length > 4096) {
+    return null;
+  }
+  const endpoint = loopbackUrl(collector);
+  return endpoint === null ? null : { endpoint, token };
 }
 
 function validEvent(value: unknown): value is JsonObject {
@@ -151,34 +184,33 @@ function capsule(state: ForwardState, identity: NonNullable<ReturnType<typeof se
   };
 }
 
-async function forward(payload: JsonObject): Promise<void> {
-  const collector = process.env.TRAJPACK_COLLECTOR_URL;
-  const token = process.env.TRAJPACK_CAPTURE_TOKEN;
-  if (typeof collector !== "string" || typeof token !== "string" || token.length === 0 || token.length > 4096) return;
-  const endpoint = loopbackUrl(collector);
-  if (endpoint === null) return;
-
+function serializeCapsule(payload: JsonObject): SerializedCapsule {
   let body: string;
   try {
     body = JSON.stringify(payload);
   } catch {
     throw new CollectorForwardError(null, "Trajpack capsule is not losslessly serializable");
   }
-  if (Buffer.byteLength(body, "utf8") > MAX_EVENT_BYTES) {
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_EVENT_BYTES) {
     throw new CollectorForwardError(null, "Trajpack capsule exceeds the bounded collector frame");
   }
 
+  return { body, bytes };
+}
+
+async function forward(frame: SerializedCapsule, configuration: CollectorConfiguration): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetch(configuration.endpoint, {
       method: "POST",
       headers: {
-        "authorization": `Bearer ${token}`,
+        "authorization": `Bearer ${configuration.token}`,
         "content-type": "application/json",
         "x-trajpack-host": "deepseek_harness",
         "x-trajpack-interface": interfaceVersion,
       },
-      body,
+      body: frame.body,
       cache: "no-store",
       redirect: "error",
       signal: AbortSignal.timeout(2500),
@@ -195,6 +227,13 @@ function failureFrom(states: Iterable<ForwardState>): unknown[] {
   return [...states].flatMap((state) => state.failure === null ? [] : [state.failure]);
 }
 
+function sanitizedTerminalFailure(failure: unknown): CollectorForwardError {
+  const status = failure instanceof CollectorForwardError ? failure.status : null;
+  return status === null
+    ? new CollectorForwardError(null, "Trajpack collector forwarding failed")
+    : new CollectorForwardError(status, `Trajpack collector rejected an event with HTTP ${status}`);
+}
+
 /**
  * Install the rc.6 durable observer. The official `session/event` feed is
  * observe-only, while `session/flush` is its awaited durability checkpoint.
@@ -202,8 +241,16 @@ function failureFrom(states: Iterable<ForwardState>): unknown[] {
  * admission first and await one final queue drain during profile disposal.
  */
 export function apply(ctx: HarnessContext): HarnessCaptureController {
+  const configuration = collectorConfiguration();
   const bySession = new WeakMap<object, ForwardState>();
   const liveStates = new Set<ForwardState>();
+  let terminalFailure: CollectorForwardError | null = null;
+  let pendingEvents = 0;
+  let pendingBytes = 0;
+
+  const latchTerminalFailure = (failure: unknown): void => {
+    terminalFailure ??= sanitizedTerminalFailure(failure);
+  };
 
   const findState = (sessionValue: unknown): ForwardState | null => {
     const session = record(sessionValue);
@@ -220,19 +267,36 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
 
   const controller: HarnessCaptureController = {
     flush: async (sessionValue?: unknown) => {
-      if (sessionValue === undefined) return drainStates(liveStates);
+      if (sessionValue === undefined) {
+        await drainStates(liveStates);
+        if (terminalFailure !== null) throw terminalFailure;
+        return;
+      }
       const state = findState(sessionValue);
       if (state !== null) await drainStates([state]);
+      if (terminalFailure !== null) throw terminalFailure;
     },
+    queueUsage: () => Object.freeze({ events: pendingEvents, bytes: pendingBytes }),
+    liveStateCount: () => liveStates.size,
   };
 
   ctx.effect(() => async () => controller.flush(), "trajpack: drain collector queue");
 
   ctx.on("session/event", (sessionValue, eventValue) => {
+    // Wrapper credentials exist before Harness starts. Keeping the unarmed
+    // observer entirely inert avoids allocating a queue for ordinary sessions.
+    if (configuration === null || terminalFailure !== null) return;
     const identity = sessionIdentity(sessionValue);
     if (identity === null || !validEvent(eventValue)) return;
     let state = bySession.get(identity.session);
     if (state === undefined) {
+      if (liveStates.size >= queueLimits.globalSessions) {
+        latchTerminalFailure(new CollectorForwardError(
+          null,
+          "Trajpack live session set exceeded its bounded capacity",
+        ));
+        return;
+      }
       state = {
         session: identity.session,
         sessionId: identity.sessionId,
@@ -240,16 +304,43 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
         route: null,
         queue: Promise.resolve(),
         failure: null,
+        pendingEvents: 0,
+        pendingBytes: 0,
       };
       bySession.set(identity.session, state);
       liveStates.add(state);
     }
+    if (state.failure !== null) return;
     const payload = capsule(state, identity, eventValue);
+    let frame: SerializedCapsule;
+    try {
+      frame = serializeCapsule(payload);
+    } catch (error) {
+      state.failure ??= error;
+      return;
+    }
+    const exceedsQueueLimit = state.pendingEvents + 1 > queueLimits.perSessionEvents
+      || state.pendingBytes + frame.bytes > queueLimits.perSessionBytes
+      || pendingEvents + 1 > queueLimits.globalEvents
+      || pendingBytes + frame.bytes > queueLimits.globalBytes;
+    if (exceedsQueueLimit) {
+      state.failure ??= new CollectorForwardError(null, "Trajpack pending collector queue exceeded its bounded capacity");
+      return;
+    }
+    state.pendingEvents += 1;
+    state.pendingBytes += frame.bytes;
+    pendingEvents += 1;
+    pendingBytes += frame.bytes;
     state.queue = state.queue.then(async () => {
       try {
-        await forward(payload);
+        if (state!.failure === null && terminalFailure === null) await forward(frame, configuration);
       } catch (error) {
         state!.failure ??= error;
+      } finally {
+        state!.pendingEvents -= 1;
+        state!.pendingBytes -= frame.bytes;
+        pendingEvents -= 1;
+        pendingBytes -= frame.bytes;
       }
     });
   });
@@ -259,13 +350,17 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
   ctx.on("session/disposed", (sessionValue) => {
     const state = findState(sessionValue);
     if (state === null) return;
-    // session/disposed is observe-only. Remove successful state after its tail
-    // drains, but retain a failed state so the owning Cordis dispose effect can
-    // still surface the failure instead of silently forgetting it.
-    void drainStates([state]).then(() => {
+    // Retain the session only until its admitted tail drains. A single fresh,
+    // content-free error preserves the global durability failure without
+    // retaining provider errors, payload closures, or the full session object.
+    void state.queue.then(() => {
+      if (state.failure !== null) latchTerminalFailure(state.failure);
+    }, (failure: unknown) => {
+      latchTerminalFailure(failure);
+    }).finally(() => {
       liveStates.delete(state);
       bySession.delete(state.session);
-    }, () => undefined);
+    });
   });
 
   return controller;

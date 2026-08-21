@@ -75,7 +75,7 @@ if (configuration && endpoint && configuration.token.length > 0 && configuration
   const input = await readJsonInput();
   if (input && (!configuration.cwd || (typeof input.value.cwd === "string" && sameDirectory(input.value.cwd, configuration.cwd)))) {
     try {
-      await fetch(endpoint, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "authorization": `Bearer ${configuration.token}`,
@@ -85,11 +85,15 @@ if (configuration && endpoint && configuration.token.length > 0 && configuration
         },
         body: input.body,
         cache: "no-store",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(2500)
       });
+      if (!response.ok) {
+        process.stderr.write(`trajpack ${HOST} hook: collector rejected the event with HTTP ${response.status}\n`);
+        process.exitCode = 1;
+      }
     } catch {
-      // Capture hooks are observational. Collector errors never affect the host.
+      // An unavailable collector is an observational no-op; reachable HTTP rejections are reported above.
     }
   }
 }

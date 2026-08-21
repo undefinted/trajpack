@@ -1,4 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -7,10 +10,12 @@ import {
   armRuntimeDirectory,
   assertDeepSeekHarnessVersionReport,
   captureChildEnvironment,
+  captureProcessLaunch,
   consumeUtf8StreamWithBackpressure,
   splitUtf8Lines,
   observedRepoCommit,
   scrubHostEnvironment,
+  windowsBatchLaunch,
 } from "./capture-command.js";
 
 describe("capture child environment", () => {
@@ -57,6 +62,81 @@ describe("capture child environment", () => {
     expect(() => assertDeepSeekHarnessVersionReport("dsh 0.1.0-rc.5", 0)).toThrow("expected exact 0.1.0-rc.6");
     expect(() => assertDeepSeekHarnessVersionReport("dsh 0.1.0-rc.6", 1)).toThrow("compatibility check failed");
   });
+
+  it("uses a fixed command processor contract only for allowlisted Windows shims", () => {
+    const launch = windowsBatchLaunch("dsh.cmd", [
+      "--prompt",
+      "literal & whoami | echo %PATH% ^ !value!",
+      "quote\"inside",
+    ], { ComSpec: "C:\\Windows\\System32\\cmd.exe" });
+
+    expect(launch).toMatchObject({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      windowsVerbatimArguments: true,
+      resolvedExecutable: "dsh.cmd",
+      viaCommandProcessor: true,
+    });
+    expect(launch.args.slice(0, 4)).toEqual(["/d", "/v:off", "/s", "/c"]);
+    expect(launch.args[4]).toContain("^^^&");
+    expect(launch.args[4]).toContain("^^^|");
+    expect(launch.args[4]).not.toContain(" & whoami ");
+    expect(() => windowsBatchLaunch("arbitrary.cmd", ["safe"])).toThrow("restricted");
+    expect(() => windowsBatchLaunch("dsh.cmd", ["safe\r\necho injected"])).toThrow("control characters");
+  });
+
+  it("keeps non-Windows capture launches shell-free", () => {
+    expect(captureProcessLaunch("claude", ["--print", "hello & goodbye"], process.cwd(), {}, "linux"))
+      .toEqual({
+        command: "claude",
+        args: ["--print", "hello & goodbye"],
+        windowsVerbatimArguments: false,
+        resolvedExecutable: "claude",
+        viaCommandProcessor: false,
+      });
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "passes metacharacters literally through a real allowlisted Windows .cmd shim",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "trajpack-capture-shim-"));
+      const shim = join(directory, "dsh.cmd");
+      const output = join(directory, "argv.json");
+      const sentinel = join(directory, "PWNED.txt");
+      const argumentsToPreserve = [
+        output,
+        "plain argument",
+        "alpha & echo injected>PWNED.txt",
+        "%PATH%",
+        "caret^value",
+        "bang!value!",
+        "quote\"inside",
+        "(parenthesized)|pipe",
+      ];
+      const node = process.execPath.replace(/"/gu, "\"\"");
+      const script = [
+        "@echo off",
+        `@\"${node}\" -e \"require('fs').writeFileSync(process.argv[1],JSON.stringify(process.argv.slice(2)),'utf8')\" %*`,
+        "",
+      ].join("\r\n");
+      try {
+        await writeFile(shim, script, { encoding: "utf8", flag: "wx" });
+        const launch = captureProcessLaunch(shim, argumentsToPreserve, directory, process.env);
+        const result = spawnSync(launch.command, launch.args, {
+          cwd: directory,
+          env: process.env,
+          encoding: "utf8",
+          shell: false,
+          windowsHide: true,
+          windowsVerbatimArguments: launch.windowsVerbatimArguments,
+        });
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+        expect(JSON.parse(await readFile(output, "utf8"))).toEqual(argumentsToPreserve.slice(1));
+        await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("forces authoritative Codex and Claude structured streams", () => {
     expect(authoritativeCaptureArguments("codex", ["exec", "fix tests"]))

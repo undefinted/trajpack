@@ -1,12 +1,18 @@
 import { randomBytes } from "node:crypto";
 import { lstat, open, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import type { ApprovalMode, DatasetBuild, DatasetTarget, TraceBundle } from "@trajpack/schema";
-import { datasetBuildSchema } from "@trajpack/schema";
+import { basename, dirname, join, resolve } from "node:path";
+import type { ApprovalMode, DatasetBuild, DatasetTarget, DatasetViewRecipe, TraceBundle } from "@trajpack/schema";
+import {
+  DATASET_BUILD_VERSION,
+  DATASET_VIEW_RECIPE_VERSIONS,
+  datasetBuildSchema,
+  migrateDatasetBuild,
+} from "@trajpack/schema";
 import {
   approvalFingerprint,
+  assertSafeOutputParent,
   canonicalJson,
-  CURRENT_DATASET_COMPILER_VERSIONS,
+  datasetCompilerVersionsForRecipe,
   datasetTraceBlockReasons,
   explicitGroupId,
   inspectDatasetBuild,
@@ -31,6 +37,7 @@ export interface DatasetPlanOptions {
   test?: string | number;
   groupMap?: string;
   qualityProfile?: "sft_basic" | "tool_agent_strict" | "research_strict";
+  recipe?: DatasetViewRecipe;
   targetModelOwner?: string;
   targetProduct?: string;
 }
@@ -63,6 +70,26 @@ async function readBoundedRegularFile(path: string, maxBytes: number): Promise<B
 export async function readDatasetBuildFile(path: string): Promise<DatasetBuild> {
   const bytes = await readBoundedRegularFile(path, MAX_BUILD_FILE_BYTES);
   return datasetBuildSchema.parse(JSON.parse(bytes.toString("utf8")));
+}
+
+export async function runDatasetMigrate(inputPath: string, outputPath: string): Promise<DatasetBuild> {
+  const bytes = await readBoundedRegularFile(inputPath, MAX_BUILD_FILE_BYTES);
+  const input = JSON.parse(bytes.toString("utf8")) as unknown;
+  if (input && typeof input === "object" && !Array.isArray(input)
+    && (input as { schema_version?: unknown }).schema_version === DATASET_BUILD_VERSION) {
+    throw new Error(`Dataset build is already ${DATASET_BUILD_VERSION}`);
+  }
+  const migrated = migrateDatasetBuild(input);
+  const requestedOutput = resolve(outputPath);
+  const parent = await assertSafeOutputParent(dirname(requestedOutput));
+  const output = join(parent, basename(requestedOutput));
+  await writeFile(output, `${canonicalJson(migrated)}\n`, { flag: "wx", mode: 0o600 });
+  process.stdout.write(`${JSON.stringify({
+    output,
+    schema_version: migrated.schema_version,
+    build_sha256: sha256(canonicalJson(migrated)),
+  }, null, 2)}\n`);
+  return migrated;
 }
 
 async function readGroupMap(path: string | undefined, traceIds: string[]): Promise<Map<string, string>> {
@@ -127,6 +154,7 @@ export async function runDatasetPlan(traceIdsInput: string[], options: DatasetPl
     throw new Error("Dataset split ratios must total 10000 basis points");
   }
   const target = targetFor(options);
+  const viewRecipe = options.recipe ?? "trace_full";
   const passphrase = await readPassphrase();
   const bundles = await loadManagedBundlesBounded(traceIds, passphrase);
   const groupSecret = groups.size === 0 ? null : randomBytes(32);
@@ -139,6 +167,7 @@ export async function runDatasetPlan(traceIdsInput: string[], options: DatasetPl
         mode: options.mode,
         target,
         qualityProfile: options.qualityProfile ?? "research_strict",
+        viewRecipe,
       });
       if (reasons.length > 0) {
         throw new Error(`Cannot freeze blocked trace ${traceId}: ${[...new Set(reasons)].join(", ")}`);
@@ -162,14 +191,15 @@ export async function runDatasetPlan(traceIdsInput: string[], options: DatasetPl
   }
   const build = datasetBuildSchema.parse({
     record_type: "dataset_build",
-    schema_version: "dataset-build/0.1",
+    schema_version: DATASET_BUILD_VERSION,
     name: options.name,
     policy_version: POLICY_VERSION,
     mode: options.mode,
     target,
-    view_recipe: "trace_full",
+    view_recipe: viewRecipe,
+    view_recipe_version: DATASET_VIEW_RECIPE_VERSIONS[viewRecipe],
     quality_profile: options.qualityProfile ?? "research_strict",
-    compiler_versions: CURRENT_DATASET_COMPILER_VERSIONS,
+    compiler_versions: datasetCompilerVersionsForRecipe(viewRecipe),
     split_policy: {
       algorithm: "sha256-group-threshold-v1",
       seed: options.seed,
@@ -181,9 +211,9 @@ export async function runDatasetPlan(traceIdsInput: string[], options: DatasetPl
   if (audit.blocked_reasons.length > 0) {
     throw new Error(`Cannot freeze dataset plan: ${audit.blocked_reasons.join(", ")}`);
   }
-  const output = resolve(options.output);
-  const parent = await lstat(dirname(output));
-  if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error("Dataset plan parent must be an existing non-symlink directory");
+  const requestedOutput = resolve(options.output);
+  const parent = await assertSafeOutputParent(dirname(requestedOutput));
+  const output = join(parent, basename(requestedOutput));
   await writeFile(output, `${canonicalJson(build)}\n`, { flag: "wx", mode: 0o600 });
   process.stdout.write(`${JSON.stringify({
     output,

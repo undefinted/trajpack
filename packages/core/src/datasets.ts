@@ -20,12 +20,16 @@ import type {
   DatasetManifestEntry,
   DatasetSplit,
   DatasetSplitPolicy,
+  DatasetViewRecipe,
   TraceBundle,
 } from "@trajpack/schema";
 import {
   DATASET_DEDUPE_COMPILER_VERSION,
+  DATASET_MANIFEST_VERSION,
   DATASET_QUALITY_COMPILER_VERSION,
+  DATASET_TRAINING_VIEW_COMPILER_VERSION,
   DATASET_VIEW_COMPILER_VERSION,
+  DATASET_VIEW_RECIPE_VERSIONS,
   datasetBuildSchema,
   datasetExampleSchema,
   datasetManifestSchema,
@@ -33,21 +37,37 @@ import {
 } from "@trajpack/schema";
 import { approvalFingerprint, evaluateGate, POLICY_VERSION, validateApprovalScope } from "./policy.js";
 import { canonicalJson, sha256 } from "./canonical.js";
-import { exportApprovedBundle, type ExportFormat } from "./exporters.js";
+import { exportApprovedBundle, toHfExamples, type ExportFormat } from "./exporters.js";
 import { HF_PARQUET_SCHEMA_VERSION, writeHfParquet } from "./hf-parquet.js";
 export { validateHfParquetFile } from "./hf-parquet.js";
 import { inspectQuality } from "./quality.js";
 import { assertSafeOutputParent } from "./safe-path.js";
-import { structuredToolProjectionExcluded } from "./selection.js";
+import { selectExportView, type ExcludedContentPart } from "./selection.js";
+import {
+  compileTrainingView,
+  type CompiledTrainingView,
+  type TrainingViewCompilation,
+  type TrainingViewRecipe,
+} from "./training-views.js";
 
 export const CURRENT_DATASET_COMPILER_VERSIONS: DatasetBuild["compiler_versions"] = Object.freeze({
   view: DATASET_VIEW_COMPILER_VERSION,
+  training_view: null,
   quality: DATASET_QUALITY_COMPILER_VERSION,
   dedupe: DATASET_DEDUPE_COMPILER_VERSION,
 });
 
+export function datasetCompilerVersionsForRecipe(
+  recipe: DatasetViewRecipe,
+): DatasetBuild["compiler_versions"] {
+  return {
+    ...CURRENT_DATASET_COMPILER_VERSIONS,
+    training_view: recipe === "trace_full" ? null : DATASET_TRAINING_VIEW_COMPILER_VERSION,
+  };
+}
+
 export const DATASET_EXPORT_MAPPING: Readonly<Record<ExportFormat, string>> = Object.freeze({
-  canonical: "trajectory/0.1+dataset/0.1",
+  canonical: "trajectory/0.1+dataset/0.2",
   atif: "ATIF-v1.7",
   "hf-trl": "hf-trl-conversational/0.3+hf-conversational-parquet/0.2",
   otlp: "otel-genai-development-2026-08-16",
@@ -117,6 +137,7 @@ interface PreparedTrace {
   bundle: TraceBundle;
   buildTrace: DatasetBuild["traces"][number];
   split: DatasetSplit;
+  trainingCompilation?: TrainingViewCompilation;
 }
 
 interface SelectedTraceArtifact extends PreparedTrace {
@@ -127,13 +148,14 @@ interface SelectedTraceArtifact extends PreparedTrace {
 }
 
 export interface DatasetAudit {
-  schema_version: "dataset-audit/0.2";
+  schema_version: "dataset-audit/0.3";
   profile: DatasetBuild["quality_profile"];
   compiler_versions: DatasetBuild["compiler_versions"];
   trace_count: number;
   fallback_group_count: number;
   training_views: Array<{
     trace_id: string;
+    view_id: string;
     split: DatasetSplit;
     view_sha256: string;
     part_count: number;
@@ -146,6 +168,7 @@ export interface DatasetAudit {
     similarity_bp: number;
     splits: DatasetSplit[];
     trace_ids: [string, string];
+    view_ids: [string, string];
   }>;
   near_duplicate_scan: {
     algorithm: typeof DATASET_NEAR_DUPLICATE_CONFIG.algorithm;
@@ -271,6 +294,7 @@ function validatePreparedTrace(build: DatasetBuild, prepared: PreparedTrace): vo
     mode: build.mode,
     target: build.target,
     qualityProfile: build.quality_profile,
+    viewRecipe: build.view_recipe,
   });
   if (reasons.length > 0) {
     throw new Error(`Dataset trace ${buildTrace.trace_id} is blocked: ${[...new Set(reasons)].join(", ")}`);
@@ -281,6 +305,54 @@ export interface DatasetTraceValidationOptions {
   mode: ApprovalMode;
   target: DatasetBuild["target"];
   qualityProfile: DatasetBuild["quality_profile"];
+  viewRecipe?: DatasetViewRecipe;
+}
+
+function trainingRecipeBlockReasons(
+  bundle: TraceBundle,
+  recipe: DatasetViewRecipe,
+  excluded: readonly ExcludedContentPart[],
+): string[] {
+  if (recipe === "trace_full") return [];
+  try {
+    const compilation = compileSelectedTrainingRecipe(bundle, recipe as TrainingViewRecipe, excluded);
+    if (compilation.views.length > 0) return [];
+    const recipeReasons = compilation.exclusions
+      .flatMap((exclusion) => exclusion.reason_codes)
+      .filter((reason) => /^[A-Z0-9_]+$/u.test(reason))
+      .map((reason) => `VIEW_RECIPE_${reason}`);
+    return ["VIEW_RECIPE_NO_ELIGIBLE_VIEWS", ...recipeReasons];
+  } catch {
+    // Compiler errors can include provider content or local paths. Dataset
+    // planning is a policy boundary, so expose only a stable reason code.
+    return ["VIEW_RECIPE_COMPILATION_FAILED"];
+  }
+}
+
+function compileSelectedTrainingRecipe(
+  bundle: TraceBundle,
+  recipe: TrainingViewRecipe,
+  excluded: readonly ExcludedContentPart[],
+): TrainingViewCompilation {
+  const selected = selectExportView(bundle, excluded);
+  const compilerInput = recipe === "deepseek_epoch_sft"
+    ? {
+      ...selected,
+      // Export selection clears raw_sha256 when a redacted span is re-keyed.
+      // The raw capsules stay in memory for exact epoch replay, so restore only
+      // their original integrity commitment for the compiler. Canonical byte
+      // matching still excludes any epoch affected by redaction.
+      manifest: {
+        ...selected.manifest,
+        lineage: {
+          ...selected.manifest.lineage,
+          raw_sha256: bundle.manifest.lineage.raw_sha256,
+        },
+      },
+      raw: bundle.raw,
+    }
+    : selected;
+  return compileTrainingView(compilerInput, recipe);
 }
 
 /** The exact per-trace preflight used by both `dataset plan` and export. */
@@ -294,6 +366,7 @@ export function datasetTraceBlockReasons(
     ...gate.reasonCodes,
     ...validateApprovalScope(bundle, options.mode),
     ...(bundle.manifest.review.automated_checks === "passed" ? [] : ["AUTOMATED_CHECKS_NOT_PASSED"]),
+    ...trainingRecipeBlockReasons(bundle, options.viewRecipe ?? "trace_full", gate.excludedContentParts),
   ];
   if (options.target !== null) {
     if (decision.target_model_owner !== options.target.model_owner || decision.target_product !== options.target.product) {
@@ -429,61 +502,169 @@ function selectedNearDuplicateFeatures(view: Array<{
   };
 }
 
-function selectedTrainingViewFingerprint(
-  prepared: PreparedTrace,
-  mode: ApprovalMode,
+interface IdentifiedTrainingViewFingerprint extends TrainingViewFingerprint {
+  viewId: string;
+}
+
+function traceFullExampleAsSemanticView(example: DatasetExample): CompiledTrainingView {
+  const tools: CompiledTrainingView["tools"] = example.tools.map((tool, index) => {
+    const functionValue = tool.function;
+    if (tool.type !== "function" || functionValue === null || typeof functionValue !== "object"
+      || Array.isArray(functionValue)) {
+      throw new Error("trace_full HF view contains a malformed tool schema");
+    }
+    const definition = functionValue as Record<string, unknown>;
+    if (typeof definition.name !== "string" || definition.name.length === 0
+      || definition.parameters === null || typeof definition.parameters !== "object"
+      || Array.isArray(definition.parameters)) {
+      throw new Error("trace_full HF view contains an incomplete tool definition");
+    }
+    return {
+      type: "function",
+      function: {
+        name: definition.name,
+        ...(typeof definition.description === "string" ? { description: definition.description } : {}),
+        parameters: definition.parameters as Record<string, unknown>,
+      },
+      source_event_id: `trace_full_semantic_tool_${index}`,
+    };
+  });
+  return {
+    schema_version: "training-view/0.1",
+    view_id: example.id,
+    trace_id: example.trace_id,
+    // This internal projection lets the shared semantic fingerprint compiler
+    // inspect every legacy HF branch/session view. It is not serialized as a
+    // versioned training recipe and cannot be selected through the recipe API.
+    recipe: "trace_full" as TrainingViewRecipe,
+    recipe_version: DATASET_VIEW_RECIPE_VERSIONS.trace_full,
+    compiler_version: DATASET_TRAINING_VIEW_COMPILER_VERSION,
+    objective: "sft",
+    source_event_ids: [],
+    target_event_ids: [],
+    evidence_event_ids: [],
+    messages: example.messages.map((message) => ({
+      role: message.role as CompiledTrainingView["messages"][number]["role"],
+      content: typeof message.content === "string" ? message.content : null,
+      ...(typeof message.reasoning_content === "string" ? { reasoning_content: message.reasoning_content } : {}),
+      ...(Array.isArray(message.tool_calls)
+        ? { tool_calls: message.tool_calls as NonNullable<CompiledTrainingView["messages"][number]["tool_calls"]> }
+        : {}),
+      ...(typeof message.tool_call_id === "string" ? { tool_call_id: message.tool_call_id } : {}),
+      ...(typeof message.name === "string" ? { name: message.name } : {}),
+      source_event_ids: [],
+    })),
+    tools,
+    loss_targets: example.training_targets.map((target) => ({ ...target, source_event_ids: [] })),
+    reward: example.reward,
+    verifier_provenance: null,
+    metadata: {},
+  };
+}
+
+function semanticCompiledView(view: CompiledTrainingView): Record<string, unknown> {
+  const callIds = new Map<string, string>();
+  let nextCall = 0;
+  const normalizedCallId = (value: string): string => {
+    const existing = callIds.get(value);
+    if (existing !== undefined) return existing;
+    const normalized = `call_${nextCall}`;
+    nextCall += 1;
+    callIds.set(value, normalized);
+    return normalized;
+  };
+  const messages = view.messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    ...(message.reasoning_content === undefined ? {} : { reasoning_content: message.reasoning_content }),
+    ...(message.tool_calls === undefined ? {} : {
+      tool_calls: message.tool_calls.map((call) => ({
+        id: normalizedCallId(call.id),
+        type: call.type,
+        function: call.function,
+      })),
+    }),
+    ...(message.tool_call_id === undefined ? {} : { tool_call_id: normalizedCallId(message.tool_call_id) }),
+    ...(message.name === undefined ? {} : { name: message.name }),
+  }));
+  return {
+    recipe: view.recipe,
+    recipe_version: view.recipe_version,
+    compiler_version: view.compiler_version,
+    objective: view.objective,
+    messages,
+    tools: view.tools.map((tool) => ({ type: tool.type, function: tool.function })),
+    loss_targets: view.loss_targets.map((target) => ({
+      message_index: target.message_index,
+      components: target.components,
+      loss_weight: target.loss_weight,
+    })),
+    reward: view.reward,
+    verifier: view.verifier_provenance === null ? null : {
+      name: view.verifier_provenance.verifier.name,
+      version: view.verifier_provenance.verifier.version,
+    },
+  };
+}
+
+function compiledViewNearProjection(view: CompiledTrainingView) {
+  const semantic = semanticCompiledView(view);
+  const messages = semantic.messages as Array<Record<string, unknown>>;
+  const tools = semantic.tools as Array<Record<string, unknown>>;
+  return [
+    ...messages.map((message) => {
+      const content: Array<{
+        type: string;
+        mime_type: string;
+        value: string | null;
+        blob_ref: string | null;
+        sha256: string;
+      }> = [];
+      if (typeof message.content === "string") {
+        content.push({ type: "text", mime_type: "text/plain", value: message.content, blob_ref: null, sha256: sha256(message.content) });
+      }
+      if (typeof message.reasoning_content === "string") {
+        content.push({
+          type: "reasoning",
+          mime_type: "text/plain",
+          value: message.reasoning_content,
+          blob_ref: null,
+          sha256: sha256(message.reasoning_content),
+        });
+      }
+      if (Array.isArray(message.tool_calls)) {
+        const value = canonicalJson(message.tool_calls);
+        content.push({ type: "tool_call", mime_type: "application/json", value, blob_ref: null, sha256: sha256(value) });
+      }
+      return {
+        actor: String(message.role),
+        event_type: message.role === "tool" ? "tool.result" : "message",
+        content,
+        tool: null,
+      };
+    }),
+    ...tools.map((tool) => {
+      const value = canonicalJson(tool);
+      return {
+        actor: "system",
+        event_type: "retrieval",
+        content: [{ type: "file_ref", mime_type: "application/json", value, blob_ref: null, sha256: sha256(value) }],
+        tool: null,
+      };
+    }),
+  ];
+}
+
+function compiledTrainingViewFingerprint(
+  view: CompiledTrainingView,
   globalNearBudget?: { sourceBytes: number; features: number; failureReason: string | null },
 ): TrainingViewFingerprint {
-  const excluded = new Set(evaluateGate(prepared.bundle, mode).excludedContentParts
-    .map((part) => `${part.eventId}\0${part.ordinal}`));
-  const view = [...prepared.bundle.events]
-    .sort((left, right) => left.sequence - right.sequence
-      || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0))
-    .filter((event) => event.review_disposition === "include")
-    .filter((event) => !structuredToolProjectionExcluded(event, excluded))
-    .map((event) => ({
-      actor: event.actor,
-      event_type: event.event_type,
-      status: event.status,
-      content: event.content
-        .filter((part) => part.review_disposition === "include")
-        .filter((part) => !excluded.has(`${event.event_id}\0${part.ordinal}`))
-        .filter((part) => part.reasoning?.representation !== "opaque_reasoning_state")
-        .map((part) => ({
-          type: part.type,
-          mime_type: part.mime_type,
-          value: part.value,
-          blob_ref: part.value === null ? part.blob_ref : null,
-          sha256: part.sha256,
-          reasoning: part.reasoning === null ? null : {
-            representation: part.reasoning.representation,
-            include_in_loss: part.reasoning.include_in_loss,
-          },
-        })),
-      tool: event.tool === null ? null : {
-        name: event.tool.name,
-        arguments: event.tool.arguments,
-        result: event.tool.result,
-        exit_code: event.tool.exit_code,
-      },
-      training_metadata: {
-        ...(event.metadata.tool_schema === undefined ? {} : { tool_schema: event.metadata.tool_schema }),
-        ...(event.metadata.input_schema === undefined ? {} : { input_schema: event.metadata.input_schema }),
-      },
-    }));
-  const partSha256 = view.flatMap((event) => [
-    ...event.content.map((part) => sha256(canonicalJson({
-      actor: event.actor,
-      event_type: event.event_type,
-      part,
-    }))),
-    ...(event.tool === null ? [] : [sha256(canonicalJson({
-      actor: event.actor,
-      event_type: event.event_type,
-      tool: event.tool,
-      training_metadata: event.training_metadata,
-    }))]),
-  ]);
+  const semantic = semanticCompiledView(view);
+  const projection = compiledViewNearProjection(view);
+  const partSha256 = [
+    ...(semantic.messages as unknown[]).map((message) => sha256(canonicalJson({ message }))),
+    ...(semantic.tools as unknown[]).map((tool) => sha256(canonicalJson({ tool }))),
+  ];
   let near = globalNearBudget?.failureReason
     ? {
       nearFeatureSha256: [],
@@ -491,13 +672,12 @@ function selectedTrainingViewFingerprint(
       nearSourceUtf8Bytes: 0,
       nearFailureReason: globalNearBudget.failureReason,
     }
-    : selectedNearDuplicateFeatures(view);
+    : selectedNearDuplicateFeatures(projection);
   if (globalNearBudget !== undefined && globalNearBudget.failureReason === null) {
     globalNearBudget.sourceBytes += near.nearSourceUtf8Bytes;
     globalNearBudget.features += near.nearFeatureSha256.length;
-    if (near.nearFailureReason !== null) {
-      globalNearBudget.failureReason = near.nearFailureReason;
-    } else if (globalNearBudget.sourceBytes > DATASET_NEAR_DUPLICATE_CONFIG.max_source_utf8_bytes_total) {
+    if (near.nearFailureReason !== null) globalNearBudget.failureReason = near.nearFailureReason;
+    else if (globalNearBudget.sourceBytes > DATASET_NEAR_DUPLICATE_CONFIG.max_source_utf8_bytes_total) {
       globalNearBudget.failureReason = "DEDUPE_SOURCE_BYTES_TOTAL_LIMIT";
     } else if (globalNearBudget.features > DATASET_NEAR_DUPLICATE_CONFIG.max_features_total) {
       globalNearBudget.failureReason = "DEDUPE_FEATURES_TOTAL_LIMIT";
@@ -512,13 +692,35 @@ function selectedTrainingViewFingerprint(
     }
   }
   return {
-    viewSha256: sha256(canonicalJson({
-      compiler: DATASET_DEDUPE_COMPILER_VERSION,
-      events: view,
-    })),
+    viewSha256: sha256(canonicalJson({ compiler: DATASET_DEDUPE_COMPILER_VERSION, training_view: semantic })),
     partSha256,
     ...near,
   };
+}
+
+function selectedTrainingViewFingerprints(
+  prepared: PreparedTrace,
+  build: DatasetBuild,
+  globalNearBudget?: { sourceBytes: number; features: number; failureReason: string | null },
+): IdentifiedTrainingViewFingerprint[] {
+  if (build.view_recipe === "trace_full") {
+    const excluded = evaluateGate(prepared.bundle, build.mode).excludedContentParts;
+    const selected = selectExportView(prepared.bundle, excluded);
+    return toHfExamples(selected)
+      .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+      .map((example) => ({
+        viewId: example.id,
+        ...compiledTrainingViewFingerprint(traceFullExampleAsSemanticView(example), globalNearBudget),
+      }));
+  }
+  const compilation = prepared.trainingCompilation ?? compileSelectedTrainingRecipe(
+    prepared.bundle,
+    build.view_recipe as TrainingViewRecipe,
+    evaluateGate(prepared.bundle, build.mode).excludedContentParts,
+  );
+  return [...compilation.views]
+    .sort((left, right) => left.view_id < right.view_id ? -1 : left.view_id > right.view_id ? 1 : 0)
+    .map((view) => ({ viewId: view.view_id, ...compiledTrainingViewFingerprint(view, globalNearBudget) }));
 }
 
 function groupedWithinSplit<T extends { split: DatasetSplit; traceId: string }>(
@@ -531,7 +733,7 @@ function groupedWithinSplit<T extends { split: DatasetSplit; traceId: string }>(
   }
   return [...grouped.values()].flatMap((values) => {
     const traceIds = [...new Set(values.map((value) => value.traceId))].sort();
-    return traceIds.length > 1 ? [{ key: values[0]!.key, split: values[0]!.split, traceIds }] : [];
+    return values.length > 1 ? [{ key: values[0]!.key, split: values[0]!.split, traceIds }] : [];
   }).sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
 }
 
@@ -553,6 +755,8 @@ function groupedCrossSplit<T extends { split: DatasetSplit; traceId: string }>(
 
 export interface DatasetDedupeFeatureSet {
   trace_id: string;
+  /** Defaults to trace_id for the trace_full compatibility surface. */
+  view_id?: string;
   split: DatasetSplit;
   view_sha256: string;
   signature_sha256: string;
@@ -616,14 +820,17 @@ export function inspectDatasetNearDuplicateFeatureSets(
   }
   const records = inputRecords.map((record) => ({
     ...record,
+    view_id: record.view_id ?? record.trace_id,
     feature_sha256: [...new Set(record.feature_sha256)].sort(),
-  })).sort((left, right) => left.trace_id < right.trace_id ? -1 : left.trace_id > right.trace_id ? 1 : 0);
-  if (new Set(records.map((record) => record.trace_id)).size !== records.length) {
-    throw new Error("Near-duplicate inspection trace ids must be unique");
+  })).sort((left, right) => left.trace_id < right.trace_id ? -1 : left.trace_id > right.trace_id ? 1
+    : left.view_id < right.view_id ? -1 : left.view_id > right.view_id ? 1 : 0);
+  if (new Set(records.map((record) => `${record.trace_id}\0${record.view_id}`)).size !== records.length) {
+    throw new Error("Near-duplicate inspection trace/view identities must be unique");
   }
   let featureCount = 0;
   for (const record of records) {
     if (!/^[a-f0-9]{32}$/u.test(record.trace_id)
+      || record.view_id.length === 0 || record.view_id.length > 512 || /[\u0000-\u001f\u007f]/u.test(record.view_id)
       || !/^[a-f0-9]{64}$/u.test(record.view_sha256)
       || !/^[a-f0-9]{64}$/u.test(record.signature_sha256)
       || record.feature_sha256.some((feature) => !/^[a-f0-9]{64}$/u.test(feature))) {
@@ -693,11 +900,21 @@ export function inspectDatasetNearDuplicateFeatureSets(
       || intersection * 10_000 < DATASET_NEAR_DUPLICATE_CONFIG.threshold_bp * union
       || left.view_sha256 === right.view_sha256) continue;
     const traceIds: [string, string] = [left.trace_id, right.trace_id];
+    const viewIds: [string, string] = [left.view_id, right.view_id];
     candidates.push({
-      signature_sha256: sha256(`trajpack.dataset-near-duplicate-pair/v1\0${left.signature_sha256}\0${right.signature_sha256}\0${intersection}\0${union}`),
+      signature_sha256: sha256(canonicalJson({
+        domain: "trajpack.dataset-near-duplicate-pair/v2",
+        records: [
+          { trace_id: left.trace_id, view_id_sha256: sha256(left.view_id), signature_sha256: left.signature_sha256 },
+          { trace_id: right.trace_id, view_id_sha256: sha256(right.view_id), signature_sha256: right.signature_sha256 },
+        ],
+        intersection,
+        union,
+      })),
       similarity_bp: Math.floor((intersection * 10_000) / union),
       splits: [...new Set([left.split, right.split])].sort() as DatasetSplit[],
       trace_ids: traceIds,
+      view_ids: viewIds,
     });
   }
   return {
@@ -772,10 +989,9 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
       : left.bundle.manifest.trace_id > right.bundle.manifest.trace_id ? 1 : 0,
   );
   const globalNearBudget = { sourceBytes: 0, features: 0, failureReason: null as string | null };
-  const fingerprints = orderedPrepared.map((trace) => ({
-    trace,
-    fingerprint: selectedTrainingViewFingerprint(trace, build.mode, globalNearBudget),
-  }));
+  const fingerprints = orderedPrepared.flatMap((trace) => (
+    selectedTrainingViewFingerprints(trace, build, globalNearBudget).map((fingerprint) => ({ trace, fingerprint }))
+  ));
   const viewEntries = fingerprints.map(({ trace, fingerprint }) => ({
     key: fingerprint.viewSha256,
     split: trace.split,
@@ -785,13 +1001,16 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
   const withinSplit = groupedWithinSplit(viewEntries);
   const nearOrdered = [...fingerprints]
     .sort((left, right) => left.trace.bundle.manifest.trace_id < right.trace.bundle.manifest.trace_id ? -1
-      : left.trace.bundle.manifest.trace_id > right.trace.bundle.manifest.trace_id ? 1 : 0);
+      : left.trace.bundle.manifest.trace_id > right.trace.bundle.manifest.trace_id ? 1
+        : left.fingerprint.viewId < right.fingerprint.viewId ? -1
+          : left.fingerprint.viewId > right.fingerprint.viewId ? 1 : 0);
   const featureFailure = nearOrdered.find((entry) => entry.fingerprint.nearFailureReason !== null)
     ?.fingerprint.nearFailureReason ?? null;
   const nearPreflightFailure = globalNearBudget.failureReason ?? featureFailure;
   const nearRecords = nearOrdered.flatMap(({ trace, fingerprint }) => (
     fingerprint.nearSignatureSha256 === null ? [] : [{
       trace_id: trace.bundle.manifest.trace_id,
+      view_id: fingerprint.viewId,
       split: trace.split,
       view_sha256: fingerprint.viewSha256,
       signature_sha256: fingerprint.nearSignatureSha256,
@@ -859,18 +1078,20 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
   }
   if (overlap.length > 0) warnings.push("Some canonical training-view parts overlap; this is reported but is not an exact-trace duplicate gate");
   return {
-    schema_version: "dataset-audit/0.2",
+    schema_version: "dataset-audit/0.3",
     profile: build.quality_profile,
     compiler_versions: build.compiler_versions,
     trace_count: prepared.length,
     fallback_group_count: fallbackGroupCount,
     training_views: fingerprints.map(({ trace, fingerprint }) => ({
       trace_id: trace.bundle.manifest.trace_id,
+      view_id: fingerprint.viewId,
       split: trace.split,
       view_sha256: fingerprint.viewSha256,
       part_count: fingerprint.partSha256.length,
       near_shingle_count: fingerprint.nearFeatureSha256.length,
-    })).sort((left, right) => left.trace_id < right.trace_id ? -1 : left.trace_id > right.trace_id ? 1 : 0),
+    })).sort((left, right) => left.trace_id < right.trace_id ? -1 : left.trace_id > right.trace_id ? 1
+      : left.view_id < right.view_id ? -1 : left.view_id > right.view_id ? 1 : 0),
     exact_within_split_duplicates: withinSplit.map((entry) => ({
       view_sha256: entry.key,
       split: entry.split,
@@ -910,9 +1131,10 @@ function auditDataset(build: DatasetBuild, prepared: PreparedTrace[]): DatasetAu
 export function deriveDatasetAuditFromSelectedViews(
   inputBuild: DatasetBuild,
   inputBundles: TraceBundle[],
+  inputTrainingCompilations: ReadonlyMap<string, TrainingViewCompilation> = new Map(),
 ): DatasetAudit {
   const build = datasetBuildSchema.parse(inputBuild);
-  if (canonicalJson(build.compiler_versions) !== canonicalJson(CURRENT_DATASET_COMPILER_VERSIONS)) {
+  if (canonicalJson(build.compiler_versions) !== canonicalJson(datasetCompilerVersionsForRecipe(build.view_recipe))) {
     throw new Error("Unsupported dataset compiler versions; the selected-view audit cannot be rederived");
   }
   const bundles = inputBundles.map((bundle) => traceBundleSchema.parse(bundle));
@@ -920,16 +1142,22 @@ export function deriveDatasetAuditFromSelectedViews(
   if (byId.size !== bundles.length || byId.size !== build.traces.length) {
     throw new Error("Audit derivation requires exactly one canonical selected view per frozen trace id");
   }
-  const prepared = [...build.traces]
+  const prepared: PreparedTrace[] = [...build.traces]
     .sort((left, right) => left.trace_id < right.trace_id ? -1 : left.trace_id > right.trace_id ? 1 : 0)
     .map((buildTrace) => {
       const bundle = byId.get(buildTrace.trace_id);
       if (!bundle) throw new Error(`Audit derivation is missing selected view ${buildTrace.trace_id}`);
-      return {
+      const base: PreparedTrace = {
         bundle,
         buildTrace,
         split: splitForGroup(build.split_policy, buildTrace.split_group_id),
       };
+      if (build.view_recipe === "trace_full") return base;
+      const trainingCompilation = inputTrainingCompilations.get(buildTrace.trace_id);
+      if (trainingCompilation === undefined) {
+        throw new Error(`Audit derivation is missing authenticated training views for ${buildTrace.trace_id}`);
+      }
+      return { ...base, trainingCompilation };
     });
   return auditDataset(build, prepared);
 }
@@ -1197,6 +1425,7 @@ function datasetCard(build: DatasetBuild, manifest: DatasetManifest, audit: Data
     + `- Eligibility mode: \`${manifest.mode}\`\n`
     + `- Target: \`${safe(manifest.target === null ? "none" : `${manifest.target.model_owner}/${manifest.target.product}`)}\`\n`
     + `- View recipe: \`${manifest.view_recipe}\`\n`
+    + `- View recipe version: \`${safe(manifest.view_recipe_version)}\`\n`
     + `- View compiler: \`${manifest.compiler_versions.view}\`\n`
     + `- Quality compiler: \`${manifest.compiler_versions.quality}\`\n`
     + `- Dedupe compiler: \`${manifest.compiler_versions.dedupe}\`\n`
@@ -1406,6 +1635,9 @@ export async function exportApprovedDataset(
     && build.mode !== "training_noncompetitive" && build.mode !== "training_competitive_distillation") {
     throw new Error("HF/TRL dataset exports require an explicit training eligibility mode");
   }
+  if (build.view_recipe !== "trace_full" && options.format !== "hf-trl") {
+    throw new Error("Versioned dataset training-view recipes are available only for HF/TRL exports");
+  }
   const bundles = inputBundles.map((bundle) => traceBundleSchema.parse(bundle));
   const byId = new Map(bundles.map((bundle) => [bundle.manifest.trace_id, bundle]));
   if (byId.size !== bundles.length || byId.size !== build.traces.length) {
@@ -1437,6 +1669,9 @@ export async function exportApprovedDataset(
         format: options.format,
         outputDirectory: directory,
         mode: build.mode,
+        ...(build.view_recipe === "trace_full"
+          ? {}
+          : { trainingRecipe: build.view_recipe as TrainingViewRecipe }),
       });
       const artifact = await readSelectedArtifact(options.format, directory);
       selectedArtifacts.push({
@@ -1475,7 +1710,7 @@ export async function exportApprovedDataset(
     const createdAt = options.createdAt ?? new Date();
     const manifestWithoutArtifacts = {
       record_type: "dataset_manifest" as const,
-      schema_version: "dataset/0.1" as const,
+      schema_version: DATASET_MANIFEST_VERSION,
       dataset_id: datasetId,
       name: build.name,
       created_at: createdAt.toISOString(),
@@ -1485,6 +1720,7 @@ export async function exportApprovedDataset(
       target: build.target,
       policy_version: POLICY_VERSION,
       view_recipe: build.view_recipe,
+      view_recipe_version: build.view_recipe_version,
       quality_profile: build.quality_profile,
       compiler_versions: build.compiler_versions,
       split_policy: build.split_policy,
@@ -1506,6 +1742,8 @@ export async function exportApprovedDataset(
       splits,
       format: options.format,
       mode: build.mode,
+      view_recipe: build.view_recipe,
+      view_recipe_version: build.view_recipe_version,
       selection_sha256: sha256(selectionCanonical),
       audit_sha256: sha256(auditCanonical),
       stats_sha256: sha256(statsCanonical),

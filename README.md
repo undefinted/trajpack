@@ -48,8 +48,8 @@
 | **Codex interactive / rich client** | One-shot `arm` + plugin hooks; pinned App Server v2 records can be mapped offline | 🟡 Constrained | v0.1 does not start or proxy App Server stdio, and never parses unstable local transcripts. |
 | **[Claude Code headless](https://code.claude.com/docs/en/headless)** | Wrapper enforces `--print --output-format stream-json --verbose` | ✅ Native | Visible thinking is a provider summary or opaque state, never asserted to be raw CoT. |
 | **Claude Code interactive** | One-shot `arm` + lifecycle/tool/subagent hooks | 🟡 Constrained | An authenticated transcript may be retained only as an encrypted opaque artifact; its private JSONL schema is not parsed. |
-| **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | Plugin using the documented hook surface through `capture gemini` or one-shot `arm gemini` | ✅ Native hooks | Pinned to `gemini-cli-hook/1`; only observable hook payloads are retained, with no hidden-thinking claim. |
-| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | Native typed `session/event` plugin for DeepSeek AI's official Developer Preview | ✅ Native preview (A−) | Pinned and fixture-tested against Harness `0.1.0-rc.6`; exact request-epoch SFT is available, while gaps, resumed partial context, conflicting duplicates, route conflicts, and unknown interfaces fail closed. |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md)** | Plugin using the documented hook surface through `capture gemini` or one-shot `arm gemini` | ✅ Native hooks | Pinned to `gemini-cli-hook/1`; ambiguous `AfterModel` text/thought chunks are review-only and training-excluded, while `AfterAgent` is authoritative. |
+| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | Native typed `session/event` plugin for DeepSeek AI's official Developer Preview | ✅ Native preview (A−) | Pinned to Harness `0.1.0-rc.6`; exact request-epoch SFT and bounded pre-collector queues are tested, while gaps, overload, resumed partial context, conflicting duplicates, route conflicts, and unknown interfaces fail closed. |
 | **Saved Harness session** | Official unpacked session JSONL via `--source-hint dsh-session` | ✅ Import (B) | Accepts only uncompressed, unpacked persistence v0. The artifact is marked `user_supplied`; packed rows and zstd input are refused. |
 | **Saved DeepSeek API response** | Offline JSON/streaming-JSONL import | ✅ Import | Shape validation is not provider authentication; imported artifacts remain user-supplied until separately evidenced. |
 | **ChatGPT web** | User-downloaded official ZIP/JSON/HTML export | 🟡 Archive/import | No live-page selector, network interception, cookie access, or automatic web capture. |
@@ -165,7 +165,7 @@ capture/import → policy explain → evidence-backed override when required
 → review and approve → dataset plan → export → validate → train/evaluate elsewhere
 ```
 
-For an approved single trace, a versioned HF/TRL recipe can derive a narrowly scoped training view without changing the encrypted evidence layer:
+For approved traces, a versioned HF/TRL recipe can derive narrowly scoped training views without changing the encrypted evidence layer:
 
 ```bash
 pnpm trajpack export <trace-id> \
@@ -176,7 +176,7 @@ pnpm trajpack export <trace-id> \
   --plaintext
 ```
 
-The seven recipes are `answer_sft`, `reasoning_sft`, `tool_use_sft`, `deepseek_epoch_sft`, `failure_recovery`, `subagent_handoff`, and `pointwise_reward_rl_ready`. For a complete pinned Harness trace, `deepseek_epoch_sft` is the highest-fidelity path: it replays the rc.6 raw durable log into request epochs and requires the provider/model route, request header, system prompt, native tools, compaction-aware model-visible surface, and completed output to align exactly with review-included, privacy-passed canonical projections. `reasoning_sft` accepts only complete `provider_exposed_reasoning`; summaries, opaque states, unavailable reasoning, and partial-only streams are excluded. `pointwise_reward_rl_ready` emits verified scalar-reward evidence with versioned verifier provenance and reviewer confirmation for downstream reward-model/RL research—it does not fabricate a chosen/rejected DPO pair, a step reward, or a success label. Recipe export is single-trace in v0.1. Frozen multi-trace builds use the audited `trace_full` view only for sources whose topology can be represented unambiguously; DeepSeek Harness HF/TRL export requires an explicit versioned recipe and intentionally rejects `trace_full`.
+The seven recipes are `answer_sft`, `reasoning_sft`, `tool_use_sft`, `deepseek_epoch_sft`, `failure_recovery`, `subagent_handoff`, and `pointwise_reward_rl_ready`. For a complete pinned Harness trace, `deepseek_epoch_sft` is the highest-fidelity path: it replays the rc.6 raw durable log into request epochs and requires the provider/model route, request header, system prompt, native tools, compaction-aware model-visible surface, and completed output to align exactly with review-included, privacy-passed canonical projections. `reasoning_sft` accepts only complete `provider_exposed_reasoning`; summaries, opaque states, unavailable reasoning, and partial-only streams are excluded. `pointwise_reward_rl_ready` emits verified scalar-reward evidence with versioned verifier provenance and reviewer confirmation for downstream reward-model/RL research—it does not fabricate a chosen/rejected DPO pair, a step reward, or a success label. The same frozen recipe now applies to every trace in a multi-trace HF/TRL build. Dedupe and contamination gates run per compiled example, including every legacy `trace_full` session/branch, rather than only once per parent trace. DeepSeek Harness HF/TRL export still requires an explicit versioned recipe and intentionally rejects `trace_full`.
 
 Cross-adapter recipes deliberately do not guess Harness context. On a Harness trace, a resumed session with `firstLiveSeq > 0` blocks every training recipe; recapture or import a complete sequence-zero log. A prior `surfaceOp: replace` blocks the generic target recipe and directs a complete trace to `deepseek_epoch_sft`, whose epoch replay applies the replacement. Missing `request/header`, provider/model mismatch, raw/canonical drift, or an unreconstructable epoch also fail closed.
 
@@ -188,6 +188,7 @@ pnpm trajpack dataset plan <trace-id> <trace-id> \
   --mode training_competitive_distillation \
   --target-model-owner my-lab \
   --target-product student-v1 \
+  --recipe deepseek_epoch_sft \
   --seed paper-ablation-1 \
   --group-map ./private-groups.json \
   --quality-profile research_strict \
@@ -225,6 +226,10 @@ pnpm trajpack analyze <trace-id> [<trace-id> ...] --format tracelab-jsonl
 
 [TraceLab](https://github.com/uw-syfi/TraceLab) is an analytics inspiration, not a runtime dependency. TraceLab focuses on studying agent-serving workloads; trajpack focuses on governed, reviewable transformation from observable evidence into versioned SFT or verifier-backed pointwise-RL views. Canonical content, rights, redactions, topology, and lineage remain under trajpack governance, while the TraceLab-shaped projection contains aggregate/digest-level workload fields only.
 
+See the bilingual [feasibility evidence matrix](docs/feasibility-validation.md)
+for the audited TraceLab comparison, current validation level of every capture
+surface, and the exact experiment still needed for publication-grade proof.
+
 An export is not evidence that a dataset improves a model. The
 [trajectory-utility protocol](docs/trajectory-utility-evaluation.md) separates
 pipeline smoke tests, narrow small-model learning checks, matched benchmark
@@ -253,6 +258,13 @@ complete-trajectory SFT reached 31/32 tool-using E2E, while answer-only and base
 remained at 0/32. The [cluster result card](experiments/trajectory-utility/results/cluster-h100-20260820.md)
 records the separate source hash, stack, artifact checks, bring-up failures, and
 the same non-causal limitations.
+
+The GPU ablations consume deterministic `generate_data.py` DatasetExamples,
+not a live provider capture. Separately, the committed two-epoch synthetic
+Harness artifact is exercised through exporter-compatible JSONL/Parquet and the
+strict ChatML bridge. Together these establish narrow utility evidence plus
+structural raw-to-training compatibility; they are not yet one real-provider
+raw-vault-to-GPU experiment.
 
 ### Load with Hugging Face Datasets and TRL
 
@@ -321,7 +333,7 @@ Run `pnpm trajpack <command> --help` for the exact required options. Unknown sou
 
 ## Known limits
 
-- No hidden reasoning recovery, browser network capture, token/cookie access, or commercial-site DOM preset. Claude thinking signatures are opaque provider protocol state, not a cross-model training source; see the [supported boundary](docs/claude-thinking-signatures.md).
+- No hidden reasoning recovery, browser network capture, token/cookie access, or commercial-site DOM preset. An [August 2026 disclosure](https://arxiv.org/abs/2608.09867) demonstrated historical opaque-state replay paths but says they stopped reproducing after provider mitigations; its proxy signals are not authenticated raw CoT. trajpack keeps such state as potential secrets in the encrypted vault and never replays or decodes it; see the [supported boundary](docs/claude-thinking-signatures.md).
 - Gemini Takeout import is a fidelity-B flat activity snapshot; it does not manufacture missing turns, tool edges, or chronology.
 - The current Gemini CLI hook surface may lack a provider tool-call ID; trajpack records a deterministic synthetic pairing key, so identical concurrent calls are a documented fidelity limit.
 - Codex App Server support is an offline pinned mapper, not a live App Server proxy.

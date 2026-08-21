@@ -151,6 +151,7 @@ trajpack dataset plan <trace-id> <trace-id> \
   --name paper-ablation-1 \
   --mode training_competitive_distillation \
   --target-model-owner my-lab --target-product student-v1 \
+  --recipe deepseek_epoch_sft \
   --seed paper-ablation-1 \
   --train 8000 --validation 1000 --test 1000 \
   --group-map ./private-groups.json \
@@ -170,16 +171,16 @@ Planning runs the same per-trace quality warning gates as export. A strict plan
 therefore fails immediately on missing repo/test/verifier evidence rather than
 creating a build that can never be exported.
 
-`trace_full` remains the frozen multi-trace build recipe in v0.1 for sources
-whose topology can be projected unambiguously. The HF compiler separates source
-sessions and parent-linked message branches within that view. DeepSeek Harness
-is intentionally excluded from `trace_full` HF/TRL export: its request epochs,
-surface replacement, route changes, and three-layer tool lifecycle require an
-explicit versioned recipe. Approved **single traces** can use one of seven
-versioned training-view recipes; those recipes are not yet accepted by
-`dataset plan`, so they cannot be silently mixed into a multi-trace build.
+`dataset-build/0.2` freezes one view recipe and version for every trace.
+`dataset plan --recipe` accepts all seven versioned training views for HF/TRL
+builds. The audit fingerprints every compiled example independently; it also
+decomposes legacy `trace_full` into source-session and parent-linked branch
+examples so overlap cannot hide inside an otherwise different parent trace.
+DeepSeek Harness is intentionally excluded from `trace_full` HF/TRL export:
+request epochs, surface replacement, route changes, and its three-layer tool
+lifecycle require the explicit `deepseek_epoch_sft` recipe.
 
-| Single-trace recipe | Training semantics | Required evidence |
+| Recipe | Training semantics | Required evidence |
 | --- | --- | --- |
 | `answer_sft` | Supervise completed assistant answer text. | Completed, privacy-cleared assistant/agent message. |
 | `reasoning_sft` | Supervise observable reasoning explicitly opted into this view. | Complete `provider_exposed_reasoning`, visible source field, and provider `chain_of_thought` claim. Partial-only streams, summaries, opaque and unavailable states are excluded. |
@@ -188,6 +189,14 @@ versioned training-view recipes; those recipes are not yet accepted by
 | `failure_recovery` | Supervise an observed recovery action after failure. | Failed tool result, explicit retry marker, recovery action, and observed successful result; no synthetic success label. |
 | `subagent_handoff` | Supervise a completed delegated response. | Correlated `agent.invoke`/`handoff` events and privacy-cleared delegated context. |
 | `pointwise_reward_rl_ready` | Export a response with verified scalar-reward evidence for downstream reward-model/RL research. | Finite numeric reward, versioned verifier evidence, matching reviewer confirmation, and a preceding completed response. This is not a DPO pair or step reward. |
+
+Historical `dataset-build/0.1` selections are never silently reinterpreted.
+Migrate the build into a new file, review its compiler changes, then export:
+
+```bash
+trajpack dataset migrate ./paper-ablation-legacy.build.json \
+  --output ./paper-ablation-v0.2.build.json
+```
 
 Example:
 

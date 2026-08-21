@@ -145,8 +145,10 @@ trajpack validate ./exports/dsh-exact-epoch
 The recipe is mandatory for DeepSeek Harness HF/TRL output. The exporter rejects
 the generic `trace_full` view instead of flattening request epochs, surface
 replacement, route changes, or duplicated stream/assembled/execution tool
-records into ambiguous supervision. Versioned recipe export is single-trace in
-v0.1; recipe-aware multi-trace builds are planned for a later schema version.
+records into ambiguous supervision. `dataset-build/0.2` supports
+`--recipe deepseek_epoch_sft` across a frozen multi-trace build; every compiled
+request epoch receives its own view ID, exact/near-duplicate fingerprint, split
+binding, report, and DatasetExample lineage.
 
 The seven v0.1 recipes are:
 

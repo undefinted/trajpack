@@ -1,4 +1,5 @@
 import type {
+  DatasetExample,
   Source,
   TraceBundle,
   TrajectoryEvent,
@@ -6,6 +7,9 @@ import type {
   VerifierEvidence,
 } from "@trajpack/schema";
 import {
+  DATASET_TRAINING_VIEW_COMPILER_VERSION,
+  DATASET_VIEW_RECIPE_VERSIONS,
+  datasetExampleSchema,
   traceBundleSchema,
   verifierConfirmationSchema,
   verifierEvidenceSchema,
@@ -30,16 +34,16 @@ import { structuredToolProjectionExcluded } from "./selection.js";
  * than labels. In particular, it never constructs a preference pair, a step
  * reward, or a success label from ordering, status, or a tool exit code.
  */
-export const TRAINING_VIEW_COMPILER_VERSION = "training-view-compiler/0.2" as const;
+export const TRAINING_VIEW_COMPILER_VERSION = DATASET_TRAINING_VIEW_COMPILER_VERSION;
 
 export const TRAINING_VIEW_RECIPE_VERSIONS = Object.freeze({
-  answer_sft: "answer-sft/0.1",
-  reasoning_sft: "provider-exposed-reasoning-sft/0.1",
-  tool_use_sft: "native-tool-use-sft/0.1",
-  deepseek_epoch_sft: "deepseek-exact-request-epoch-sft/0.1",
-  failure_recovery: "evidenced-failure-recovery-sft/0.1",
-  subagent_handoff: "subagent-handoff-sft/0.1",
-  pointwise_reward_rl_ready: "verified-pointwise-reward/0.1",
+  answer_sft: DATASET_VIEW_RECIPE_VERSIONS.answer_sft,
+  reasoning_sft: DATASET_VIEW_RECIPE_VERSIONS.reasoning_sft,
+  tool_use_sft: DATASET_VIEW_RECIPE_VERSIONS.tool_use_sft,
+  deepseek_epoch_sft: DATASET_VIEW_RECIPE_VERSIONS.deepseek_epoch_sft,
+  failure_recovery: DATASET_VIEW_RECIPE_VERSIONS.failure_recovery,
+  subagent_handoff: DATASET_VIEW_RECIPE_VERSIONS.subagent_handoff,
+  pointwise_reward_rl_ready: DATASET_VIEW_RECIPE_VERSIONS.pointwise_reward_rl_ready,
 } as const);
 
 export type TrainingViewRecipe = keyof typeof TRAINING_VIEW_RECIPE_VERSIONS;
@@ -1668,4 +1672,208 @@ export function compileTrainingViews(
 ): TrainingViewCompilation[] {
   const uniqueRecipes = [...new Set(recipes)];
   return uniqueRecipes.map((recipe) => compileTrainingView(input, recipe));
+}
+
+/** Deterministic public projection shared by export and offline validation. */
+export function datasetExampleFromTrainingView(
+  inputBundle: TraceBundle,
+  view: CompiledTrainingView,
+): DatasetExample {
+  const bundle = traceBundleSchema.parse(inputBundle);
+  const enabledMessages = new Set(view.loss_targets.map((target) => target.message_index));
+  return datasetExampleSchema.parse({
+    id: view.view_id,
+    trace_id: view.trace_id,
+    source_event_ids: view.source_event_ids,
+    messages: view.messages.map((message) => ({ ...message })),
+    tools: view.tools.map((tool) => ({ ...tool })),
+    assistant_loss_mask: view.messages.map((_, index) => enabledMessages.has(index)),
+    training_targets: view.loss_targets.map((target) => ({
+      message_index: target.message_index,
+      components: target.components,
+      loss_weight: target.loss_weight,
+      source_event_ids: target.source_event_ids,
+    })),
+    reward: view.reward,
+    verifier: view.verifier_provenance === null
+      ? null
+      : {
+        name: view.verifier_provenance.verifier.name,
+        version: view.verifier_provenance.verifier.version,
+      },
+    metadata: {
+      source: bundle.manifest.source,
+      rights: bundle.manifest.rights,
+      eligibility: bundle.manifest.eligibility,
+      review: bundle.manifest.review,
+      lineage: bundle.manifest.lineage,
+      view: {
+        recipe: view.recipe,
+        recipe_version: view.recipe_version,
+        compiler_version: view.compiler_version,
+        objective: view.objective,
+        target_event_ids: view.target_event_ids,
+        evidence_event_ids: view.evidence_event_ids,
+        verifier_provenance: view.verifier_provenance,
+        ...view.metadata,
+      },
+    },
+  });
+}
+
+function reportRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function reportStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+    throw new Error(`${label} must be a string array`);
+  }
+  return [...value] as string[];
+}
+
+/**
+ * Parse and authenticate a training-view report, then bind it byte-for-byte to
+ * the per-trace DatasetExample rows. Recipes derived only from canonical events
+ * are independently recompiled. DeepSeek request epochs additionally depend on
+ * encrypted raw capsules, so an exported dataset can validate report integrity
+ * and canonical-event references but cannot prove the raw replay independently.
+ */
+export function assertTrainingViewReportExamples(
+  input: unknown,
+  inputBundle: TraceBundle,
+  inputExamples: readonly DatasetExample[],
+  expectedRecipe: TrainingViewRecipe,
+): TrainingViewCompilation {
+  const bundle = traceBundleSchema.parse(inputBundle);
+  const report = reportRecord(input, "training view report");
+  if (report.schema_version !== "training-view-compilation/0.1"
+    || report.trace_id !== bundle.manifest.trace_id
+    || report.recipe !== expectedRecipe
+    || report.recipe_version !== TRAINING_VIEW_RECIPE_VERSIONS[expectedRecipe]
+    || report.compiler_version !== TRAINING_VIEW_COMPILER_VERSION
+    || !Array.isArray(report.views) || !Array.isArray(report.exclusions)
+    || typeof report.compilation_sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(report.compilation_sha256)) {
+    throw new Error("Training view report has invalid identity or compiler metadata");
+  }
+  const views = report.views.map((view) => {
+    const record = reportRecord(view, "training view");
+    const parsed = {
+      ...record,
+      source_event_ids: reportStringArray(record.source_event_ids, "training view source_event_ids"),
+      target_event_ids: reportStringArray(record.target_event_ids, "training view target_event_ids"),
+      evidence_event_ids: reportStringArray(record.evidence_event_ids, "training view evidence_event_ids"),
+    } as unknown as CompiledTrainingView;
+    if (record.schema_version !== "training-view/0.1" || typeof record.view_id !== "string"
+      || record.trace_id !== bundle.manifest.trace_id || record.recipe !== expectedRecipe
+      || record.recipe_version !== TRAINING_VIEW_RECIPE_VERSIONS[expectedRecipe]
+      || record.compiler_version !== TRAINING_VIEW_COMPILER_VERSION
+      || !["sft", "pointwise_reward"].includes(String(record.objective))
+      || !Array.isArray(record.messages) || !Array.isArray(record.tools) || !Array.isArray(record.loss_targets)
+      || (record.reward !== null && (typeof record.reward !== "number" || !Number.isFinite(record.reward)))
+      || record.metadata === null || typeof record.metadata !== "object" || Array.isArray(record.metadata)) {
+      throw new Error("Training view report contains an invalid compiled view");
+    }
+    const identity = {
+      trace_id: parsed.trace_id,
+      recipe: parsed.recipe,
+      recipe_version: parsed.recipe_version,
+      objective: parsed.objective,
+      target_event_ids: parsed.target_event_ids,
+      evidence_event_ids: parsed.evidence_event_ids,
+      source_event_ids: parsed.source_event_ids,
+      messages: parsed.messages,
+      tools: parsed.tools,
+      loss_targets: parsed.loss_targets,
+      reward: parsed.reward,
+      verifier_provenance: parsed.verifier_provenance,
+      metadata: parsed.metadata,
+    };
+    if (parsed.view_id !== stableId("training_view", identity, 32)) {
+      throw new Error("Training view report contains a stale or forged view id");
+    }
+    return parsed;
+  });
+  if (views.length === 0 || new Set(views.map((view) => view.view_id)).size !== views.length) {
+    throw new Error("Training view report must contain unique compiled views");
+  }
+  const eventIds = new Set(bundle.events.map((event) => event.event_id));
+  const requireCanonicalReference = (eventId: string, label: string): void => {
+    if (!eventIds.has(eventId)) throw new Error(`${label} references an event outside the selected canonical bundle`);
+  };
+  for (const view of views) {
+    for (const eventId of [...view.source_event_ids, ...view.target_event_ids, ...view.evidence_event_ids]) {
+      requireCanonicalReference(eventId, "Training view");
+    }
+    for (const message of view.messages) {
+      for (const eventId of message.source_event_ids) requireCanonicalReference(eventId, "Training view message");
+    }
+    for (const target of view.loss_targets) {
+      for (const eventId of target.source_event_ids) requireCanonicalReference(eventId, "Training loss target");
+    }
+    for (const tool of view.tools) requireCanonicalReference(tool.source_event_id, "Training tool schema");
+    if (view.verifier_provenance !== null) {
+      requireCanonicalReference(view.verifier_provenance.source_event_id, "Training verifier provenance");
+    }
+  }
+  const exclusions = report.exclusions.map((exclusionValue) => {
+    const exclusion = reportRecord(exclusionValue, "training view exclusion");
+    const parsed = {
+      exclusion_id: exclusion.exclusion_id,
+      trace_id: exclusion.trace_id,
+      recipe: exclusion.recipe,
+      candidate_event_ids: reportStringArray(exclusion.candidate_event_ids, "training view exclusion candidate_event_ids"),
+      reason_codes: reportStringArray(exclusion.reason_codes, "training view exclusion reason_codes"),
+      detail: exclusion.detail,
+    } as TrainingViewExclusion;
+    if (typeof parsed.exclusion_id !== "string" || parsed.exclusion_id.length === 0
+      || parsed.trace_id !== bundle.manifest.trace_id || parsed.recipe !== expectedRecipe
+      || typeof parsed.detail !== "string" || parsed.detail.length === 0) {
+      throw new Error("Training view report contains an invalid exclusion");
+    }
+    for (const eventId of parsed.candidate_event_ids) requireCanonicalReference(eventId, "Training view exclusion");
+    const ids = [...new Set(parsed.candidate_event_ids)];
+    const codes = [...new Set(parsed.reason_codes)].sort();
+    if (canonicalJson(ids) !== canonicalJson(parsed.candidate_event_ids)
+      || canonicalJson(codes) !== canonicalJson(parsed.reason_codes)
+      || parsed.exclusion_id !== stableId("view_exclusion", {
+        traceId: parsed.trace_id,
+        recipe: parsed.recipe,
+        ids,
+        codes,
+        detail: parsed.detail,
+      })) {
+      throw new Error("Training view report contains a stale or forged exclusion id");
+    }
+    return parsed;
+  });
+  if (new Set(exclusions.map((exclusion) => exclusion.exclusion_id)).size !== exclusions.length) {
+    throw new Error("Training view report contains duplicate exclusions");
+  }
+  const base = {
+    schema_version: "training-view-compilation/0.1" as const,
+    trace_id: bundle.manifest.trace_id,
+    recipe: expectedRecipe,
+    recipe_version: TRAINING_VIEW_RECIPE_VERSIONS[expectedRecipe],
+    compiler_version: TRAINING_VIEW_COMPILER_VERSION,
+    views,
+    exclusions,
+  };
+  if (report.compilation_sha256 !== sha256(canonicalJson(base))) {
+    throw new Error("Training view report compilation hash does not match its content");
+  }
+  const examples = inputExamples.map((example) => datasetExampleSchema.parse(example));
+  const expectedExamples = views.map((view) => datasetExampleFromTrainingView(bundle, view));
+  if (canonicalJson(examples) !== canonicalJson(expectedExamples)) {
+    throw new Error("Training view report does not match the exported DatasetExample rows");
+  }
+  const compilation = { ...base, compilation_sha256: report.compilation_sha256 } as TrainingViewCompilation;
+  if (expectedRecipe !== "deepseek_epoch_sft"
+    && canonicalJson(compilation) !== canonicalJson(compileTrainingView(bundle, expectedRecipe))) {
+    throw new Error("Training view report does not match an independent canonical-event recompilation");
+  }
+  return compilation;
 }

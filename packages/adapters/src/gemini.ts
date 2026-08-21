@@ -10,6 +10,7 @@ import {
   nestedRecord,
   parseJsonLines,
   renumberEvents,
+  sanitizeOpaqueProviderState,
   sha256,
   type NormalizeOptions,
   type NormalizedBatch,
@@ -87,6 +88,14 @@ function endStatus(reason: unknown): TrajectoryEvent["status"] {
   return reason === "error" || reason === "failed" ? "error" : "ok";
 }
 
+function excludeAmbiguousModelObservation(event: TrajectoryEvent): TrajectoryEvent {
+  return {
+    ...event,
+    content: event.content.map((part) => ({ ...part, review_disposition: "exclude" as const })),
+    review_disposition: "exclude",
+  };
+}
+
 /**
  * Normalize one official Gemini CLI hook stdin object. The hook API exposes
  * visible prompts, stable model request/response projections, tool I/O, and
@@ -156,20 +165,25 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
   }
   if (hook === "BeforeModel" || hook === "BeforeToolSelection") {
     const request = nestedRecord(payload, "llm_request");
+    const projectedRequest = sanitizeOpaqueProviderState(request);
     const model = request === null ? null : firstString(request, ["model"]);
     const messages = request !== null && Array.isArray(request.messages) ? request.messages : [];
-    return { raw, events: [make(0, {
+    return { raw, events: [excludeAmbiguousModelObservation(make(0, {
       eventType: "model.inference",
       actor: "assistant",
       status: "partial",
-      content: request === null ? [] : [contentPart(request)],
+      content: request === null ? [] : [contentPart(projectedRequest.value)],
       metadata: {
         model,
         request_message_count: messages.length,
         tool_selection_only: hook === "BeforeToolSelection",
         reasoning_representation: "unavailable",
+        opaque_provider_state_removed: projectedRequest.removed,
+        opaque_provider_state_scan_truncated: projectedRequest.truncated,
+        training_excluded: true,
+        exclusion_reason: "GEMINI_HOOK_MODEL_CONTENT_SEMANTICS_AMBIGUOUS",
       },
-    })] };
+    }))] };
   }
   if (hook === "AfterModel") {
     const request = nestedRecord(payload, "llm_request");
@@ -179,16 +193,22 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
     const usage = geminiUsage(response.usageMetadata ?? response.usage_metadata);
     const model = request === null ? null : firstString(request, ["model"]);
     if (texts.length === 0) {
-      return { raw, events: [make(0, {
+      return { raw, events: [excludeAmbiguousModelObservation(make(0, {
         eventType: "model.inference",
         actor: "assistant",
         status: "partial",
         usage,
-        metadata: { model, streaming_chunk: true, reasoning_representation: "unavailable" },
-      })] };
+        metadata: {
+          model,
+          streaming_chunk: true,
+          reasoning_representation: "unavailable",
+          training_excluded: true,
+          exclusion_reason: "GEMINI_HOOK_MODEL_CONTENT_SEMANTICS_AMBIGUOUS",
+        },
+      }))] };
     }
-    return { raw, events: texts.map(({ text, index }, position) => make(position, {
-      eventType: "message",
+    return { raw, events: texts.map(({ text, index }, position) => excludeAmbiguousModelObservation(make(position, {
+      eventType: "model.inference",
       actor: "assistant",
       status: "partial",
       content: [contentPart(text)],
@@ -199,17 +219,21 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
         streaming_chunk: true,
         authoritative_final: false,
         reasoning_representation: "unavailable",
+        training_excluded: true,
+        exclusion_reason: "GEMINI_HOOK_MODEL_CONTENT_SEMANTICS_AMBIGUOUS",
       },
-    })) };
+    }))) };
   }
   if (hook === "BeforeTool" || hook === "AfterTool") {
     const name = firstString(payload, ["tool_name"]);
     const identity = toolCallIdentity(payload, sessionId);
     const result = hook === "AfterTool" ? payload.tool_response ?? null : null;
+    const projectedInput = sanitizeOpaqueProviderState(payload.tool_input ?? null);
+    const projectedResult = sanitizeOpaqueProviderState(result);
     const response = isRecord(result) ? result : null;
     const failed = response !== null && response.error !== undefined && response.error !== null;
     const content: ContentPart[] = [contentPart(
-      hook === "BeforeTool" ? payload.tool_input ?? null : result,
+      hook === "BeforeTool" ? projectedInput.value : projectedResult.value,
       0,
       { type: hook === "BeforeTool" ? "tool_call" : "tool_result" },
     )];
@@ -218,11 +242,13 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
       actor: hook === "BeforeTool" ? "assistant" : "tool",
       status: hook === "BeforeTool" ? "partial" : failed ? "error" : "ok",
       content,
-      tool: toolShape(identity.callId, name, payload.tool_input, result),
+      tool: toolShape(identity.callId, name, projectedInput.value, projectedResult.value),
       metadata: {
         synthetic_call_id: identity.synthetic,
         original_request_name: payload.original_request_name ?? null,
         mcp_context_present: isRecord(payload.mcp_context),
+        opaque_provider_state_removed: projectedInput.removed + projectedResult.removed,
+        opaque_provider_state_scan_truncated: projectedInput.truncated || projectedResult.truncated,
         dedupe_key: dedupeKey("gemini-tool", sessionId, identity.callId, hook),
       },
     })] };
@@ -250,7 +276,10 @@ export function normalizeGeminiCliHook(payload: unknown, options: NormalizeOptio
       eventType: "approval.request",
       actor: "environment",
       status: "partial",
-      content: [contentPart({ message: payload.message ?? null, details: payload.details ?? null })],
+      content: [contentPart(sanitizeOpaqueProviderState({
+        message: payload.message ?? null,
+        details: payload.details ?? null,
+      }).value)],
       metadata: {
         notification_type: notificationType,
         decision_observed: false,

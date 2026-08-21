@@ -4,13 +4,15 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import type { ApprovalMode, DatasetExample, TraceBundle, TrajectoryEvent } from "@trajpack/schema";
 import { datasetExampleSchema, verifierConfirmationSchema, verifierEvidenceSchema } from "@trajpack/schema";
 import { canonicalJson, sha256, stableId } from "./canonical.js";
-import { approvalFingerprint, evaluateGate, POLICY_VERSION, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
+import { evaluateGate, POLICY_VERSION, reviewEvidenceFingerprint, validateApprovalScope } from "./policy.js";
 import { inspectQuality, type QualityReport } from "./quality.js";
+import { inventoryOpaqueReasoningArtifacts, type OpaqueReasoningInventory } from "./opaque-reasoning.js";
 import { writeHfParquet } from "./hf-parquet.js";
 import { assertSafeOutputParent } from "./safe-path.js";
-import { structuredToolProjectionExcluded } from "./selection.js";
+import { selectExportView, structuredToolProjectionExcluded } from "./selection.js";
 import {
   compileTrainingView,
+  datasetExampleFromTrainingView,
   type CompiledTrainingView,
   type TrainingViewCompilation,
   type TrainingViewRecipe,
@@ -79,96 +81,6 @@ function eventText(event: TrajectoryEvent, includeReasoning: boolean): string {
     .filter((part) => part.reasoning?.representation !== "opaque_reasoning_state")
     .map((part) => part.value ?? `[${part.type}:${part.blob_ref ?? part.sha256}]`)
     .join("\n");
-}
-
-function selectedBundle(bundle: TraceBundle, excluded: ExportResult["excludedParts"] = []): TraceBundle {
-  const excludedKeys = new Set(excluded.map((part) => `${part.eventId}\u0000${part.ordinal}`));
-  const selectedEvents = bundle.events
-    .filter((event) => event.review_disposition === "include")
-    .filter((event) => !structuredToolProjectionExcluded(event, excludedKeys))
-    .map((event) => ({
-      ...event,
-      content: event.content
-        .filter((part) => part.review_disposition === "include")
-        .filter((part) => !excludedKeys.has(`${event.event_id}\u0000${part.ordinal}`)),
-    }));
-  const wasRedacted = (event: TrajectoryEvent): boolean => {
-    const review = event.metadata.trajpack_review;
-    return event.content.some((part) => part.redaction_status === "redacted")
-      || event.metadata.trajpack_structured_redaction !== undefined
-      || (typeof review === "object" && review !== null
-        && (review as Record<string, unknown>).disposition === "redact");
-  };
-  const redactedSpans = new Map<string, string>();
-  for (const event of selectedEvents.filter(wasRedacted)) {
-    redactedSpans.set(event.span_id, sha256(canonicalJson({
-      scope: "redacted-span",
-      trace_id: event.trace_id,
-      sequence: event.sequence,
-      event_type: event.event_type,
-      actor: event.actor,
-    })).slice(0, 16));
-  }
-  const events = selectedEvents.map((event) => {
-    const rekey = redactedSpans.has(event.span_id);
-    const metadata = { ...event.metadata };
-    if (rekey) {
-      delete metadata.raw_payload_sha256;
-      delete metadata.payload_sha256;
-      delete metadata.payload_preview_hash;
-    }
-    return {
-      ...event,
-      ...(rekey ? {
-        event_id: `redacted:${sha256(canonicalJson({
-          scope: "redacted-event",
-          trace_id: event.trace_id,
-          sequence: event.sequence,
-          event_type: event.event_type,
-          actor: event.actor,
-        })).slice(0, 32)}`,
-        source_event_id: null,
-      } : {}),
-      span_id: redactedSpans.get(event.span_id) ?? event.span_id,
-      parent_span_id: event.parent_span_id === null
-        ? null
-        : redactedSpans.get(event.parent_span_id) ?? event.parent_span_id,
-      links: event.links.map((link) => ({
-        ...link,
-        span_id: redactedSpans.get(link.span_id) ?? link.span_id,
-      })),
-      metadata,
-    };
-  });
-  const hasRedaction = redactedSpans.size > 0;
-  const selected: TraceBundle = {
-    ...bundle,
-    manifest: hasRedaction ? {
-      ...bundle.manifest,
-      lineage: { ...bundle.manifest.lineage, raw_sha256: null },
-    } : bundle.manifest,
-    raw: [],
-    events,
-  };
-  const sourceApproval = bundle.manifest.review.approval_scope;
-  if (sourceApproval !== null) {
-    selected.manifest = {
-      ...selected.manifest,
-      review: {
-        ...selected.manifest.review,
-        approval_scope: {
-          ...sourceApproval,
-          approved_source_bundle_sha256: sourceApproval.approved_source_bundle_sha256 ?? sourceApproval.bundle_sha256,
-          export_pass_version: "export-view/0.1",
-          bundle_sha256: approvalFingerprint(selected),
-        },
-      },
-    };
-    // approvalFingerprint excludes review, so the value remains stable after
-    // attaching the derived-view attestation above.
-    selected.manifest.review.approval_scope!.bundle_sha256 = approvalFingerprint(selected);
-  }
-  return selected;
 }
 
 export function toAtif(bundle: TraceBundle): Record<string, unknown> {
@@ -743,48 +655,6 @@ export function toHfExample(bundle: TraceBundle): DatasetExample {
   return examples[0]!;
 }
 
-function trainingViewExample(bundle: TraceBundle, view: CompiledTrainingView): DatasetExample {
-  const enabledMessages = new Set(view.loss_targets.map((target) => target.message_index));
-  return datasetExampleSchema.parse({
-    id: view.view_id,
-    trace_id: view.trace_id,
-    source_event_ids: view.source_event_ids,
-    messages: view.messages.map((message) => ({ ...message })),
-    tools: view.tools.map((tool) => ({ ...tool })),
-    assistant_loss_mask: view.messages.map((_, index) => enabledMessages.has(index)),
-    training_targets: view.loss_targets.map((target) => ({
-      message_index: target.message_index,
-      components: target.components,
-      loss_weight: target.loss_weight,
-      source_event_ids: target.source_event_ids,
-    })),
-    reward: view.reward,
-    verifier: view.verifier_provenance === null
-      ? null
-      : {
-        name: view.verifier_provenance.verifier.name,
-        version: view.verifier_provenance.verifier.version,
-      },
-    metadata: {
-      source: bundle.manifest.source,
-      rights: bundle.manifest.rights,
-      eligibility: bundle.manifest.eligibility,
-      review: bundle.manifest.review,
-      lineage: bundle.manifest.lineage,
-      view: {
-        recipe: view.recipe,
-        recipe_version: view.recipe_version,
-        compiler_version: view.compiler_version,
-        objective: view.objective,
-        target_event_ids: view.target_event_ids,
-        evidence_event_ids: view.evidence_event_ids,
-        verifier_provenance: view.verifier_provenance,
-        ...view.metadata,
-      },
-    },
-  });
-}
-
 function compileRecipeExamples(
   bundle: TraceBundle,
   recipe: TrainingViewRecipe,
@@ -796,7 +666,17 @@ function compileRecipeExamples(
   // emitted raw field to match a review-included, privacy-passed canonical
   // projection byte-for-byte. Raw is never serialized into the dataset.
   const compilerInput = recipe === "deepseek_epoch_sft" && rawSource !== undefined
-    ? { ...bundle, raw: rawSource.raw }
+    ? {
+      ...bundle,
+      manifest: {
+        ...bundle.manifest,
+        lineage: {
+          ...bundle.manifest.lineage,
+          raw_sha256: rawSource.manifest.lineage.raw_sha256,
+        },
+      },
+      raw: rawSource.raw,
+    }
     : bundle;
   const compilation = compileTrainingView(compilerInput, recipe);
   if (compilation.views.length === 0) {
@@ -804,7 +684,7 @@ function compileRecipeExamples(
     throw new Error(`Training recipe ${recipe} produced no eligible views: ${reasons.join(", ")}`);
   }
   return {
-    examples: compilation.views.map((view) => trainingViewExample(bundle, view)),
+    examples: compilation.views.map((view) => datasetExampleFromTrainingView(bundle, view)),
     compilation,
   };
 }
@@ -847,6 +727,7 @@ function datasetCard(
   excluded: ExportResult["excludedParts"],
   quality: QualityReport,
   redaction: Record<string, unknown>,
+  opaqueReasoning: OpaqueReasoningInventory,
   mode: ApprovalMode,
   recipe: TrainingViewRecipe | null,
 ): string {
@@ -874,6 +755,7 @@ function datasetCard(
 - Capture fidelity: \`${bundle.manifest.source.fidelity}\`
 - Events: ${bundle.events.length}
 - Excluded opaque or unsupported parts: ${excluded.length}
+- Vault-only opaque provider artifacts detected: ${opaqueReasoning.total_count}
 - Automated checks: \`${safe(bundle.manifest.review.automated_checks)}\`
 - Human approval: \`${safe(bundle.manifest.review.human_approval)}\`
 - Quality issues: ${errorCount} errors / ${warningCount} warnings
@@ -1076,7 +958,7 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   try {
   const files: string[] = [];
   const checksums: Record<string, string> = {};
-  const selected = selectedBundle(bundle, gate.excludedContentParts);
+  const selected = selectExportView(bundle, gate.excludedContentParts);
   const exportedEventIds = new Map<string, string>();
   const excludedKeys = new Set(gate.excludedContentParts.map((part) => `${part.eventId}\u0000${part.ordinal}`));
   let exportedIndex = 0;
@@ -1106,6 +988,10 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   });
   const quality = inspectQuality(selected);
   const redaction = redactionReport(bundle, selected);
+  const opaqueReasoning = inventoryOpaqueReasoningArtifacts(bundle.raw);
+  if (opaqueReasoning.scan_truncated) {
+    throw new Error("Export blocked because the opaque provider-state inventory exceeded its scan limits");
+  }
 
   if (options.format === "canonical") {
     await writeTrackedFile(outputDirectory, "manifest.json", `${canonicalJson(selected.manifest)}\n`, files, checksums);
@@ -1152,6 +1038,13 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   await writeTrackedFile(outputDirectory, "lineage.json", `${canonicalJson(lineageReport(selected, options.format, mode))}\n`, files, checksums);
   await writeTrackedFile(outputDirectory, "quality-report.json", `${canonicalJson(quality)}\n`, files, checksums);
   await writeTrackedFile(outputDirectory, "redaction-report.json", `${canonicalJson(redaction)}\n`, files, checksums);
+  await writeTrackedFile(
+    outputDirectory,
+    "opaque-reasoning-report.json",
+    `${canonicalJson(opaqueReasoning)}\n`,
+    files,
+    checksums,
+  );
   await writeTrackedFile(outputDirectory, "license-summary.json", `${canonicalJson({
     code_license: "Apache-2.0",
     data_license_is_independent: true,
@@ -1178,6 +1071,7 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     exportedExcludedParts,
     quality,
     redaction,
+    opaqueReasoning,
     mode,
     options.trainingRecipe ?? null,
   ), files, checksums);
