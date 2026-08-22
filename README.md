@@ -79,7 +79,7 @@ pnpm trajpack doctor
 pnpm trajpack --help
 ```
 
-Before importing a commercial-provider export, download the terms that apply to your region and account, retain them with your research records, and create a local snapshot. The tool hashes the file; it does not download or interpret legal text.
+Before importing a commercial-provider export, download every terms document that applies to your region and account, retain them with your research records, and create one local snapshot per authority. The tool hashes files; it does not download or interpret legal text. Observable live DeepSeek API/developer-tool capture currently requires both the general Terms and the Open Platform Terms in the built-in registry. A manually copied or offline API-shaped file is archiveable under the general-Terms route, but that shape alone neither proves the API agreement applied nor grants training eligibility.
 
 ```bash
 pnpm trajpack policy snapshot \
@@ -126,7 +126,7 @@ pnpm trajpack arm claude --next-session --cwd <absolute-path> --ttl 10m [source 
 pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source and rights options]
 ```
 
-Run `pnpm trajpack doctor` (or `doctor --json`) to probe host executables and report the expected plugin directories, pinned interfaces, and safe web-import routes before collecting real data. It deliberately reports plugin installation as `not_verified`; confirm installation with each host's own list/validate command.
+Run `pnpm trajpack doctor` (or `doctor --json --dsh-profile headless`) to probe host executables and report the expected plugin directories, pinned interfaces, and safe web-import routes before collecting real data. For DeepSeek Harness it also reads the selected profile, runtime, and plugin manifests without executing profile code; `manifest_verified` proves compatible installation metadata, not plugin-code or provider authenticity. If bare `dsh` is absent from `PATH`, capture can safely launch an exact rc.6 runtime from the official `DSH_HOME/profiles` layout. Confirm other hosts with their own list/validate command.
 
 Capture is intentionally blocked until source, account, current terms or scoped permission, consent, and required rights metadata satisfy the `automatic_capture` gate. The strongest built-in source correlation is the pinned DeepSeek Harness path: trajpack binds the approved provider/model to its durable `request/header` evidence. A self-hosted model can additionally be content-hashed locally, but that hash does **not** prove the runtime loaded those weights; self-hosted training therefore still requires separate, evidence-backed runtime-binding review.
 
@@ -341,7 +341,7 @@ Run `pnpm trajpack <command> --help` for the exact required options. Unknown sou
 - Harness persistence import currently accepts only unpacked, uncompressed v0 JSONL. Packed/chunked rows and zstd-compressed persistence fail closed; use native plugin capture or produce an explicitly unpacked artifact.
 - Generic Harness training recipes block resumed partial context and targets after a surface replacement instead of guessing the teacher-visible prefix. Use a complete sequence-zero trace with `deepseek_epoch_sft` for exact compaction-aware request reconstruction.
 - No recipe recovers hidden CoT. `reasoning_sft` requires complete provider-exposed reasoning, and `pointwise_reward_rl_ready` is verified scalar-reward evidence for downstream reward-model/RL research rather than a DPO preference pair or an RL trainer.
-- A local collector capability authenticates the capture process tree, not the provider or an adversarial tool subprocess.
+- A local collector capability does not authenticate the provider. The DeepSeek plugin consumes it before tool-child launch, but the Harness runtime and same-process profile plugins remain trusted; native evidence is therefore `locally_observed`.
 - Offline response shape, a local model hash, reviewer identity, and exported checksums are evidence—not vendor signatures or proof of current authorization.
 - Secret/PII scanning is conservative pattern matching, not proof of anonymization or license cleanliness.
 - Dataset compilation is bounded in-process at a conservative 256 MiB decrypted-object estimate; near-deduplication is token-shingle Jaccard, not embedding-level semantic deduplication.

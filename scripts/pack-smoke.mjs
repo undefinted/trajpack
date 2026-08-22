@@ -124,7 +124,7 @@ try {
   }
 
   const doctor = JSON.parse(run(installedBin, ["doctor", "--json"], installDirectory));
-  assert.equal(doctor.report_version, "doctor/0.1", "installed CLI doctor report version drifted");
+  assert.equal(doctor.report_version, "doctor/0.2", "installed CLI doctor report version drifted");
   const gemini = doctor.native_agents.find((host) => host.id === "gemini");
   assert.equal(gemini?.plugin_directory, "plugins/trajpack-gemini", "installed CLI doctor omits the Gemini extension path");
   assert.deepEqual(gemini?.expected_interfaces, ["gemini-cli-hook/1"]);

@@ -6,6 +6,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type {
   ApprovalMode,
+  DatasetViewRecipe,
   RawEnvelope,
   Rights,
   RightsOverrideAttestation,
@@ -14,6 +15,7 @@ import type {
   VerifierConfirmation,
 } from "@trajpack/schema";
 import {
+  datasetViewRecipeSchema,
   rawEnvelopeSchema,
   rightsOverrideAttestationSchema,
   rightsSchema,
@@ -34,6 +36,7 @@ import {
   listTraceIds,
   loadTrace,
   POLICY_VERSION,
+  preflightApprovedBundleExport,
   replaceTrace,
   redactStructured,
   reviewEvidenceFingerprint,
@@ -41,6 +44,7 @@ import {
   sha256,
   stableId,
   type ExportFormat,
+  type TrainingViewRecipe,
   type TrajpackPaths,
   validateApprovalScope,
 } from "@trajpack/core";
@@ -946,8 +950,13 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   const preview = async (traceId: string, body: unknown) => {
     const bundle = await loadTrace(traceId, passphrase, paths);
     assertRevision(bundle, body);
-    const format = (body as { format?: ExportFormat }).format;
-    const exportMode = (body as { mode?: ApprovalMode }).mode;
+    const requestBody = body as {
+      format?: ExportFormat;
+      mode?: ApprovalMode;
+      training_recipe?: DatasetViewRecipe | null;
+    };
+    const format = requestBody.format;
+    const exportMode = requestBody.mode;
     if (!format || !["canonical", "atif", "hf-trl", "otlp"].includes(format)) throw Object.assign(new Error("Invalid export format"), { statusCode: 400, code: "invalid_request" });
     if (!exportMode || !["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"].includes(exportMode)) {
       throw Object.assign(new Error("Invalid export eligibility mode"), { statusCode: 400, code: "invalid_request" });
@@ -955,26 +964,49 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
     if (format === "hf-trl" && !exportMode.startsWith("training_")) {
       throw Object.assign(new Error("HF/TRL requires a training eligibility mode"), { statusCode: 400, code: "invalid_request" });
     }
-    const gate = evaluateGate(bundle, exportMode);
-    const excluded = bundle.events.filter((event) => event.review_disposition === "exclude").length;
+    const parsedRecipe = requestBody.training_recipe === null || requestBody.training_recipe === undefined
+      ? null
+      : datasetViewRecipeSchema.safeParse(requestBody.training_recipe);
+    if (parsedRecipe !== null && (!parsedRecipe.success || parsedRecipe.data === "trace_full")) {
+      throw Object.assign(new Error("Invalid versioned training recipe"), { statusCode: 400, code: "invalid_request" });
+    }
+    const trainingRecipe = parsedRecipe === null ? null : parsedRecipe.data as TrainingViewRecipe;
+    if (format !== "hf-trl" && trainingRecipe !== null) {
+      throw Object.assign(new Error("Training recipes are available only for HF/TRL exports"), { statusCode: 400, code: "invalid_request" });
+    }
+
+    const exportPreflight = preflightApprovedBundleExport(bundle, {
+      format,
+      mode: exportMode,
+      ...(trainingRecipe === null ? {} : { trainingRecipe }),
+    });
     const redacted = bundle.events.flatMap((event) => event.content).filter((part) => part.redaction_status === "redacted").length;
-    const reviewReasons = validateApprovalScope(bundle, exportMode);
-    const blockReasons = [...new Set([...gate.reasonCodes, ...reviewReasons])];
+    const trainingView = exportPreflight.trainingView;
     return {
       bundle,
+      trainingRecipe,
       result: {
         trace_id: traceId,
         format,
         mode: exportMode,
         destination_hint: join(outputRoot, `${traceId}-${format}-<timestamp>`),
-        example_count: format === "hf-trl" ? 1 : bundle.events.length,
+        example_count: exportPreflight.exampleCount,
+        training_recipe: trainingView?.recipe ?? trainingRecipe,
+        recipe_version: trainingView?.recipeVersion ?? null,
+        compiler_version: trainingView?.compilerVersion ?? null,
+        compilation_sha256: trainingView?.compilationSha256 ?? null,
+        exclusions: trainingView?.exclusions.map((exclusion) => ({
+          exclusion_id: exclusion.exclusionId,
+          candidate_event_count: exclusion.candidateEventCount,
+          reason_codes: exclusion.reasonCodes,
+        })) ?? [],
         plaintext_bytes_estimate: Buffer.byteLength(canonicalJson(bundle), "utf8"),
-        excluded_event_count: excluded,
+        excluded_event_count: exportPreflight.excludedEventCount,
         redacted_part_count: redacted,
         license_summary: bundle.manifest.rights.source_license_expression,
         warnings: ["Plaintext exports leave the managed vault and cannot be recalled automatically."],
-        export_allowed: blockReasons.length === 0,
-        block_reasons: blockReasons,
+        export_allowed: exportPreflight.exportAllowed,
+        block_reasons: exportPreflight.blockReasons,
         confirmation_phrase: "EXPORT PLAINTEXT" as const,
       },
     };
@@ -988,7 +1020,7 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
   app.post(`${API}/traces/:traceId/exports`, async (request) => {
     const { traceId } = request.params as { traceId: string };
     return withTraceLock(traceId, async () => {
-      const { bundle, result } = await preview(traceId, request.body);
+      const { bundle, result, trainingRecipe } = await preview(traceId, request.body);
       if ((request.body as { confirmation_phrase?: string }).confirmation_phrase !== "EXPORT PLAINTEXT") {
         throw Object.assign(new Error("Exact plaintext confirmation phrase required"), { statusCode: 400, code: "confirmation_required" });
       }
@@ -1000,6 +1032,7 @@ export async function startReviewServer(options: ReviewServerOptions): Promise<R
         format: result.format,
         outputDirectory: destination,
         mode: result.mode,
+        ...(trainingRecipe === null ? {} : { trainingRecipe }),
       });
       const checksum = sha256(await readFile(join(destination, "checksums.txt")));
       return {

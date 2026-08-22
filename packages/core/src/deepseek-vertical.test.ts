@@ -228,14 +228,24 @@ function approvedGoldenBundle(): TraceBundle {
     model_id: "deepseek-reasoner",
   };
   trace.manifest.account_contract.account_type = "api";
-  trace.manifest.account_contract.terms = [{
-    name: "DeepSeek Terms of Use",
-    url: "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
-    effective_at: "2026-01-01T00:00:00.000Z",
-    retrieved_at: "2026-08-16T00:00:00.000Z",
-    snapshot_sha256: "e".repeat(64),
-    review_after: "2099-01-01T00:00:00.000Z",
-  }];
+  trace.manifest.account_contract.terms = [
+    {
+      name: "DeepSeek Terms of Use (unverified test locator; not permission evidence)",
+      url: "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
+      effective_at: "2026-03-27T00:00:00.000Z",
+      retrieved_at: "2026-08-16T00:00:00.000Z",
+      snapshot_sha256: "e".repeat(64),
+      review_after: "2099-01-01T00:00:00.000Z",
+    },
+    {
+      name: "DeepSeek Open Platform Terms (unverified test locator; not permission evidence)",
+      url: "https://cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html",
+      effective_at: "2026-04-29T00:00:00.000Z",
+      retrieved_at: "2026-08-16T00:00:00.000Z",
+      snapshot_sha256: "f".repeat(64),
+      review_after: "2099-01-01T00:00:00.000Z",
+    },
+  ];
 
   trace.raw = goldenPayloads().map((payload, sequence): RawEnvelope => ({
     envelope_version: "raw/0.1",

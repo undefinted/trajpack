@@ -15,6 +15,7 @@ import {
 } from "@trajpack/core";
 import {
   CaptureBackpressureError,
+  CaptureInvalidEventError,
   CaptureLimitError,
   CaptureSession,
   HarnessCaptureIntegrityError,
@@ -228,8 +229,70 @@ describe("capture session publication", () => {
         name: "HarnessCaptureIntegrityError",
         reason: "HARNESS_SEQUENCE_GAP",
       } satisfies Partial<HarnessCaptureIntegrityError>);
+      await expect(session.ingest(deepseekCapsule(1, "turn/end", {
+        turn: 0,
+        reason: "completed",
+      }))).rejects.toMatchObject({
+        name: "HarnessCaptureIntegrityError",
+        reason: "HARNESS_SEQUENCE_GAP",
+      } satisfies Partial<HarnessCaptureIntegrityError>);
+      expect(session.captureStats()).toMatchObject({
+        rawEvents: 1,
+        normalizedEvents: null,
+        rawLineageSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      });
       await session.abort();
       await expect(stat(vaultPath(manifest.trace_id, paths))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await session.abort().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers from a rejected envelope without poisoning later valid capture", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-recover-invalid-"));
+    const paths: TrajpackPaths = {
+      data: root,
+      vault: join(root, "vault"),
+      runtime: join(root, "runtime"),
+      tombstones: join(root, "tombstones"),
+    };
+    const source = defaultSource("deepseek_harness", "deepseek");
+    source.model_id = "deepseek-reasoner";
+    const manifest = createManifest({
+      source,
+      accountType: "api",
+      rights: ownedRights,
+      consentReceipt: consentReceipt("deepseek_harness", root),
+      consentPurposes: ["archive", "research", "capture"],
+    });
+    const session = await CaptureSession.create("deepseek_harness", manifest, "test-passphrase", paths);
+    const valid = deepseekCapsule(0, "request/header", {
+      header: {
+        config: { provider: "deepseek-official", model: "deepseek-reasoner" },
+        tools: [],
+      },
+      reason: "initial",
+    }, { provider: "deepseek-official", model: "deepseek-reasoner" });
+    const invalid = { ...valid, payload_sha256: "0".repeat(64) };
+    try {
+      await expect(session.ingest(invalid)).rejects.toBeInstanceOf(CaptureInvalidEventError);
+      expect(await session.ingest(valid)).toBe(true);
+      expect(session.captureStats()).toMatchObject({
+        rawEvents: 1,
+        normalizedEvents: null,
+      });
+      const finalized = await session.finalize();
+      expect(finalized.raw).toHaveLength(1);
+      expect(session.captureStats()).toMatchObject({
+        rawEvents: 1,
+        normalizedEvents: finalized.events.length,
+        rawLineageSha256: finalized.manifest.lineage.raw_sha256,
+      });
+
+      const reopened = await readBundle(vaultPath(manifest.trace_id, paths), "test-passphrase");
+      expect(reopened.raw).toHaveLength(1);
+      expect(reopened.raw[0]?.payload_sha256).toBe(valid.payload_sha256);
     } finally {
       await session.abort().catch(() => undefined);
       await rm(root, { recursive: true, force: true });

@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, extname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Host } from "@trajpack/schema";
 import {
@@ -15,7 +16,18 @@ import {
   sha256,
 } from "@trajpack/core";
 import { classifyJsonLine, DEEPSEEK_HARNESS_INTERFACE_VERSION } from "@trajpack/adapters";
-import { CaptureLimitError, CaptureSession } from "./capture-session.js";
+import {
+  CaptureBackpressureError,
+  CaptureInvalidEventError,
+  CaptureLimitError,
+  CaptureSession,
+  HarnessCaptureIntegrityError,
+} from "./capture-session.js";
+import {
+  makeCaptureReceipt,
+  prepareCaptureReceiptPath,
+  writeCaptureReceipt,
+} from "./capture-receipt.js";
 import {
   DEFAULT_MAX_CAPTURE_EVENTS,
   DEFAULT_MAX_CAPTURE_RAW_BYTES,
@@ -192,6 +204,7 @@ export interface CaptureCommandOptions extends SourceCliOptions {
   maxEvents?: string | number;
   maxRawBytes?: string | number;
   drainMs?: string | number;
+  receipt?: string;
 }
 
 export interface CollectorChildEnvironment {
@@ -221,10 +234,11 @@ export function captureChildEnvironment(
 }
 
 export function assertPinnedDeepSeekHarness(executable: string, cwd: string, environment: NodeJS.ProcessEnv): void {
-  const pinned = /deepseek-harness@([^/]+)\//.exec(DEEPSEEK_HARNESS_INTERFACE_VERSION)?.[1];
-  if (!pinned) throw new Error("Invalid pinned DeepSeek Harness interface version");
-  const launch = captureProcessLaunch(executable, ["--version"], cwd, environment);
-  const result = spawnSync(launch.command, launch.args, {
+  resolvePinnedDeepSeekHarnessLaunch(executable, [], cwd, environment);
+}
+
+function probeLaunch(launch: CaptureProcessLaunch, cwd: string, environment: NodeJS.ProcessEnv) {
+  return spawnSync(launch.command, launch.args, {
     cwd,
     env: scrubHostEnvironment(environment),
     encoding: "utf8",
@@ -233,8 +247,98 @@ export function assertPinnedDeepSeekHarness(executable: string, cwd: string, env
     windowsVerbatimArguments: launch.windowsVerbatimArguments,
     timeout: 10_000,
   });
+}
+
+function installedDeepSeekHarnessLaunch(
+  args: readonly string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): CaptureProcessLaunch | null {
+  const configuredHome = environment.DSH_HOME;
+  if (configuredHome !== undefined && (configuredHome.length === 0 || /[\u0000-\u001f\u007f]/u.test(configuredHome))) {
+    return null;
+  }
+  const dshHome = configuredHome === undefined
+    ? join(homedir(), ".dsh")
+    : isAbsolute(configuredHome) ? configuredHome : resolve(cwd, configuredHome);
+  const packageDirectory = join(dshHome, "profiles", "node_modules", "@deepseek-ai", "dsh");
+  const manifestPath = join(packageDirectory, "package.json");
+  let manifest: Record<string, unknown>;
+  try {
+    const manifestStats = statSync(manifestPath);
+    if (!manifestStats.isFile() || manifestStats.size <= 0 || manifestStats.size > 64 * 1024) return null;
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    manifest = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const configuredBin = typeof manifest.bin === "string"
+    ? manifest.bin
+    : typeof manifest.bin === "object" && manifest.bin !== null && !Array.isArray(manifest.bin)
+      ? (manifest.bin as Record<string, unknown>).dsh
+      : null;
+  if (
+    manifest.name !== "@deepseek-ai/dsh" ||
+    manifest.version !== "0.1.0-rc.6" ||
+    typeof configuredBin !== "string" || configuredBin.length === 0 ||
+    isAbsolute(configuredBin) || /[\u0000-\u001f\u007f]/u.test(configuredBin)
+  ) return null;
+  try {
+    const packageRoot = realpathSync(packageDirectory);
+    const entrypoint = realpathSync(join(packageRoot, configuredBin));
+    const withinPackage = relative(packageRoot, entrypoint);
+    const entrypointStats = statSync(entrypoint);
+    if (
+      withinPackage.length === 0 || withinPackage.startsWith("..") || isAbsolute(withinPackage) ||
+      !entrypointStats.isFile() || entrypointStats.size <= 0 || entrypointStats.size > 2 * 1024 * 1024
+    ) return null;
+    return {
+      command: process.execPath,
+      args: [entrypoint, ...args],
+      windowsVerbatimArguments: false,
+      resolvedExecutable: entrypoint,
+      viaCommandProcessor: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve and version-check DSH. A bare `dsh` falls back to the official
+ * installer layout when it is not on PATH; explicit paths and wrong PATH
+ * versions never silently fall back.
+ */
+export function resolvePinnedDeepSeekHarnessLaunch(
+  executable: string,
+  args: readonly string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): CaptureProcessLaunch {
+  const pinned = /deepseek-harness@([^/]+)\//.exec(DEEPSEEK_HARNESS_INTERFACE_VERSION)?.[1];
+  if (!pinned) throw new Error("Invalid pinned DeepSeek Harness interface version");
+  const versionLaunch = captureProcessLaunch(executable, ["--version"], cwd, environment, platform);
+  let result = probeLaunch(versionLaunch, cwd, environment);
+  let commandLaunch = captureProcessLaunch(executable, args, cwd, environment, platform);
+  if (result.error !== undefined) {
+    const bareDefault = windowsShimName(executable) === "dsh" && !pathLikeWindowsExecutable(executable);
+    const fallbackVersion = bareDefault
+      ? installedDeepSeekHarnessLaunch(["--version"], cwd, environment)
+      : null;
+    const fallbackCommand = bareDefault
+      ? installedDeepSeekHarnessLaunch(args, cwd, environment)
+      : null;
+    if (fallbackVersion === null || fallbackCommand === null) {
+      throw new Error(`DeepSeek Harness executable was not found; install pinned ${pinned} on PATH or under DSH_HOME/profiles`);
+    }
+    result = probeLaunch(fallbackVersion, cwd, environment);
+    commandLaunch = fallbackCommand;
+  }
   const reported = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   assertDeepSeekHarnessVersionReport(reported, result.status);
+  return commandLaunch;
 }
 
 export function observedRepoCommit(cwd: string, environment: NodeJS.ProcessEnv): string | null {
@@ -359,6 +463,22 @@ function captureDrainMs(value: string | number | undefined): number {
   return parsed;
 }
 
+function terminalFailureReason(error: unknown): string {
+  if (error instanceof CaptureLimitError) return error.reason;
+  if (error instanceof HarnessCaptureIntegrityError) return error.reason;
+  if (error instanceof CaptureBackpressureError) return "CAPTURE_BACKPRESSURE";
+  if (error instanceof CaptureInvalidEventError) return "CAPTURE_EVENT_REJECTED";
+  if (error instanceof Error && error.message.startsWith("Capture produced no authoritative raw events")) {
+    return "CAPTURE_EMPTY";
+  }
+  if (error instanceof Error && error.message.startsWith("Capture produced no supported normalized events")) {
+    return "CAPTURE_UNSUPPORTED_EVENTS";
+  }
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (["ENOENT", "EACCES", "EPERM", "ENOEXEC"].includes(code ?? "")) return "HOST_START_FAILED";
+  return "CAPTURE_FAILED";
+}
+
 async function writeArmDescriptor(path: string, contents: string): Promise<void> {
   try {
     const details = await lstat(path);
@@ -399,20 +519,30 @@ export function armRuntimeDirectory(host: Host): string {
     : defaultPaths().runtime;
 }
 
+export function normalizeCaptureCommandWords(words: string[]): string[] {
+  return words[0] === "--" ? words.slice(1) : words;
+}
+
 export async function runCapture(hostName: string, words: string[], options: CaptureCommandOptions): Promise<number> {
   const host = HOSTS[hostName];
   if (!host) throw new Error(`Unsupported host: ${hostName}`);
   const cwd = resolveCwd(options.cwd ?? process.cwd());
+  const receiptDestination = options.receipt === undefined
+    ? null
+    : await prepareCaptureReceiptPath(options.receipt);
   const maxEvents = captureLimit(options.maxEvents, DEFAULT_MAX_CAPTURE_EVENTS, MAX_CONFIGURABLE_CAPTURE_EVENTS, "--max-events");
   const maxRawBytes = captureLimit(options.maxRawBytes, DEFAULT_MAX_CAPTURE_RAW_BYTES, MAX_CONFIGURABLE_CAPTURE_RAW_BYTES, "--max-raw-bytes");
   const drainMs = captureDrainMs(options.drainMs);
   if (maxEvents < 2 || maxRawBytes < 2) {
     throw new Error("Wrapper capture budgets must be at least 2 so stdout and hook channels each fail closed independently");
   }
-  const executable = words[0] ?? DEFAULT_COMMAND[hostName];
+  const commandWords = normalizeCaptureCommandWords(words);
+  const executable = commandWords[0] ?? DEFAULT_COMMAND[hostName];
   if (!executable) throw new Error(`No executable is configured for host ${hostName}`);
-  const args = authoritativeCaptureArguments(host, words.slice(1));
-  if (host === "deepseek_harness") assertPinnedDeepSeekHarness(executable, cwd, process.env);
+  const args = authoritativeCaptureArguments(host, commandWords.slice(1));
+  const pinnedHarnessLaunch = host === "deepseek_harness"
+    ? resolvePinnedDeepSeekHarnessLaunch(executable, args, cwd, process.env)
+    : null;
   const resolved = await resolveSourceOptions(host, options);
   const repoCommit = observedRepoCommit(cwd, process.env);
   const manifest = createManifest({
@@ -442,6 +572,8 @@ export async function runCapture(hostName: string, words: string[], options: Cap
   const token = randomBytes(32).toString("base64url");
   let child: ChildProcess | undefined;
   let captureViolation: string | null = null;
+  let hostExitCode: number | null = null;
+  let receiptAttempted = false;
   const violate = (reason: string) => {
     if (captureViolation !== null) return;
     captureViolation = reason;
@@ -497,7 +629,7 @@ export async function runCapture(hostName: string, words: string[], options: Cap
       token,
       host,
     });
-    const launch = captureProcessLaunch(executable, args, cwd, childEnvironment);
+    const launch = pinnedHarnessLaunch ?? captureProcessLaunch(executable, args, cwd, childEnvironment);
     const spawned = spawn(launch.command, launch.args, {
       cwd,
       env: childEnvironment,
@@ -543,11 +675,24 @@ export async function runCapture(hostName: string, words: string[], options: Cap
     }
     if (exitResult.status === "rejected") throw exitResult.reason;
     const exitCode = exitResult.value;
+    hostExitCode = exitCode;
     if (drainMs > 0) await new Promise<void>((resolveDrain) => setTimeout(resolveDrain, drainMs));
     await server.close();
     captureViolation ??= server.limitViolation();
     if (captureViolation !== null) throw new Error(`Capture aborted by hard limit: ${captureViolation}`);
     const bundle = await session.finalize();
+    if (receiptDestination !== null) {
+      receiptAttempted = true;
+      await writeCaptureReceipt(receiptDestination, makeCaptureReceipt({
+        traceId: bundle.manifest.trace_id,
+        host,
+        interfaceVersion: bundle.manifest.source.interface_version,
+        status: "stored",
+        reason: exitCode === 0 ? "CAPTURE_FINALIZED" : "HOST_EXIT_NONZERO",
+        hostExitCode: exitCode,
+        stats: session.captureStats(),
+      }));
+    }
     if (suppressedStderrBytes > 0) {
       process.stderr.write(`trajpack: suppressed ${suppressedStderrBytes} bytes of host stderr to avoid plaintext logging\n`);
     }
@@ -555,7 +700,33 @@ export async function runCapture(hostName: string, words: string[], options: Cap
     return exitCode;
   } catch (error) {
     await server.close().catch(() => undefined);
-    await session.abort();
+    let abortFailure: unknown = null;
+    await session.abort().catch((failure: unknown) => { abortFailure = failure; });
+    let receiptFailure: unknown = null;
+    if (receiptDestination !== null && !receiptAttempted) {
+      receiptAttempted = true;
+      await writeCaptureReceipt(receiptDestination, makeCaptureReceipt({
+        traceId: manifest.trace_id,
+        host,
+        interfaceVersion: manifest.source.interface_version,
+        status: "aborted",
+        reason: abortFailure === null
+          ? (captureViolation ?? terminalFailureReason(error))
+          : "CAPTURE_ABORT_FAILED",
+        hostExitCode,
+        stats: session.captureStats(),
+      })).catch((failure: unknown) => { receiptFailure = failure; });
+    }
+    if (abortFailure !== null || receiptFailure !== null) {
+      throw new AggregateError(
+        [
+          error,
+          ...(abortFailure === null ? [] : [abortFailure]),
+          ...(receiptFailure === null ? [] : [receiptFailure]),
+        ],
+        "Capture termination encountered cleanup or receipt failures",
+      );
+    }
     throw error;
   } finally {
     if (wrapperDescriptorWritten && wrapperDescriptor !== null) {

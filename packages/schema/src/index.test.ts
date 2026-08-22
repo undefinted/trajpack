@@ -10,6 +10,7 @@ import {
   migrateDatasetBuild,
   migrateTraceBundle,
   reasoningMetadataSchema,
+  termsSnapshotSchema,
   traceBundleSchema,
   trajectoryEventSchema,
 } from "./index.js";
@@ -30,6 +31,26 @@ describe("schema primitives", () => {
       }).representation,
     ).toBe("provider_summary");
     expect(() => reasoningMetadataSchema.parse({ representation: "raw_chain_of_thought" })).toThrow();
+  });
+
+  it("accepts only canonical UTC instants in terms snapshots", () => {
+    const snapshot = {
+      name: "Fixture terms",
+      url: "https://example.test/terms",
+      effective_at: "2026-08-22T00:00:00.000Z",
+      retrieved_at: "2026-08-22T00:00:01.000Z",
+      snapshot_sha256: "a".repeat(64),
+      review_after: "2026-11-20T00:00:00.000Z",
+    };
+    expect(termsSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    for (const effectiveAt of [
+      "2026-08-22T00:00:00Z",
+      "2026-08-22T08:00:00.000+08:00",
+      "2026-02-30T00:00:00.000Z",
+      "2026-08-22T00:00:00.1234Z",
+    ]) {
+      expect(() => termsSnapshotSchema.parse({ ...snapshot, effective_at: effectiveAt })).toThrow();
+    }
   });
 
   it("rejects historical or future bundles unless an explicit migration exists", () => {

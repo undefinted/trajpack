@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +14,24 @@ import {
   consumeUtf8StreamWithBackpressure,
   splitUtf8Lines,
   observedRepoCommit,
+  normalizeCaptureCommandWords,
+  resolvePinnedDeepSeekHarnessLaunch,
   scrubHostEnvironment,
   windowsBatchLaunch,
 } from "./capture-command.js";
 
 describe("capture child environment", () => {
+  it("removes only the leading CLI option separator from the host command", () => {
+    expect(normalizeCaptureCommandWords(["--", "dsh", "--profile", "headless", "task"])).toEqual([
+      "dsh",
+      "--profile",
+      "headless",
+      "task",
+    ]);
+    expect(normalizeCaptureCommandWords(["dsh", "--", "literal"])).toEqual(["dsh", "--", "literal"]);
+    expect(normalizeCaptureCommandWords([])).toEqual([]);
+  });
+
   it("uses a home-relative Gemini arm path that survives extension environment sanitization", () => {
     expect(armRuntimeDirectory("gemini_cli")).toBe(join(homedir(), ".trajpack", "runtime"));
   });
@@ -61,6 +74,49 @@ describe("capture child environment", () => {
     expect(() => assertDeepSeekHarnessVersionReport("dsh 0.1.0-rc.6", 0)).not.toThrow();
     expect(() => assertDeepSeekHarnessVersionReport("dsh 0.1.0-rc.5", 0)).toThrow("expected exact 0.1.0-rc.6");
     expect(() => assertDeepSeekHarnessVersionReport("dsh 0.1.0-rc.6", 1)).toThrow("compatibility check failed");
+  });
+
+  it("resolves the pinned official DSH profile runtime when bare dsh is absent from PATH", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-dsh-runtime-"));
+    const packageRoot = join(root, "profiles", "node_modules", "@deepseek-ai", "dsh");
+    const entrypoint = join(packageRoot, "lib", "bin.js");
+    const argvPath = join(root, "argv.json");
+    try {
+      await mkdir(join(packageRoot, "lib"), { recursive: true });
+      await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+        name: "@deepseek-ai/dsh",
+        version: "0.1.0-rc.6",
+        bin: { dsh: "lib/bin.js" },
+      }));
+      await writeFile(entrypoint, [
+        "const fs = require('node:fs');",
+        "if (process.argv[2] === '--version') process.stdout.write('0.1.0-rc.6\\n');",
+        "else fs.writeFileSync(process.env.ARGV_PATH, JSON.stringify(process.argv.slice(2)), 'utf8');",
+        "",
+      ].join("\n"));
+      const environment = { DSH_HOME: root, PATH: "", ARGV_PATH: argvPath };
+      const launch = resolvePinnedDeepSeekHarnessLaunch(
+        "dsh",
+        ["--profile", "headless", "owned task"],
+        process.cwd(),
+        environment,
+        "linux",
+      );
+      expect(launch).toMatchObject({
+        command: process.execPath,
+        viaCommandProcessor: false,
+      });
+      expect(launch.resolvedExecutable).toBe(entrypoint);
+      const result = spawnSync(launch.command, launch.args, {
+        env: environment,
+        encoding: "utf8",
+        shell: false,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(await readFile(argvPath, "utf8"))).toEqual(["--profile", "headless", "owned task"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("uses a fixed command processor contract only for allowlisted Windows shims", () => {

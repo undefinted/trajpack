@@ -1,14 +1,17 @@
 export * from "./canonical.js";
 export * from "./datasets.js";
-// Deliberately expose only the policy-enforcing serializer at the package
-// boundary. The format mappers in exporters.ts accept an already selected
-// canonical view and remain module-internal test seams; exporting them from the
-// public package would let callers bypass policy, privacy, and approval gates.
-export { exportApprovedBundle } from "./exporters.js";
+// Deliberately expose only the policy-enforcing serializer and its content-free
+// preflight at the package boundary. The format mappers in exporters.ts accept
+// an already selected canonical view and remain module-internal test seams;
+// exporting them would let callers bypass policy, privacy, and approval gates.
+export { exportApprovedBundle, preflightApprovedBundleExport } from "./exporters.js";
 export type {
+  ApprovedBundleExportPreflight,
   ExportFormat,
   ExportOptions,
+  ExportPreflightOptions,
   ExportResult,
+  ExportTrainingViewPreflight,
   TrainingMode,
 } from "./exporters.js";
 export {

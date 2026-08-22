@@ -104,4 +104,40 @@ describe("local reviewer", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "导出明文视图" })).not.toBeInTheDocument());
     expect(screen.getByRole("status")).toHaveTextContent("明文已导出至");
   });
+
+  it("requires an explicit DeepSeek HF/TRL recipe and renders the exact compilation preflight", async () => {
+    const user = userEvent.setup();
+    const api = new MockReviewApi();
+    const initial = await api.getTrace(mockTraceIds.deepseek);
+    await api.decideTrace(mockTraceIds.deepseek, {
+      expected_revision: initial.revision,
+      decision: "approved",
+      reviewer: "recipe-reviewer",
+      notes: "Approved the exact DeepSeek epoch training purpose",
+      approved_modes: ["training_competitive_distillation"],
+    });
+    render(<App api={api} />);
+
+    await screen.findByRole("heading", { name: "deepseek-reasoner" });
+    await user.click(screen.getByRole("button", { name: "导出预检" }));
+    const dialog = screen.getByRole("dialog", { name: "导出明文视图" });
+    await user.click(within(dialog).getByRole("radio", { name: /HF \/ TRL/ }));
+    await user.selectOptions(
+      within(dialog).getByRole("combobox", { name: "Eligibility gate / 用途" }),
+      "training_competitive_distillation",
+    );
+
+    await waitFor(() => expect(within(dialog).getByText(/DEEPSEEK_HF_RECIPE_REQUIRED/)).toBeInTheDocument());
+    expect(within(dialog).getByRole("button", { name: "导出明文" })).toBeDisabled();
+    await user.selectOptions(
+      within(dialog).getByRole("combobox", { name: "Training recipe / 训练视图" }),
+      "deepseek_epoch_sft",
+    );
+
+    await waitFor(() => expect(within(dialog).getByText("允许导出")).toBeInTheDocument());
+    expect(within(dialog).getByText("deepseek_epoch_sft")).toBeInTheDocument();
+    expect(within(dialog).getByText("deepseek-exact-request-epoch-sft/0.1")).toBeInTheDocument();
+    expect(within(dialog).getByText("b".repeat(64))).toBeInTheDocument();
+    expect(within(dialog).getByText("样本").parentElement).toHaveTextContent("2");
+  });
 });

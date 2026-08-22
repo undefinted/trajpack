@@ -16,7 +16,7 @@ import { rawIntegrityReasons } from "./integrity.js";
 import { POLICY_REGISTRY, type PolicyRegistryEntry } from "./policy-registry.js";
 import { scanStructured, scanText } from "./redaction.js";
 
-export const POLICY_VERSION = "policy/2026-08-16.4";
+export const POLICY_VERSION = "policy/2026-08-22.1";
 
 export interface PolicyContext {
   source: Source;
@@ -348,8 +348,14 @@ function sourceAuthenticitySupportsDefaultTraining(source: Source): boolean {
   return isTrustedDeepSeekTrainingPath(source);
 }
 
-function registryEntry(provider: Source["provider"], accountType: TraceManifest["account_contract"]["account_type"]): PolicyRegistryEntry | undefined {
-  return POLICY_REGISTRY.find((entry) => entry.provider === provider && entry.account_types.includes(accountType));
+function registryEntries(source: Source, accountType: TraceManifest["account_contract"]["account_type"]): PolicyRegistryEntry[] {
+  return POLICY_REGISTRY.filter((entry) => {
+    if (entry.provider !== source.provider || !entry.account_types.includes(accountType)) return false;
+    const scope = entry.source_scope;
+    if (scope?.surfaces !== undefined && !scope.surfaces.includes(source.surface)) return false;
+    if (scope?.capture_methods !== undefined && !scope.capture_methods.includes(source.capture_method)) return false;
+    return true;
+  });
 }
 
 function statusRank(status: EligibilityDecision["status"]): number {
@@ -362,13 +368,19 @@ function applyRegistryCeiling(
   context: PolicyContext,
 ): EligibilityDecision {
   if (decision.status === "allow" && decision.basis.startsWith("scoped-permission:")) return decision;
-  const entry = registryEntry(context.source.provider, context.accountType);
-  const registryStatus = entry?.defaults[key];
-  if (!entry || !registryStatus || statusRank(registryStatus) >= statusRank(decision.status)) return decision;
+  const entries = registryEntries(context.source, context.accountType);
+  if (entries.length === 0) return decision;
+  const restrictiveRank = Math.min(...entries.map((entry) => statusRank(entry.defaults[key])));
+  if (restrictiveRank >= statusRank(decision.status)) return decision;
+  const restrictive = entries.filter((entry) => statusRank(entry.defaults[key]) === restrictiveRank);
+  const registryStatus = restrictive[0]!.defaults[key];
   return makeDecision(
     key,
     registryStatus,
-    [...decision.reason_codes, `REGISTRY_DEFAULT_${entry.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`],
+    [
+      ...decision.reason_codes,
+      ...restrictive.map((entry) => `REGISTRY_DEFAULT_${entry.id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`),
+    ],
     context,
     decision.purposes,
   );
@@ -557,20 +569,23 @@ function normalizeAuthorityUrl(value: string): string {
 function termsMatchRegistry(manifest: TraceManifest, authorizedSite: boolean, scopedPermission: boolean): boolean {
   if (manifest.source.provider === "self_hosted") return true;
   if (authorizedSite || scopedPermission) return true;
-  const entry = registryEntry(manifest.source.provider, manifest.account_contract.account_type);
-  if (!entry) return false;
-  const authority = normalizeAuthorityUrl(entry.authority_url);
-  return manifest.account_contract.terms.some((term) => normalizeAuthorityUrl(term.url) === authority);
+  const entries = registryEntries(manifest.source, manifest.account_contract.account_type);
+  if (entries.length === 0) return false;
+  const observed = new Set(manifest.account_contract.terms.map((term) => normalizeAuthorityUrl(term.url)));
+  return entries.every((entry) => observed.has(normalizeAuthorityUrl(entry.authority_url)));
 }
 
 function termsPinnedToRegistry(manifest: TraceManifest): boolean {
   if (manifest.source.provider === "self_hosted") return true;
-  const entry = registryEntry(manifest.source.provider, manifest.account_contract.account_type);
-  if (!entry || entry.accepted_snapshot_sha256.length === 0) return false;
-  const accepted = new Set(entry.accepted_snapshot_sha256.map((digest) => digest.toLowerCase()));
-  const authority = normalizeAuthorityUrl(entry.authority_url);
-  return manifest.account_contract.terms.some((term) => normalizeAuthorityUrl(term.url) === authority
-    && accepted.has(term.snapshot_sha256.toLowerCase()));
+  const entries = registryEntries(manifest.source, manifest.account_contract.account_type);
+  if (entries.length === 0) return false;
+  return entries.every((entry) => {
+    if (entry.accepted_snapshot_sha256.length === 0) return false;
+    const accepted = new Set(entry.accepted_snapshot_sha256.map((digest) => digest.toLowerCase()));
+    const authority = normalizeAuthorityUrl(entry.authority_url);
+    return manifest.account_contract.terms.some((term) => normalizeAuthorityUrl(term.url) === authority
+      && accepted.has(term.snapshot_sha256.toLowerCase()));
+  });
 }
 
 const EVIDENCE_ARTIFACT_REFERENCE_PATTERN = /^([a-z][a-z0-9]*(?:[._-][a-z0-9]+)*):sha256:[a-f0-9]{64}$/;

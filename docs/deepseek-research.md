@@ -12,11 +12,24 @@ The actual model provider, model license, account/contract, terms snapshot,
 input/repository rights, tool-output rights, participant consent, target model,
 and intended use are still intersected by the policy gates.
 
+For observable live DeepSeek API/developer-tool and instrumented Harness capture, the registry requires both the general
+[DeepSeek Terms of Use](https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html)
+and the specific
+[Open Platform Terms of Service](https://cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html),
+effective 2026-04-29. URL recognition alone never activates training: every
+applicable byte snapshot must be current and independently hash-pinned, or an
+exact scoped permission must be supplied.
+
+A manually copied or offline API-shaped response is deliberately scoped out of
+that API-specific authority inference. It may be archived with the general
+Terms, but the shape is still `user_supplied` evidence and never establishes
+API-contract applicability, provider authenticity, or training permission.
+
 ## Supported routes
 
 | Route | Fidelity/authenticity | What is checked | What it does not prove |
 | --- | --- | --- | --- |
-| Native Harness plugin | Engineering grade A−; capture-process evidence | Pinned `0.1.0-rc.6` interface, source session, `firstLiveSeq`, contiguous sequences, exact duplicate identity, delivery, and observed request route | Provider signature, hidden model state, or legal eligibility |
+| Native Harness plugin | Fidelity A−; `locally_observed` | Pinned `0.1.0-rc.6` interface, source session, `firstLiveSeq`, contiguous sequences, exact duplicate identity, delivery, observed request route, and removal of the collector capability before tool-child launch | Provider signature, a compromised host/same-process plugin, hidden model state, or legal eligibility |
 | Harness persistence import | Fidelity B; `user_supplied` | Unpacked/uncompressed v0 session header, contiguous unpacked event rows, bounded input, and pinned shape | Who created or modified the file, runtime binding, or current authorization |
 | Saved DeepSeek API response | Imported, `user_supplied` until separately evidenced | Supported JSON/streaming-JSONL response shape | Provider authentication or a Harness action/observation topology |
 
@@ -33,9 +46,15 @@ capture wrapper after registering it with the Harness:
 trajpack capture dsh -- dsh <arguments>
 ```
 
-The wrapper creates a short-lived local collector capability for that process
-tree. Without an active capability, the integration is silent. It does not
-create a plaintext spool when the collector is unavailable.
+The wrapper creates a short-lived local collector capability for the native
+observer. During plugin boot, the observer consumes the capability into its
+private closure and deletes all three trajpack capture variables from
+`process.env`, before an agent turn can launch repository tools. Without an
+active capability, the integration is silent. It does not create a plaintext
+spool when the collector is unavailable. This prevents ordinary tool-child
+environment theft, but still trusts the Harness runtime and every same-process
+profile plugin; the evidence tier remains `locally_observed` rather than a
+provider signature.
 
 For each observed session, the integration:
 
@@ -52,7 +71,8 @@ For each observed session, the integration:
 7. surfaces non-2xx collector responses instead of silently declaring capture
    success; and
 8. reconciles the durable `request/header` provider/model route with the trace
-   manifest.
+   manifest; and
+9. consumes collector credentials before tool-child processes can inherit them.
 
 The durable event payload can include request configuration/system/tools,
 surface messages, reasoning/text chunks, native tool calls/results, approvals,

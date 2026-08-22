@@ -1,11 +1,13 @@
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RawEnvelope, TraceBundle, TrajectoryEvent } from "@trajpack/schema";
+import { traceBundleSchema } from "@trajpack/schema";
 import {
   canonicalJson,
   consentReceipt,
+  createApprovalScope,
   createManifest,
   defaultSource,
   listTraceIds,
@@ -15,7 +17,13 @@ import {
   sha256,
   type TrajpackPaths,
 } from "@trajpack/core";
-import { CaptureBackpressureError, CaptureInvalidEventError, CaptureLimitError, CaptureSession } from "./capture-session.js";
+import {
+  CaptureBackpressureError,
+  CaptureInvalidEventError,
+  CaptureLimitError,
+  CaptureSession,
+  HarnessCaptureIntegrityError,
+} from "./capture-session.js";
 import { startIngestServer } from "./ingest-server.js";
 import { startReviewServer } from "./review-server.js";
 
@@ -1093,6 +1101,69 @@ describe("loopback collectors", () => {
     }
   });
 
+  it("latches a Harness sequence failure instead of treating it as retryable input", async () => {
+    const ingest = vi.fn()
+      .mockRejectedValueOnce(new HarnessCaptureIntegrityError("HARNESS_SEQUENCE_GAP"));
+    const running = await startIngestServer({
+      host: "deepseek_harness",
+      token: "harness-capture-token",
+      session: { ingest } as unknown as CaptureSession,
+    });
+    const payload = {
+      session_id: "dsh-session",
+      session_header: {
+        version: 0,
+        id: "dsh-session",
+        first_live_seq: 0,
+        first_observed_seq: 0,
+        unpublished_boundary_marker: null,
+        seed_length: 0,
+        parent_session: null,
+        delegation_depth: 0,
+        origin: null,
+      },
+      route: { provider: "deepseek-official", model: "deepseek-reasoner" },
+      event_id: "dsh-session:0",
+      timestamp: 1_787_000_000_000,
+      event: {
+        type: "request/header",
+        seq: 0,
+        time: 1_787_000_000_000,
+        data: { header: { config: { provider: "deepseek-official", model: "deepseek-reasoner" } } },
+      },
+    };
+    const headers = {
+      authorization: "Bearer harness-capture-token",
+      "x-trajpack-host": "deepseek_harness",
+      "x-trajpack-interface": "deepseek-harness@0.1.0-rc.6/session-event/0",
+    };
+    try {
+      const failed = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers,
+        payload,
+      });
+      expect(failed.statusCode).toBe(409);
+      expect(failed.json()).toEqual({
+        error: "capture_integrity_failed",
+        reason: "HARNESS_SEQUENCE_GAP",
+      });
+      expect(running.limitViolation()).toBe("HARNESS_SEQUENCE_GAP");
+
+      const refused = await running.server.inject({
+        method: "POST",
+        url: "/v1/hooks/events",
+        headers,
+        payload,
+      });
+      expect(refused.statusCode).toBe(429);
+      expect(ingest).toHaveBeenCalledTimes(1);
+    } finally {
+      await running.close();
+    }
+  });
+
   it("encrypts an authorized DOM capture immediately through the reviewer pairing route", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-review-test-"));
     temporaryRoots.push(root);
@@ -1216,6 +1287,140 @@ describe("loopback collectors", () => {
       await running.close();
     }
   });
+
+  it("uses one exact recipe preflight for DeepSeek reviewer preview and HF/TRL export", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trajpack-review-recipe-parity-"));
+    temporaryRoots.push(root);
+    const paths = testPaths(root);
+    const passphrase = "correct horse battery staple";
+    const fixturePath = join(
+      process.cwd(),
+      "..",
+      "..",
+      "examples",
+      "deepseek-research-demo",
+      "artifacts",
+      "approved",
+      "approved.trace.json",
+    );
+    const bundle = traceBundleSchema.parse(JSON.parse(await readFile(fixturePath, "utf8")));
+    bundle.events = bundle.events.map((event) => event.event_id.endsWith(":8:reasoning:0")
+      ? { ...event, review_disposition: "exclude" as const }
+      : event);
+    bundle.manifest.review.approval_scope = createApprovalScope(
+      bundle,
+      ["training_competitive_distillation"],
+    );
+    const outputRoot = join(root, "exports");
+    await saveNewTrace(bundle, passphrase, paths);
+    const running = await startReviewServer({
+      passphrase,
+      paths,
+      outputRoot,
+      reviewerDist: join(root, "missing-dist"),
+    });
+    try {
+      const headers = await reviewerHeaders(running);
+      const request = {
+        expected_revision: bundle.manifest.review.revision,
+        format: "hf-trl",
+        mode: "training_competitive_distillation",
+      };
+
+      const missingRecipe = await running.server.inject({
+        method: "POST",
+        url: `/api/v1/review/traces/${bundle.manifest.trace_id}/export-preview`,
+        headers,
+        payload: { ...request, training_recipe: null },
+      });
+      expect(missingRecipe.statusCode).toBe(200);
+      expect(missingRecipe.json()).toMatchObject({
+        export_allowed: false,
+        example_count: 0,
+        training_recipe: null,
+        recipe_version: null,
+        compiler_version: null,
+        compilation_sha256: null,
+        block_reasons: expect.arrayContaining(["DEEPSEEK_HF_RECIPE_REQUIRED"]),
+      });
+
+      const previewResponse = await running.server.inject({
+        method: "POST",
+        url: `/api/v1/review/traces/${bundle.manifest.trace_id}/export-preview`,
+        headers,
+        payload: { ...request, training_recipe: "deepseek_epoch_sft" },
+      });
+      expect(previewResponse.statusCode).toBe(200);
+      const preview = previewResponse.json() as {
+        export_allowed: boolean;
+        example_count: number;
+        training_recipe: string;
+        recipe_version: string;
+        compiler_version: string;
+        compilation_sha256: string;
+        exclusions: Array<{ exclusion_id: string; candidate_event_count: number; reason_codes: string[] }>;
+      };
+      expect(preview).toMatchObject({
+        export_allowed: true,
+        example_count: 1,
+        training_recipe: "deepseek_epoch_sft",
+        recipe_version: "deepseek-exact-request-epoch-sft/0.1",
+        compiler_version: "training-view-compiler/0.2",
+        compilation_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        exclusions: [expect.objectContaining({
+          candidate_event_count: expect.any(Number),
+          reason_codes: expect.arrayContaining(["CANONICAL_PROJECTION_MISSING"]),
+        })],
+      });
+      await expect(stat(outputRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+      const exportedResponse = await running.server.inject({
+        method: "POST",
+        url: `/api/v1/review/traces/${bundle.manifest.trace_id}/exports`,
+        headers,
+        payload: {
+          ...request,
+          training_recipe: "deepseek_epoch_sft",
+          confirmation_phrase: "EXPORT PLAINTEXT",
+        },
+      });
+      expect(exportedResponse.statusCode).toBe(200);
+      const destination = (exportedResponse.json() as { destination: string }).destination;
+      const compilation = JSON.parse(await readFile(join(destination, "training-view-report.json"), "utf8")) as {
+        recipe: string;
+        recipe_version: string;
+        compiler_version: string;
+        compilation_sha256: string;
+        views: unknown[];
+        exclusions: Array<{ exclusion_id: string; candidate_event_ids: string[]; reason_codes: string[] }>;
+      };
+      const datasetRows = (await readFile(join(destination, "dataset.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      expect({
+        example_count: datasetRows.length,
+        training_recipe: compilation.recipe,
+        recipe_version: compilation.recipe_version,
+        compiler_version: compilation.compiler_version,
+        compilation_sha256: compilation.compilation_sha256,
+        exclusions: compilation.exclusions.map((exclusion) => ({
+          exclusion_id: exclusion.exclusion_id,
+          candidate_event_count: exclusion.candidate_event_ids.length,
+          reason_codes: exclusion.reason_codes,
+        })),
+      }).toEqual({
+        example_count: preview.example_count,
+        training_recipe: preview.training_recipe,
+        recipe_version: preview.recipe_version,
+        compiler_version: preview.compiler_version,
+        compilation_sha256: preview.compilation_sha256,
+        exclusions: preview.exclusions,
+      });
+    } finally {
+      await running.close();
+    }
+  }, 60_000);
 
   it("detects structured secrets and clears tool payloads with hash-correct event redaction", async () => {
     const root = await mkdtemp(join(tmpdir(), "trajpack-review-security-test-"));

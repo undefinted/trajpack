@@ -15,6 +15,8 @@
     "audit:dependencies": "pnpm audit --prod",
     "audit:static": "node scripts/security-audit.mjs",
     "bench:scale": "pnpm --filter @trajpack/core build && node --expose-gc scripts/benchmark-scale.mjs",
+    "bench:collector": "pnpm build && node --expose-gc scripts/benchmark-collector.mjs",
+    "bench:collector:smoke": "pnpm build && node --expose-gc scripts/benchmark-collector.mjs --ci",
     "demo": "pnpm build && node scripts/demo-trajectory.mjs --clean",
     "test:demo": "pnpm build && node --test examples/deepseek-research-demo/demo.test.mjs",
     "pretest:pack": "pnpm build",

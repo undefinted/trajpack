@@ -1,7 +1,7 @@
 import { constants, realpathSync } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import process from "node:process";
 
 const HOST = "codex";
@@ -23,6 +23,14 @@ function runtimeDirectory() {
   return join(process.env.XDG_RUNTIME_DIR ?? tmpdir(), `trajpack-${process.getuid?.() ?? "user"}`);
 }
 
+function samePath(left, right) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 async function armConfiguration() {
   const directUrl = process.env.TRAJPACK_COLLECTOR_URL;
   const directToken = process.env.TRAJPACK_CAPTURE_TOKEN;
@@ -39,6 +47,15 @@ async function armConfiguration() {
     if (process.platform !== "win32"
       && (before.uid !== process.getuid?.() || (before.mode & 0o077) !== 0)) return null;
     const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
+    if (process.platform === "win32") {
+      // Windows does not expose O_NOFOLLOW. Resolve the leaf against its real
+      // parent so lstat/open cannot silently follow a descriptor reparse point.
+      const [canonicalDirectory, canonicalDescriptor] = await Promise.all([
+        realpath(directory),
+        realpath(path),
+      ]);
+      if (!samePath(canonicalDescriptor, join(canonicalDirectory, basename(path)))) return null;
+    }
     // Open with O_NOFOLLOW and fstat the fd so a same-user symlink swap between
     // the directory check and the read cannot redirect the descriptor source.
     const handle = await open(path, constants.O_RDONLY | noFollow);
@@ -46,6 +63,15 @@ async function armConfiguration() {
       const details = await handle.stat();
       if (!details.isFile() || details.dev !== before.dev || details.ino !== before.ino
         || details.size !== before.size || details.size > 8192) return null;
+      if (process.platform === "win32") {
+        const [canonicalDirectory, canonicalDescriptor, after] = await Promise.all([
+          realpath(directory),
+          realpath(path),
+          lstat(path),
+        ]);
+        if (after.isSymbolicLink() || after.dev !== details.dev || after.ino !== details.ino
+          || !samePath(canonicalDescriptor, join(canonicalDirectory, basename(path)))) return null;
+      }
       if (process.platform !== "win32"
         && (details.uid !== process.getuid?.() || (details.mode & 0o077) !== 0)) return null;
       const descriptor = JSON.parse(await handle.readFile({ encoding: "utf8" }));
