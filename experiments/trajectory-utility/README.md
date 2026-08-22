@@ -179,6 +179,73 @@ different prompt/gold payloads under one signature, train/eval overlap, and any
 held-out assistant/tool message or loss target. This prevents answer or tool
 observation leakage into evaluation prompts.
 
+## Fair multi-arm builds for real exports
+
+`study_build.py` is the versioned bridge between separately exported trajpack
+recipes and a fair training/evaluation study. Unlike the calculator-only
+validator above, `study-build/0.1` permits several request epochs from one
+DeepSeek Harness trace. A `view_id` is the exported `DatasetExample.id`; every
+row is bound to the registry by `(trace_id, view_id, SHA-256(canonical view),
+SHA-256(source_event_ids))`.
+
+Keep these two inputs private and outside Git:
+
+- `study-task-registry/0.1`: opaque task IDs, one task signature and split, an
+  optional verifier ID, and per-arm row bindings. Its strict schema rejects
+  extra fields such as prompts or gold answers.
+- `study-verifier-manifest/0.1`: verifier ID, version, protocol, and executable
+  artifact hash. Every eval task must reference a declared verifier.
+
+The registry is the single split authority. Every arm must contain the exact
+same task universe, every input row must be registered exactly once, and an
+existing exported task signature or split must agree. Missing arms, missing or
+extra rows, source-event drift, duplicate views, and train/eval signature
+overlap all fail closed. Eval rows must be prompt-only; assistant/tool context
+and loss targets are rejected as leakage.
+
+A build specification contains only file locators and study controls:
+
+```json
+{
+  "schema_version": "study-build/0.1",
+  "study_id": "deepseek_harness_seed3407",
+  "seed": 3407,
+  "task_registry": "private/task-registry.json",
+  "verifier_manifest": "private/verifier-manifest.json",
+  "arms": [
+    {"name": "answer_only", "dataset": "exports/answer-sft.jsonl"},
+    {"name": "complete", "dataset": "exports/deepseek-epoch-sft.jsonl"}
+  ]
+}
+```
+
+The four machine-readable input/output schemas live in [`schemas/`](schemas/). Compute a
+binding's two content hashes with `dataset_example_sha256()` and
+`source_event_ids_sha256()` from `study_build.py`; the latter is SHA-256 over
+the UTF-8 canonical JSON array in original event order.
+Then materialize into a fresh ignored directory:
+
+```powershell
+python experiments/trajectory-utility/study_build.py `
+  --spec work/ignored/my-study/study.json `
+  --out work/ignored/my-study/materialized
+```
+
+The output is deterministic for identical input bytes:
+
+```text
+<arm>.trainer.jsonl            original examples plus hash-only study binding
+study-manifest.json            input/output hashes, split/task counts, seed
+checksums.sha256               hashes for every emitted trainer file + manifest
+```
+
+The raw private registry and verifier manifest are hash-bound into every row
+and the output manifest, but are never copied into the output tree. The builder
+preserves any real reward/verifier fields already present and never creates a
+reward, preference pair, success label, gold answer, or verifier result. It is
+also not an approval bypass: each source export still has to pass trajpack's
+rights, privacy, quality, and human-review gates before this stage.
+
 ## Interpretation guardrails
 
 - Report counts and denominators, not only percentages.

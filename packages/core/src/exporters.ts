@@ -35,6 +35,52 @@ export interface ExportResult {
   excludedParts: Array<{ eventId: string; ordinal: number; reason: string }>;
 }
 
+export interface ExportPreflightOptions {
+  format: ExportFormat;
+  mode?: "archive" | TrainingMode | "redistribution";
+  trainingRecipe?: TrainingViewRecipe;
+}
+
+export interface ExportTrainingViewPreflight {
+  recipe: TrainingViewRecipe;
+  recipeVersion: string;
+  compilerVersion: string;
+  compilationSha256: string;
+  exampleCount: number;
+  exclusions: Array<{
+    exclusionId: string;
+    candidateEventCount: number;
+    reasonCodes: string[];
+  }>;
+}
+
+/**
+ * Content-free result of the exact export preparation pass. It deliberately
+ * exposes counts, versions, hashes, and stable reason codes only: reviewer
+ * previews must not become a second plaintext projection of an unapproved
+ * trace.
+ */
+export interface ApprovedBundleExportPreflight {
+  format: ExportFormat;
+  mode: "archive" | TrainingMode | "redistribution";
+  exportAllowed: boolean;
+  blockReasons: string[];
+  selectedEventCount: number;
+  exampleCount: number;
+  excludedEventCount: number;
+  excludedContentPartCount: number;
+  trainingView: ExportTrainingViewPreflight | null;
+}
+
+interface PreparedApprovedBundleExport {
+  result: ApprovedBundleExportPreflight;
+  selected: TraceBundle;
+  gate: ReturnType<typeof evaluateGate>;
+  recipeResult: { examples: DatasetExample[]; compilation: TrainingViewCompilation } | null;
+  legacyHfExamples: DatasetExample[] | null;
+  opaqueReasoning: OpaqueReasoningInventory;
+}
+
 interface VerifiedLabel {
   reward: number;
   verifier: { name: string; version: string };
@@ -679,14 +725,107 @@ function compileRecipeExamples(
     }
     : bundle;
   const compilation = compileTrainingView(compilerInput, recipe);
-  if (compilation.views.length === 0) {
-    const reasons = [...new Set(compilation.exclusions.flatMap((item) => item.reason_codes))].sort();
-    throw new Error(`Training recipe ${recipe} produced no eligible views: ${reasons.join(", ")}`);
-  }
   return {
     examples: compilation.views.map((view) => datasetExampleFromTrainingView(bundle, view)),
     compilation,
   };
+}
+
+function prepareApprovedBundleExport(
+  bundle: TraceBundle,
+  options: ExportPreflightOptions,
+): PreparedApprovedBundleExport {
+  const mode = options.mode ?? (options.format === "canonical" ? "archive" : "training_competitive_distillation");
+  if (options.trainingRecipe !== undefined && options.format !== "hf-trl") {
+    throw new Error("Versioned training recipes are available only for HF/TRL exports");
+  }
+  if (options.format === "hf-trl"
+    && mode !== "training_noncompetitive" && mode !== "training_competitive_distillation") {
+    throw new Error("HF/TRL exports require an explicit training eligibility gate");
+  }
+
+  const gate = evaluateGate(bundle, mode);
+  const blockReasons = [
+    ...gate.reasonCodes,
+    ...(bundle.manifest.review.automated_checks === "passed" ? [] : ["AUTOMATED_CHECKS_NOT_PASSED"]),
+    ...validateApprovalScope(bundle, mode),
+  ];
+  const selected = selectExportView(bundle, gate.excludedContentParts);
+  const opaqueReasoning = inventoryOpaqueReasoningArtifacts(bundle.raw);
+  if (opaqueReasoning.scan_truncated) blockReasons.push("OPAQUE_REASONING_SCAN_TRUNCATED");
+
+  let recipeResult: PreparedApprovedBundleExport["recipeResult"] = null;
+  let legacyHfExamples: DatasetExample[] | null = null;
+  let trainingView: ExportTrainingViewPreflight | null = null;
+  let exampleCount = options.format === "hf-trl" ? 0 : selected.events.length;
+
+  if (options.format === "hf-trl") {
+    if (bundle.manifest.source.host === "deepseek_harness" && options.trainingRecipe === undefined) {
+      blockReasons.push("DEEPSEEK_HF_RECIPE_REQUIRED");
+    } else if (options.trainingRecipe !== undefined) {
+      try {
+        recipeResult = compileRecipeExamples(selected, options.trainingRecipe, bundle);
+        const compilation = recipeResult.compilation;
+        exampleCount = recipeResult.examples.length;
+        trainingView = {
+          recipe: compilation.recipe,
+          recipeVersion: compilation.recipe_version,
+          compilerVersion: compilation.compiler_version,
+          compilationSha256: compilation.compilation_sha256,
+          exampleCount,
+          exclusions: compilation.exclusions.map((exclusion) => ({
+            exclusionId: exclusion.exclusion_id,
+            candidateEventCount: exclusion.candidate_event_ids.length,
+            reasonCodes: [...exclusion.reason_codes],
+          })),
+        };
+        if (exampleCount === 0) blockReasons.push("TRAINING_RECIPE_NO_ELIGIBLE_VIEWS");
+      } catch {
+        // Provider content and paths can appear in compiler exceptions. Keep
+        // the reviewer API content-free and fail closed with a stable code.
+        blockReasons.push("TRAINING_RECIPE_COMPILATION_FAILED");
+      }
+    } else {
+      try {
+        legacyHfExamples = toHfExamples(selected).map((example) => datasetExampleSchema.parse(example));
+        exampleCount = legacyHfExamples.length;
+        if (exampleCount === 0) blockReasons.push("HF_NO_ELIGIBLE_VIEWS");
+      } catch {
+        blockReasons.push("HF_VIEW_COMPILATION_FAILED");
+      }
+    }
+  }
+
+  const uniqueBlockReasons = [...new Set(blockReasons)];
+  return {
+    result: {
+      format: options.format,
+      mode,
+      exportAllowed: uniqueBlockReasons.length === 0,
+      blockReasons: uniqueBlockReasons,
+      selectedEventCount: selected.events.length,
+      exampleCount,
+      excludedEventCount: bundle.events.length - selected.events.length,
+      excludedContentPartCount: gate.excludedContentParts.length,
+      trainingView,
+    },
+    selected,
+    gate,
+    recipeResult,
+    legacyHfExamples,
+    opaqueReasoning,
+  };
+}
+
+/**
+ * Run the same deterministic, recipe-aware preparation pass as
+ * `exportApprovedBundle` without writing any files or returning trace content.
+ */
+export function preflightApprovedBundleExport(
+  bundle: TraceBundle,
+  options: ExportPreflightOptions,
+): ApprovedBundleExportPreflight {
+  return prepareApprovedBundleExport(bundle, options).result;
 }
 
 export function toOtlp(bundle: TraceBundle): Record<string, unknown> {
@@ -933,32 +1072,39 @@ function lineageReport(bundle: TraceBundle, format: ExportFormat, mode: Approval
 }
 
 export async function exportApprovedBundle(bundle: TraceBundle, options: ExportOptions): Promise<ExportResult> {
-  const mode = options.mode ?? (options.format === "canonical" ? "archive" : "training_competitive_distillation");
-  if (options.trainingRecipe !== undefined && options.format !== "hf-trl") {
-    throw new Error("Versioned training recipes are available only for HF/TRL exports");
-  }
-  if (options.format === "hf-trl"
-    && mode !== "training_noncompetitive" && mode !== "training_competitive_distillation") {
-    throw new Error("HF/TRL exports require an explicit training eligibility gate");
-  }
-  if (options.format === "hf-trl" && bundle.manifest.source.host === "deepseek_harness"
-    && options.trainingRecipe === undefined) {
+  const prepared = prepareApprovedBundleExport(bundle, options);
+  const { result: preflight, selected, gate, recipeResult, legacyHfExamples, opaqueReasoning } = prepared;
+  const mode = preflight.mode;
+  if (preflight.blockReasons.includes("DEEPSEEK_HF_RECIPE_REQUIRED")) {
     throw new Error("DeepSeek Harness HF/TRL export requires an explicit versioned recipe; use deepseek_epoch_sft for exact request context");
   }
-  const gate = evaluateGate(bundle, mode);
-  const reviewReasons = [
-    ...(bundle.manifest.review.automated_checks === "passed" ? [] : ["AUTOMATED_CHECKS_NOT_PASSED"]),
-    ...validateApprovalScope(bundle, mode),
-  ];
-  if (!gate.allowed || reviewReasons.length > 0) {
-    throw new Error(`Export blocked by policy: ${[...new Set([...gate.reasonCodes, ...reviewReasons])].join(", ")}`);
+  const preparationReasons = new Set([
+    "DEEPSEEK_HF_RECIPE_REQUIRED",
+    "OPAQUE_REASONING_SCAN_TRUNCATED",
+    "TRAINING_RECIPE_NO_ELIGIBLE_VIEWS",
+    "TRAINING_RECIPE_COMPILATION_FAILED",
+    "HF_NO_ELIGIBLE_VIEWS",
+    "HF_VIEW_COMPILATION_FAILED",
+  ]);
+  const policyReasons = preflight.blockReasons.filter((reason) => !preparationReasons.has(reason));
+  if (policyReasons.length > 0) {
+    throw new Error(`Export blocked by policy: ${policyReasons.join(", ")}`);
+  }
+  if (preflight.blockReasons.includes("OPAQUE_REASONING_SCAN_TRUNCATED")) {
+    throw new Error("Export blocked because the opaque provider-state inventory exceeded its scan limits");
+  }
+  if (options.trainingRecipe !== undefined && recipeResult !== null && recipeResult.examples.length === 0) {
+    const reasons = [...new Set(recipeResult.compilation.exclusions.flatMap((item) => item.reason_codes))].sort();
+    throw new Error(`Training recipe ${options.trainingRecipe} produced no eligible views: ${reasons.join(", ")}`);
+  }
+  if (!preflight.exportAllowed) {
+    throw new Error(`Export blocked by policy: ${preflight.blockReasons.join(", ")}`);
   }
   const output = await createPrivateStagingDirectory(options.outputDirectory);
   const outputDirectory = output.stagingPath;
   try {
   const files: string[] = [];
   const checksums: Record<string, string> = {};
-  const selected = selectExportView(bundle, gate.excludedContentParts);
   const exportedEventIds = new Map<string, string>();
   const excludedKeys = new Set(gate.excludedContentParts.map((part) => `${part.eventId}\u0000${part.ordinal}`));
   let exportedIndex = 0;
@@ -988,10 +1134,6 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
   });
   const quality = inspectQuality(selected);
   const redaction = redactionReport(bundle, selected);
-  const opaqueReasoning = inventoryOpaqueReasoningArtifacts(bundle.raw);
-  if (opaqueReasoning.scan_truncated) {
-    throw new Error("Export blocked because the opaque provider-state inventory exceeded its scan limits");
-  }
 
   if (options.format === "canonical") {
     await writeTrackedFile(outputDirectory, "manifest.json", `${canonicalJson(selected.manifest)}\n`, files, checksums);
@@ -1007,10 +1149,7 @@ export async function exportApprovedBundle(bundle: TraceBundle, options: ExportO
     await writeTrackedFile(outputDirectory, "trajectory.atif.json", `${canonicalJson(toAtif(selected))}\n`, files, checksums);
     await writeTrackedFile(outputDirectory, "provenance.json", `${sidecar}\n`, files, checksums);
   } else if (options.format === "hf-trl") {
-    const recipeResult = options.trainingRecipe === undefined
-      ? null
-      : compileRecipeExamples(selected, options.trainingRecipe, bundle);
-    const examples = (recipeResult?.examples ?? toHfExamples(selected))
+    const examples = (recipeResult?.examples ?? legacyHfExamples ?? [])
       .map((example) => datasetExampleSchema.parse(example));
     if (examples.length === 0 || examples.some((example) => example.messages.length === 0)) {
       throw new Error("HF/TRL export requires at least one non-empty topology-safe training view");

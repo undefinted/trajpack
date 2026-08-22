@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { ApprovalMode } from "@trajpack/schema";
-import type { ExportFormat, ExportPreview, ExportReceipt, ReviewDecision } from "../api/types.js";
+import type {
+  ExportFormat,
+  ExportPreview,
+  ExportReceipt,
+  ExportTrainingRecipe,
+  ReviewDecision,
+} from "../api/types.js";
 import { formatBytes } from "../format.js";
 import { StatusBadge } from "./StatusBadge.js";
 
@@ -131,8 +137,13 @@ interface ExportDialogProps {
   open: boolean;
   eligibleModes: ApprovalMode[];
   onClose: () => void;
-  onPreview: (format: ExportFormat, mode: ApprovalMode) => Promise<ExportPreview>;
-  onExport: (format: ExportFormat, mode: ApprovalMode, confirmation: ExportPreview["confirmation_phrase"]) => Promise<ExportReceipt>;
+  onPreview: (format: ExportFormat, mode: ApprovalMode, recipe: ExportTrainingRecipe | null) => Promise<ExportPreview>;
+  onExport: (
+    format: ExportFormat,
+    mode: ApprovalMode,
+    recipe: ExportTrainingRecipe | null,
+    confirmation: ExportPreview["confirmation_phrase"],
+  ) => Promise<ExportReceipt>;
   onComplete: (receipt: ExportReceipt) => void;
 }
 
@@ -145,15 +156,29 @@ const formats: Array<{ value: ExportFormat; label: string; detail: string }> = [
 
 const ALL_EXPORT_MODES: ApprovalMode[] = ["archive", "training_noncompetitive", "training_competitive_distillation", "redistribution"];
 
+const trainingRecipes: Array<{ value: ExportTrainingRecipe; label: string }> = [
+  { value: "deepseek_epoch_sft", label: "DeepSeek exact request epoch SFT" },
+  { value: "answer_sft", label: "Answer-only SFT" },
+  { value: "reasoning_sft", label: "Provider-exposed reasoning SFT" },
+  { value: "tool_use_sft", label: "Native tool-use SFT" },
+  { value: "failure_recovery", label: "Failure-recovery SFT" },
+  { value: "subagent_handoff", label: "Subagent handoff SFT" },
+  { value: "pointwise_reward_rl_ready", label: "Verified pointwise reward" },
+];
+
 export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport, onComplete }: ExportDialogProps): ReactNode {
   const [format, setFormat] = useState<ExportFormat>("canonical");
   const [mode, setMode] = useState<ApprovalMode>("archive");
+  const [trainingRecipe, setTrainingRecipe] = useState<ExportTrainingRecipe | null>(null);
   const modeOptions = ALL_EXPORT_MODES.filter((candidate) => eligibleModes.includes(candidate));
   useEffect(() => {
     if (open && modeOptions.length > 0 && !modeOptions.includes(mode)) {
       setMode(modeOptions[0]!);
     }
   }, [open, mode, modeOptions]);
+  useEffect(() => {
+    if (open) setTrainingRecipe(null);
+  }, [open]);
   const [preview, setPreview] = useState<ExportPreview | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [phrase, setPhrase] = useState("");
@@ -168,12 +193,12 @@ export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport
     setAcknowledged(false);
     setPhrase("");
     setError(null);
-    void onPreview(format, mode)
+    void onPreview(format, mode, format === "hf-trl" ? trainingRecipe : null)
       .then((result) => active && setPreview(result))
       .catch((reason: unknown) => active && setError(errorMessage(reason)))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [format, mode, onPreview, open]);
+  }, [format, mode, onPreview, open, trainingRecipe]);
 
   if (!open) return null;
 
@@ -188,7 +213,12 @@ export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport
     setLoading(true);
     setError(null);
     try {
-      const receipt = await onExport(format, mode, preview.confirmation_phrase);
+      const receipt = await onExport(
+        format,
+        mode,
+        format === "hf-trl" ? trainingRecipe : null,
+        preview.confirmation_phrase,
+      );
       onComplete(receipt);
       onClose();
     } catch (reason) {
@@ -234,6 +264,24 @@ export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport
             </select>
           </label>
 
+          {format === "hf-trl" && (
+            <label>
+              <span>Training recipe / 训练视图</span>
+              <select
+                aria-label="Training recipe / 训练视图"
+                value={trainingRecipe ?? ""}
+                onChange={(event) => setTrainingRecipe(event.target.value === ""
+                  ? null
+                  : event.target.value as ExportTrainingRecipe)}
+                disabled={loading}
+              >
+                <option value="">未选择（DeepSeek Harness 将阻断）</option>
+                {trainingRecipes.map((recipe) => <option key={recipe.value} value={recipe.value}>{recipe.label}</option>)}
+              </select>
+              <small>recipe 不会被自动选择；预览和实际导出使用同一冻结编译器。</small>
+            </label>
+          )}
+
           {loading && !preview && <div className="loading-inline"><span className="spinner" />生成导出预检…</div>}
           {error && <div className="callout callout--danger" role="alert">{error}</div>}
 
@@ -247,11 +295,21 @@ export function ExportDialog({ open, eligibleModes, onClose, onPreview, onExport
                 <div><dt>目标</dt><dd>{preview.destination_hint}</dd></div>
                 <div><dt>用途</dt><dd>{preview.mode}</dd></div>
                 <div><dt>样本</dt><dd>{preview.example_count}</dd></div>
+                <div><dt>Recipe</dt><dd>{preview.training_recipe ?? "未选择"}</dd></div>
+                <div><dt>Recipe 版本</dt><dd>{preview.recipe_version ?? "—"}</dd></div>
+                <div><dt>Compiler</dt><dd>{preview.compiler_version ?? "—"}</dd></div>
+                <div><dt>Compilation SHA-256</dt><dd><code>{preview.compilation_sha256 ?? "—"}</code></dd></div>
+                <div><dt>Recipe exclusions</dt><dd>{preview.exclusions.length}</dd></div>
                 <div><dt>预计大小</dt><dd>{formatBytes(preview.plaintext_bytes_estimate)}</dd></div>
                 <div><dt>排除事件</dt><dd>{preview.excluded_event_count}</dd></div>
                 <div><dt>遮盖片段</dt><dd>{preview.redacted_part_count}</dd></div>
                 <div><dt>许可</dt><dd>{preview.license_summary}</dd></div>
               </dl>
+              {preview.exclusions.map((exclusion) => (
+                <p className="text-muted" key={exclusion.exclusion_id}>
+                  排除候选 {exclusion.candidate_event_count} 个：{exclusion.reason_codes.join(", ")}
+                </p>
+              ))}
               {preview.block_reasons.map((reason, index) => <p className="text-danger" key={`${index}-${reason}`}>阻断：{reason}</p>)}
             </div>
           )}

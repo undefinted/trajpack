@@ -1,4 +1,6 @@
 import process from "node:process";
+import type { Context } from "@deepseek-ai/cordis";
+import type { Session, SessionEvent } from "@deepseek-ai/dsh-session";
 
 export const name = "trajpack";
 export const harnessCompatibility = "0.1.0-rc.6";
@@ -16,12 +18,7 @@ export const queueLimits = Object.freeze({
 
 type JsonObject = Record<string, unknown>;
 
-interface HarnessContext {
-  on(event: "session/event", listener: (session: unknown, event: unknown) => void): unknown;
-  on(event: "session/flush", listener: (session: unknown) => Promise<void>): unknown;
-  on(event: "session/disposed", listener: (session: unknown) => void): unknown;
-  effect(effect: () => () => Promise<void>, label?: string): unknown;
-}
+type HarnessContext = Pick<Context, "on" | "effect">;
 
 interface Route {
   provider: string;
@@ -101,6 +98,14 @@ function loopbackUrl(value: string): URL | null {
 function collectorSetup(): CollectorSetup {
   const collector = process.env.TRAJPACK_COLLECTOR_URL;
   const token = process.env.TRAJPACK_CAPTURE_TOKEN;
+  // The wrapper capability is for this in-process observer only. Harness tools
+  // execute as child processes, so leaving it in process.env would let an
+  // untrusted workspace command inherit the collector bearer token and forge
+  // provider-looking events. Consume it once during plugin boot, before any
+  // agent turn starts, and keep only the parsed values in this closure.
+  delete process.env.TRAJPACK_COLLECTOR_URL;
+  delete process.env.TRAJPACK_CAPTURE_TOKEN;
+  delete process.env.TRAJPACK_CAPTURE_HOST;
   if (collector === undefined && token === undefined) {
     return { configuration: null, failure: null };
   }
@@ -153,6 +158,10 @@ function seedBoundaryMarker(
   firstLiveSeq: number,
 ): { type: "session/end-seed"; seq: number } | null {
   const events = Array.isArray(session.events) ? session.events : [];
+  // This function belongs exclusively to ForwardState construction. The
+  // official Session instance and its seed boundary are immutable for the
+  // live lifecycle, so the backwards O(seed) lookup is paid once; capsule()
+  // reads the cached marker in O(1) for every subsequent event.
   // The harness contract locates the LAST session/end-seed marker, which for a
   // resumed seed may sit at firstLiveSeq - 1 (a seed that already ended is not
   // re-marked). Only scanning events[firstLiveSeq] would miss it and report a
@@ -323,7 +332,7 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
 
   ctx.effect(() => async () => controller.flush(), "trajpack: drain collector queue");
 
-  ctx.on("session/event", (sessionValue, eventValue) => {
+  ctx.on("session/event", (sessionValue: Session, eventValue: SessionEvent) => {
     // Wrapper credentials exist before Harness starts. Keeping the unarmed
     // observer entirely inert avoids allocating a queue for ordinary sessions.
     if (configuration === null || terminalFailure !== null) return;
@@ -387,9 +396,9 @@ export function apply(ctx: HarnessContext): HarnessCaptureController {
     });
   });
 
-  ctx.on("session/flush", async sessionValue => controller.flush(sessionValue));
+  ctx.on("session/flush", async (sessionValue: Session) => controller.flush(sessionValue));
 
-  ctx.on("session/disposed", (sessionValue) => {
+  ctx.on("session/disposed", (sessionValue: Session) => {
     const state = findState(sessionValue);
     if (state === null) return;
     // Retain the session only until its admitted tail drains. A single fresh,

@@ -73,8 +73,9 @@ addSourceOptions(
     .option("--cwd <path>", "working directory")
     .option("--max-events <count>", "hard limit across stdout and hook channels", String(DEFAULT_MAX_CAPTURE_EVENTS))
     .option("--max-raw-bytes <bytes>", "hard raw-byte budget across stdout and hook channels", String(DEFAULT_MAX_CAPTURE_RAW_BYTES))
-    .option("--drain-ms <milliseconds>", "bounded grace period for in-flight asynchronous hooks", "500"),
-).allowUnknownOption(true).passThroughOptions().action(async (host: string, command: string[], options) => {
+    .option("--drain-ms <milliseconds>", "bounded grace period for in-flight asynchronous hooks", "500")
+    .option("--receipt <new-json-file>", "write one content-free terminal capture receipt using exclusive create"),
+).allowUnknownOption(true).action(async (host: string, command: string[], options) => {
   process.exitCode = await runCapture(host, command, options);
 });
 
@@ -155,7 +156,8 @@ program.command("review")
 program.command("doctor")
   .description("Report native agent executables, pinned interfaces, and safe web import paths")
   .option("--json", "emit a machine-readable compatibility report")
-  .action((options: { json?: boolean }) => runDoctor(options));
+  .option("--dsh-profile <name>", "read-only DeepSeek Harness profile manifest to verify", "headless")
+  .action((options: { json?: boolean; dshProfile?: string }) => runDoctor(options));
 
 program.command("analyze")
   .description("Derive content-free workload and training-yield research metrics from approved traces")

@@ -215,9 +215,26 @@ describe("policy gates", () => {
     }];
     expect(evaluateGate(bundle, "training_competitive_distillation").reasonCodes).toContain("TERMS_SOURCE_MISMATCH");
     bundle.manifest.account_contract.terms[0]!.url = "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html";
+    expect(evaluateGate(bundle, "training_competitive_distillation").reasonCodes).toContain("TERMS_SOURCE_MISMATCH");
+    bundle.manifest.account_contract.terms.push({
+      ...bundle.manifest.account_contract.terms[0]!,
+      name: "DeepSeek Open Platform Terms",
+      url: "https://cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html",
+      snapshot_sha256: "b".repeat(64),
+    });
     const authorityOnly = evaluateGate(bundle, "training_competitive_distillation").reasonCodes;
     expect(authorityOnly).not.toContain("TERMS_SOURCE_MISMATCH");
     expect(authorityOnly).toContain("TERMS_SNAPSHOT_UNPINNED");
+  });
+
+  it("does not infer the DeepSeek API agreement from an offline response shape", () => {
+    const bundle = manualDeepSeekBundle("user_supplied", null);
+
+    const archiveReasons = evaluateGate(bundle, "archive").reasonCodes;
+    expect(archiveReasons).not.toContain("TERMS_SOURCE_MISMATCH");
+
+    bundle.manifest.source.capture_method = "official_stream";
+    expect(evaluateGate(bundle, "archive").reasonCodes).toContain("TERMS_SOURCE_MISMATCH");
   });
 
   it("blocks incomplete per-content rights even when manifest rights are known", () => {
@@ -582,7 +599,7 @@ describe("policy gates", () => {
     bundle.manifest.eligibility.training_competitive_distillation = {
       ...bundle.manifest.eligibility.training_competitive_distillation,
       status: "allow",
-      basis: "manual-override:policy/2026-08-16.4:reviewed external teacher receipt",
+      basis: "manual-override:policy/2026-08-22.1:reviewed external teacher receipt",
       target_model_owner: "research-lab",
       target_product: "general-model",
       competitive_with_source: "yes",
@@ -608,7 +625,7 @@ describe("policy gates", () => {
     bundle.manifest.eligibility.training_competitive_distillation = {
       ...bundle.manifest.eligibility.training_competitive_distillation,
       status: "allow",
-      basis: "manual-override:policy/2026-08-16.4:unbound evidence label",
+      basis: "manual-override:policy/2026-08-22.1:unbound evidence label",
       target_model_owner: "research-lab",
       target_product: "general-model",
       competitive_with_source: "yes",

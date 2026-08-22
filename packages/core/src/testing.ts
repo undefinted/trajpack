@@ -9,7 +9,7 @@ export function fixtureBundle(text = "hello"): TraceBundle {
     purposes: [name],
     reason_codes: ["TEST_FIXTURE"],
     basis: name === "sft" || name === "distillation"
-      ? `manual-override:policy/2026-08-16.4:fixture-${name}`
+      ? `manual-override:policy/2026-08-22.1:fixture-${name}`
       : "test",
     target_model_owner: "owner",
     target_product: "open-model",

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -82,6 +83,7 @@ function event(type: string, seq: number, data: Record<string, unknown>): Record
 afterEach(() => {
   delete process.env.TRAJPACK_COLLECTOR_URL;
   delete process.env.TRAJPACK_CAPTURE_TOKEN;
+  delete process.env.TRAJPACK_CAPTURE_HOST;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -91,10 +93,13 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     const root = fileURLToPath(new URL("../", import.meta.url));
     const manifest = JSON.parse(await readFile(`${root}/package.json`, "utf8")) as Record<string, unknown>;
     const dsh = manifest.dsh as { bundle?: { patch?: string } };
+    const development = manifest.devDependencies as Record<string, string>;
     expect(name).toBe("trajpack");
     expect(harnessCompatibility).toBe("0.1.0-rc.6");
     expect(sessionFormatVersion).toBe(0);
     expect(interfaceVersion).toBe("deepseek-harness@0.1.0-rc.6/session-event/0");
+    expect(development["@deepseek-ai/dsh-session"]).toBe("0.1.0-rc.6");
+    expect(development["@deepseek-ai/cordis"]).toBe("4.0.1");
     expect(dsh.bundle?.patch).toBe("./cordis.patch.yml");
     expect(await readFile(`${root}/cordis.patch.yml`, "utf8")).toContain("@trajpack/deepseek-harness-plugin");
   });
@@ -128,9 +133,23 @@ describe("DeepSeek Harness rc.6 plugin", () => {
   it("forwards the durable event, live-sequence boundary, topology, and resolved route", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
+    process.env.TRAJPACK_CAPTURE_HOST = "deepseek_harness";
     const fetch = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetch);
     const installed = install();
+    expect(process.env.TRAJPACK_COLLECTOR_URL).toBeUndefined();
+    expect(process.env.TRAJPACK_CAPTURE_TOKEN).toBeUndefined();
+    expect(process.env.TRAJPACK_CAPTURE_HOST).toBeUndefined();
+    const inherited = spawnSync(process.execPath, ["-e", [
+      "const names = ['TRAJPACK_COLLECTOR_URL', 'TRAJPACK_CAPTURE_TOKEN', 'TRAJPACK_CAPTURE_HOST'];",
+      "process.stdout.write(JSON.stringify(Object.fromEntries(names.map((name) => [name, process.env[name] ?? null]))));",
+    ].join("")], { encoding: "utf8", env: process.env, shell: false });
+    expect(inherited.status).toBe(0);
+    expect(JSON.parse(inherited.stdout)).toEqual({
+      TRAJPACK_COLLECTOR_URL: null,
+      TRAJPACK_CAPTURE_TOKEN: null,
+      TRAJPACK_CAPTURE_HOST: null,
+    });
     const liveSession = session();
     liveSession.self = liveSession;
 
@@ -232,14 +251,19 @@ describe("DeepSeek Harness rc.6 plugin", () => {
     });
   });
 
-  it("scans an immutable resumed seed only once per live session", async () => {
+  it("scans a large immutable resumed seed only once across many live events", async () => {
     process.env.TRAJPACK_COLLECTOR_URL = "http://127.0.0.1:43199/ingest";
     process.env.TRAJPACK_CAPTURE_TOKEN = "one-session-token";
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetch);
     const installed = install();
-    const firstLiveSeq = 5;
+    // This is the worst resumed-session shape for the backwards lookup: an
+    // old seed boundary followed by a long history from an earlier process.
+    // The observer must pay this O(seed) cost once, never once per live event.
+    const firstLiveSeq = 100_000;
+    const liveEventCount = 512;
     let indexedReads = 0;
-    const seedEvents = Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === firstLiveSeq - 1
+    const seedEvents = Array.from({ length: firstLiveSeq + 1 }, (_value, seq) => seq === 0
       ? { type: "session/end-seed", seq, time: 1, data: {} }
       : undefined);
     const resumed = session(0, firstLiveSeq);
@@ -250,11 +274,18 @@ describe("DeepSeek Harness rc.6 plugin", () => {
       },
     });
 
-    for (let offset = 0; offset < 10; offset += 1) {
+    installed.eventListener(resumed, event("turn/start", firstLiveSeq, { turn: 0 }));
+    const readsAfterFirstEvent = indexedReads;
+    expect(readsAfterFirstEvent).toBe(firstLiveSeq + 1);
+
+    for (let offset = 1; offset < liveEventCount; offset += 1) {
       installed.eventListener(resumed, event("turn/start", firstLiveSeq + offset, { turn: offset }));
     }
+    // A regression that scans in capsule() (the per-event path) would read the
+    // seed another 511 times and make this assertion fail deterministically.
+    expect(indexedReads).toBe(readsAfterFirstEvent);
     await installed.flushListener(resumed);
-    expect(indexedReads).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(liveEventCount);
   });
 
   it("treats a non-2xx response as a failed durability checkpoint", async () => {

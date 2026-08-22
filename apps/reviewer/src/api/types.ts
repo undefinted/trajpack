@@ -1,6 +1,7 @@
 import type {
   ApprovalMode,
   ContentPart,
+  DatasetViewRecipe,
   Eligibility,
   Rights,
   RightsOverrideAttestation,
@@ -18,6 +19,7 @@ export type EventDisposition = "include" | "exclude" | "redact";
 export type CheckStatus = "passed" | "warning" | "failed";
 export type CheckCategory = "structure" | "privacy" | "rights" | "quality";
 export type ExportFormat = "canonical" | "atif" | "hf-trl" | "otlp";
+export type ExportTrainingRecipe = Exclude<DatasetViewRecipe, "trace_full">;
 
 export interface ReviewerBootstrap {
   api_version: "review/0.1";
@@ -130,6 +132,14 @@ export interface ExportPreviewRequest {
   expected_revision: number;
   format: ExportFormat;
   mode: ApprovalMode;
+  /** No recipe is inferred. DeepSeek Harness HF/TRL requests fail closed. */
+  training_recipe: ExportTrainingRecipe | null;
+}
+
+export interface ExportPreviewExclusion {
+  exclusion_id: string;
+  candidate_event_count: number;
+  reason_codes: string[];
 }
 
 export interface ExportPreview {
@@ -138,6 +148,11 @@ export interface ExportPreview {
   mode: ApprovalMode;
   destination_hint: string;
   example_count: number;
+  training_recipe: ExportTrainingRecipe | null;
+  recipe_version: string | null;
+  compiler_version: string | null;
+  compilation_sha256: string | null;
+  exclusions: ExportPreviewExclusion[];
   plaintext_bytes_estimate: number;
   excluded_event_count: number;
   redacted_part_count: number;

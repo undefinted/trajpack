@@ -24,15 +24,23 @@
     "workspace_owner_hmac": null,
     "terms": [
       {
-        "name": "DeepSeek Terms of Use (demo routing metadata only)",
+        "name": "DeepSeek Terms of Use (unverified demo locator; not permission evidence)",
         "url": "https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html",
         "effective_at": "2026-01-01T00:00:00.000Z",
         "retrieved_at": "2026-08-16T00:00:00.000Z",
         "snapshot_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "review_after": "2099-01-01T00:00:00.000Z"
+      },
+      {
+        "name": "DeepSeek Open Platform Terms (unverified demo locator; not permission evidence)",
+        "url": "https://cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html",
+        "effective_at": "2026-04-29T00:00:00.000Z",
+        "retrieved_at": "2026-08-22T00:00:00.000Z",
+        "snapshot_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "review_after": "2099-01-01T00:00:00.000Z"
       }
     ],
-    "order_form_or_written_permission_ref": "demo-only:synthetic-content"
+    "order_form_or_written_permission_ref": null
   },
   "rights": {
     "source_license_expression": "CC0-1.0",
@@ -82,7 +90,7 @@
       "status": "allow",
       "purposes": ["training_noncompetitive"],
       "reason_codes": ["SYNTHETIC_DEMO_MANUAL_OVERRIDE"],
-      "basis": "manual-override:policy/2026-08-16.4:synthetic-demo",
+      "basis": "manual-override:policy/2026-08-22.1:synthetic-demo",
       "target_model_owner": "trajpack-demo",
       "target_product": "local-research-student",
       "competitive_with_source": "no",
@@ -96,7 +104,7 @@
       "status": "allow",
       "purposes": ["training_competitive_distillation"],
       "reason_codes": ["SYNTHETIC_DEMO_MANUAL_OVERRIDE"],
-      "basis": "manual-override:policy/2026-08-16.4:synthetic-demo",
+      "basis": "manual-override:policy/2026-08-22.1:synthetic-demo",
       "target_model_owner": "trajpack-demo",
       "target_product": "local-research-student",
       "competitive_with_source": "yes",

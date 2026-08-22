@@ -4,6 +4,10 @@ import type {
   TraceManifest,
   TrajectoryEvent,
 } from "@trajpack/schema";
+import {
+  DATASET_TRAINING_VIEW_COMPILER_VERSION,
+  DATASET_VIEW_RECIPE_VERSIONS,
+} from "@trajpack/schema";
 import type {
   EventReviewPatch,
   EventRightsPatch,
@@ -549,20 +553,41 @@ export class MockReviewApi implements ReviewApi {
       ? detail.manifest.eligibility.local_archive
       : detail.manifest.eligibility[request.mode];
     const modeAllowed = decision.status === "allow";
-    const allowed = approved && modeAllowed && !detail.checks.some(({ status }) => status === "failed");
+    const recipeRequired = request.format === "hf-trl"
+      && detail.manifest.source.host === "deepseek_harness"
+      && request.training_recipe === null;
+    const recipeWrongFormat = request.format !== "hf-trl" && request.training_recipe !== null;
+    const trainingModeRequired = request.format === "hf-trl" && !request.mode.startsWith("training_");
+    const allowed = approved && modeAllowed && !detail.checks.some(({ status }) => status === "failed")
+      && !recipeRequired && !recipeWrongFormat && !trainingModeRequired;
+    const blockReasons = [
+      ...(!approved || !modeAllowed || detail.checks.some(({ status }) => status === "failed")
+        ? ["轨迹必须通过所有 hard gate 并获得人工批准。"]
+        : []),
+      ...(recipeRequired ? ["DEEPSEEK_HF_RECIPE_REQUIRED"] : []),
+      ...(recipeWrongFormat ? ["TRAINING_RECIPE_REQUIRES_HF_TRL"] : []),
+      ...(trainingModeRequired ? ["HF_TRL_REQUIRES_TRAINING_MODE"] : []),
+    ];
     return {
       trace_id: traceId,
       format: request.format,
       mode: request.mode,
       destination_hint: `./exports/${traceId.slice(0, 8)}.${request.format === "hf-trl" ? "jsonl" : "zip"}`,
-      example_count: 1,
+      example_count: recipeRequired ? 0 : request.training_recipe === "deepseek_epoch_sft" ? 2 : 1,
+      training_recipe: request.training_recipe,
+      recipe_version: request.training_recipe === null
+        ? null
+        : DATASET_VIEW_RECIPE_VERSIONS[request.training_recipe],
+      compiler_version: request.training_recipe === null ? null : DATASET_TRAINING_VIEW_COMPILER_VERSION,
+      compilation_sha256: request.training_recipe === null ? null : HASH_B,
+      exclusions: [],
       plaintext_bytes_estimate: 18_420,
       excluded_event_count: detail.events.filter(({ review }) => review.disposition === "exclude").length,
       redacted_part_count: detail.events.filter(({ review }) => review.disposition === "redact").length,
       license_summary: detail.manifest.rights.source_license_expression,
       warnings: ["导出文件为明文，离开加密 vault 后无法由 trajpack 自动撤回。"],
       export_allowed: allowed,
-      block_reasons: allowed ? [] : ["轨迹必须通过所有 hard gate 并获得人工批准。"],
+      block_reasons: allowed ? [] : blockReasons,
       confirmation_phrase: "EXPORT PLAINTEXT",
     };
   }

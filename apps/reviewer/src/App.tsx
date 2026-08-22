@@ -7,6 +7,7 @@ import type {
   ExportFormat,
   ExportPreview,
   ExportReceipt,
+  ExportTrainingRecipe,
   ReviewApi,
   ReviewerBootstrap,
   TraceDetail,
@@ -194,17 +195,32 @@ export function App({ api }: AppProps): ReactNode {
     }
   }, [api, commitDetail, decisionMode, detail]);
 
-  const handlePreviewExport = useCallback((format: ExportFormat, mode: ApprovalMode): Promise<ExportPreview> => {
+  const handlePreviewExport = useCallback((
+    format: ExportFormat,
+    mode: ApprovalMode,
+    trainingRecipe: ExportTrainingRecipe | null,
+  ): Promise<ExportPreview> => {
     if (!detail) return Promise.reject(new Error("没有选中的轨迹"));
-    return api.previewExport(detail.manifest.trace_id, { expected_revision: detail.revision, format, mode });
+    return api.previewExport(detail.manifest.trace_id, {
+      expected_revision: detail.revision,
+      format,
+      mode,
+      training_recipe: trainingRecipe,
+    });
   }, [api, detail]);
 
-  const handleExport = useCallback((format: ExportFormat, mode: ApprovalMode, confirmation: ExportPreview["confirmation_phrase"]): Promise<ExportReceipt> => {
+  const handleExport = useCallback((
+    format: ExportFormat,
+    mode: ApprovalMode,
+    trainingRecipe: ExportTrainingRecipe | null,
+    confirmation: ExportPreview["confirmation_phrase"],
+  ): Promise<ExportReceipt> => {
     if (!detail) return Promise.reject(new Error("没有选中的轨迹"));
     return api.exportTrace(detail.manifest.trace_id, {
       expected_revision: detail.revision,
       format,
       mode,
+      training_recipe: trainingRecipe,
       confirmation_phrase: confirmation,
     });
   }, [api, detail]);

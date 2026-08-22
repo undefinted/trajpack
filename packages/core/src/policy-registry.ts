@@ -1,4 +1,4 @@
-import type { AccountType, DecisionStatus, Provider } from "@trajpack/schema";
+import type { AccountType, DecisionStatus, Provider, Source } from "@trajpack/schema";
 
 export interface PolicyRegistryEntry {
   id: string;
@@ -12,6 +12,16 @@ export interface PolicyRegistryEntry {
    * authority, but cannot activate an allow default for training.
    */
   accepted_snapshot_sha256: readonly string[];
+  /**
+   * Optional observable-source scope for an agreement that is narrower than
+   * the provider/account pair. All listed dimensions must match. This keeps a
+   * file that merely resembles an API response from asserting that an API
+   * agreement governed its creation.
+   */
+  source_scope?: {
+    surfaces?: readonly Source["surface"][];
+    capture_methods?: readonly Source["capture_method"][];
+  };
   defaults: {
     automatic_capture: DecisionStatus;
     training_noncompetitive: DecisionStatus;
@@ -94,6 +104,24 @@ export const POLICY_REGISTRY: readonly PolicyRegistryEntry[] = [
       training_competitive_distillation: "allow",
     },
     note: "The authority match also permits a user-requested local archive under the archive gate. Only official API/harness outputs may enter default distillation review when every other gate passes; this never authorizes automated capture of the DeepSeek website.",
+  },
+  {
+    id: "deepseek-open-platform-2026-04",
+    provider: "deepseek",
+    account_types: ["api", "business", "enterprise"],
+    authority_url: "https://cdn.deepseek.com/policies/en-US/deepseek-open-platform-terms-of-service.html",
+    reviewed_at: "2026-08-22T00:00:00.000Z",
+    accepted_snapshot_sha256: [],
+    source_scope: {
+      surfaces: ["api", "harness"],
+      capture_methods: ["official_stream", "official_hook", "instrumented_harness"],
+    },
+    defaults: {
+      automatic_capture: "allow",
+      training_noncompetitive: "allow",
+      training_competitive_distillation: "allow",
+    },
+    note: "Specific agreement effective 2026-04-29 for API/developer tools. It applies alongside the general DeepSeek Terms to observable live API or instrumented Harness capture; an offline/manual copy cannot establish that applicability from response shape alone. Every applicable authority must be present, current, and independently hash-pinned (or replaced by scoped evidence).",
   },
   {
     id: "self-hosted-open-weights",

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trajpack.dev/schemas/experiments/study-build-manifest-0.1.schema.json",
+  "title": "trajpack materialized study build manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "builder_version",
+    "study_id",
+    "seed",
+    "study_spec_sha256",
+    "task_registry_sha256",
+    "verifier_manifest_sha256",
+    "task_universe",
+    "arms",
+    "privacy",
+    "label_policy",
+    "checksums_file"
+  ],
+  "properties": {
+    "schema_version": {"const": "study-build-manifest/0.1"},
+    "builder_version": {"const": "study-build/0.1"},
+    "study_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "study_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "task_registry_sha256": {"$ref": "#/$defs/sha256"},
+    "verifier_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "task_universe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "signature_set_sha256", "split_assignment_sha256", "train_eval_overlap"],
+      "properties": {
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "train", "eval"],
+          "properties": {
+            "total": {"type": "integer", "minimum": 2},
+            "train": {"type": "integer", "minimum": 1},
+            "eval": {"type": "integer", "minimum": 1}
+          }
+        },
+        "signature_set_sha256": {"$ref": "#/$defs/sha256"},
+        "split_assignment_sha256": {"$ref": "#/$defs/sha256"},
+        "train_eval_overlap": {"const": 0}
+      }
+    },
+    "arms": {
+      "type": "object",
+      "minProperties": 2,
+      "propertyNames": {"pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input_dataset_sha256", "output_file", "output_sha256", "row_count", "split_row_counts", "task_count"],
+        "properties": {
+          "input_dataset_sha256": {"$ref": "#/$defs/sha256"},
+          "output_file": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}\\.trainer\\.jsonl$"},
+          "output_sha256": {"$ref": "#/$defs/sha256"},
+          "row_count": {"type": "integer", "minimum": 2},
+          "split_row_counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["train", "eval"],
+            "properties": {
+              "train": {"type": "integer", "minimum": 1},
+              "eval": {"type": "integer", "minimum": 1}
+            }
+          },
+          "task_count": {"type": "integer", "minimum": 2}
+        }
+      }
+    },
+    "privacy": {
+      "const": {
+        "private_task_registry_embedded": false,
+        "verifier_manifest_embedded": false,
+        "registry_prompt_or_label_fields_added": 0
+      }
+    },
+    "label_policy": {
+      "const": {
+        "rewards_invented": false,
+        "preference_pairs_invented": false,
+        "verifier_results_invented": false
+      }
+    },
+    "checksums_file": {"const": "checksums.sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

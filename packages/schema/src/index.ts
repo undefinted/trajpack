@@ -77,13 +77,21 @@ export const sourceSchema = z.object({
 });
 export type Source = z.infer<typeof sourceSchema>;
 
+const canonicalUtcInstantSchema = z.string().datetime({ precision: 3 }).refine(
+  (value) => {
+    const instant = new Date(value);
+    return Number.isFinite(instant.getTime()) && instant.toISOString() === value;
+  },
+  "Expected a canonical ISO-8601 UTC instant with millisecond precision",
+);
+
 export const termsSnapshotSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
-  effective_at: z.string().datetime(),
-  retrieved_at: z.string().datetime(),
+  effective_at: canonicalUtcInstantSchema,
+  retrieved_at: canonicalUtcInstantSchema,
   snapshot_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  review_after: z.string().datetime(),
+  review_after: canonicalUtcInstantSchema,
 });
 export type TermsSnapshot = z.infer<typeof termsSnapshotSchema>;
 

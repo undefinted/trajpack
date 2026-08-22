@@ -532,9 +532,17 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
       }
       // A malformed/rejected envelope is a bounded invalid attempt, not a
       // storage failure; it must not poison the whole collector.
-      if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+      if (error instanceof CaptureInvalidEventError) {
         releaseReservation(envelope);
         return rejectInvalid(reply, 422, { error: "event_rejected" });
+      }
+      // A durable Harness sequence gap/conflict means the authoritative stream
+      // is no longer lossless. Latch the failure and stop accepting the trace;
+      // retrying a later event could otherwise publish a silently incomplete
+      // teacher trajectory.
+      if (error instanceof HarnessCaptureIntegrityError) {
+        const reason = exceedLimit(error.reason);
+        return reply.code(409).send({ error: "capture_integrity_failed", reason });
       }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)
@@ -584,9 +592,13 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
             releaseReservation(opaque);
             return reply.code(429).send({ error: "collector_busy" });
           }
-          if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+          if (error instanceof CaptureInvalidEventError) {
             releaseReservation(opaque);
             return rejectInvalid(reply, 422, { error: "event_rejected" });
+          }
+          if (error instanceof HarnessCaptureIntegrityError) {
+            const reason = exceedLimit(error.reason);
+            return reply.code(409).send({ error: "capture_integrity_failed", reason });
           }
           const reason = error instanceof CaptureLimitError
             ? exceedLimit(error.reason)
@@ -671,13 +683,17 @@ export async function startIngestServer(options: IngestServerOptions): Promise<R
       // but a rejection means the pairing did not succeed: restore exactly that
       // capability (as the backpressure branch above does) so a corrected retry
       // does not force a reviewer restart.
-      if (error instanceof CaptureInvalidEventError || error instanceof HarnessCaptureIntegrityError) {
+      if (error instanceof CaptureInvalidEventError) {
         releaseReservation(envelope);
         if (browserNonce === undefined && pairedOrigin === origin) {
           browserNonce = nonce;
           pairedOrigin = previousPairedOrigin;
         }
         return rejectInvalid(reply, 422, { error: "event_rejected" });
+      }
+      if (error instanceof HarnessCaptureIntegrityError) {
+        const reason = exceedLimit(error.reason);
+        return reply.code(409).send({ error: "capture_integrity_failed", reason });
       }
       const reason = error instanceof CaptureLimitError
         ? exceedLimit(error.reason)

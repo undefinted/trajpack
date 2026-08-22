@@ -38,6 +38,14 @@ export interface CaptureSessionLimits {
   maxPendingIngest?: number;
 }
 
+/** Content-free counters and lineage evidence safe to place in a capture receipt. */
+export interface CaptureSessionStats {
+  rawEvents: number;
+  rawBytes: number;
+  normalizedEvents: number | null;
+  rawLineageSha256: string;
+}
+
 export const DEFAULT_MAX_PENDING_CAPTURE_INGEST = 1024;
 export const MAX_CONFIGURABLE_PENDING_CAPTURE_INGEST = 65_536;
 
@@ -279,6 +287,7 @@ export class CaptureSession {
   private readonly maxPendingIngest: number;
   private pendingIngest = 0;
   private finalized = false;
+  private normalizedEventCount: number | null = null;
 
   private constructor(
     readonly host: Host,
@@ -336,7 +345,15 @@ export class CaptureSession {
     });
     this.operationQueue = operation.then(
       () => undefined,
-      (error: unknown) => { this.operationFailure = error; },
+      (error: unknown) => {
+        // Schema/hash/adapter rejections are bounded bad inputs. They must not
+        // poison the append queue, because the caller may correct and retry the
+        // event. Integrity, quota, and storage failures remain terminal and are
+        // replayed to every later ingest/finalize call.
+        if (!(error instanceof CaptureInvalidEventError) && this.operationFailure === null) {
+          this.operationFailure = error;
+        }
+      },
     );
     try {
       return await operation;
@@ -346,7 +363,11 @@ export class CaptureSession {
   }
 
   private async ingestExclusive(input: unknown): Promise<boolean> {
-    const parsed = rawEnvelopeSchema.parse(input);
+    const parsedResult = rawEnvelopeSchema.safeParse(input);
+    if (!parsedResult.success) {
+      throw new CaptureInvalidEventError("Raw envelope schema validation failed");
+    }
+    const parsed = parsedResult.data;
     if (parsed.adapter !== this.host) {
       throw new CaptureInvalidEventError(`Envelope adapter ${parsed.adapter} does not match ${this.host}`);
     }
@@ -416,6 +437,23 @@ export class CaptureSession {
     return true;
   }
 
+  /**
+   * Return a content-free snapshot without consuming the incremental lineage
+   * hash. This remains available after either finalize or abort so the wrapper
+   * can emit a terminal receipt without retaining raw provider payloads.
+   */
+  captureStats(): Readonly<CaptureSessionStats> {
+    const lineage = this.rawLineageHash.copy();
+    if (!this.rawLineageStarted) lineage.update("[");
+    lineage.update("]");
+    return Object.freeze({
+      rawEvents: this.raw.length,
+      rawBytes: this.rawBytes,
+      normalizedEvents: this.normalizedEventCount,
+      rawLineageSha256: lineage.digest("hex"),
+    });
+  }
+
   async finalize(): Promise<TraceBundle> {
     if (this.finalized) throw new Error("Capture is already finalized");
     this.finalized = true;
@@ -450,9 +488,7 @@ export class CaptureSession {
         || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0));
       const observed = observedRawSource(this.raw);
       const observedSource = reconcileObservedHarnessTeacher(this.manifest.source, this.raw);
-      if (!this.rawLineageStarted) this.rawLineageHash.update("[");
-      this.rawLineageHash.update("]");
-      const rawLineageSha256 = this.rawLineageHash.digest("hex");
+      const rawLineageSha256 = this.captureStats().rawLineageSha256;
       let bundle: TraceBundle = {
         manifest: {
           ...this.manifest,
@@ -474,6 +510,7 @@ export class CaptureSession {
       for (const event of bundle.events) await this.writer.append({ kind: "event", value: event });
       await this.writer.append({ kind: "manifest", value: bundle.manifest });
       await this.writer.finalize();
+      this.normalizedEventCount = bundle.events.length;
       return bundle;
     } catch (error) {
       await this.writer.abort().catch(() => undefined);

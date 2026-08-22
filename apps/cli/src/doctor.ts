@@ -1,10 +1,19 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-export const DOCTOR_REPORT_VERSION = "doctor/0.1" as const;
+export const DOCTOR_REPORT_VERSION = "doctor/0.2" as const;
 
 interface ExecutableProbe {
   found: boolean;
   version: string | null;
+}
+
+export interface DshProfileProbe {
+  profile: string;
+  plugin_installation: "manifest_verified" | "not_installed" | "version_mismatch" | "not_checked";
+  harness_version: string | null;
 }
 
 export interface DoctorReport {
@@ -20,8 +29,10 @@ export interface DoctorReport {
     plugin_directory: string;
     capture_surfaces: string[];
     expected_interfaces: string[];
-    plugin_installation: "not_verified";
-    compatibility: "available" | "missing_executable" | "version_mismatch";
+    plugin_installation: DshProfileProbe["plugin_installation"];
+    profile_name: string | null;
+    profile_runtime_version: string | null;
+    compatibility: "available" | "available_via_profile" | "missing_executable" | "version_mismatch";
   }>;
   web_and_imports: Array<{
     product: string;
@@ -33,6 +44,69 @@ export interface DoctorReport {
 }
 
 const VERSION_PATTERN = /(?:^|[^0-9])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:$|[^0-9A-Za-z.-])/u;
+const MAX_PROFILE_MANIFEST_BYTES = 64 * 1024;
+
+function boundedJson(path: string): Record<string, unknown> | null {
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_PROFILE_MANIFEST_BYTES) return null;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inspect manifests only; never boot or import profile-controlled JavaScript.
+ * This proves compatible installation metadata, not plugin-code integrity.
+ */
+export function inspectDshProfile(profile = "headless", dshHome = process.env.DSH_HOME ?? join(homedir(), ".dsh")): DshProfileProbe {
+  if (!/^[a-z0-9._-]{1,64}$/iu.test(profile)) {
+    return { profile, plugin_installation: "not_checked", harness_version: null };
+  }
+  const profileRoot = join(dshHome, "profiles", profile);
+  const profileManifest = boundedJson(join(profileRoot, "package.json"));
+  const pluginManifest = boundedJson(join(
+    profileRoot,
+    "node_modules",
+    "@trajpack",
+    "deepseek-harness-plugin",
+    "package.json",
+  ));
+  const harnessManifest = boundedJson(join(
+    dshHome,
+    "profiles",
+    "node_modules",
+    "@deepseek-ai",
+    "dsh",
+    "package.json",
+  ));
+  const harnessVersion = typeof harnessManifest?.version === "string" ? harnessManifest.version : null;
+  const dependencies = profileManifest?.dependencies;
+  const configuredDependency = typeof dependencies === "object" && dependencies !== null && !Array.isArray(dependencies)
+    && typeof (dependencies as Record<string, unknown>)["@trajpack/deepseek-harness-plugin"] === "string";
+  const profileConfig = profileManifest?.dsh;
+  const configuredBundles = typeof profileConfig === "object" && profileConfig !== null && !Array.isArray(profileConfig)
+    ? (profileConfig as { profile?: { bundles?: unknown } }).profile?.bundles
+    : undefined;
+  const configuredBundle = Array.isArray(configuredBundles)
+    && configuredBundles.includes("@trajpack/deepseek-harness-plugin");
+  const pluginMetadata = pluginManifest?.trajpack;
+  const pinnedPlugin = pluginManifest?.name === "@trajpack/deepseek-harness-plugin"
+    && typeof pluginMetadata === "object" && pluginMetadata !== null && !Array.isArray(pluginMetadata)
+    && (pluginMetadata as Record<string, unknown>).deepseekHarnessVersion === "0.1.0-rc.6";
+  if (!configuredDependency || !configuredBundle || !pinnedPlugin || harnessVersion === null) {
+    return { profile, plugin_installation: "not_installed", harness_version: harnessVersion };
+  }
+  return {
+    profile,
+    plugin_installation: harnessVersion === "0.1.0-rc.6" ? "manifest_verified" : "version_mismatch",
+    harness_version: harnessVersion,
+  };
+}
 
 function cleanEnvironment(): NodeJS.ProcessEnv {
   const environment = { ...process.env };
@@ -83,6 +157,8 @@ export function probeExecutable(executable: string): ExecutableProbe {
 export function collectDoctorReport(
   probe: (executable: string) => ExecutableProbe = probeExecutable,
   now = new Date(),
+  profileProbe: (profile: string) => DshProfileProbe = inspectDshProfile,
+  dshProfile = "headless",
 ): DoctorReport {
   const definitions = [
     {
@@ -114,6 +190,7 @@ export function collectDoctorReport(
       expected_interfaces: ["deepseek-harness@0.1.0-rc.6/session-event/0"],
     },
   ];
+  const dshInstallation = profileProbe(dshProfile);
   const nativeAgents = definitions.map((definition) => {
     const observed = probe(definition.executable);
     const mismatch = definition.id === "dsh" && observed.found && observed.version !== "0.1.0-rc.6";
@@ -121,9 +198,15 @@ export function collectDoctorReport(
       ...definition,
       executable_found: observed.found,
       detected_version: observed.version,
-      plugin_installation: "not_verified" as const,
+      plugin_installation: definition.id === "dsh"
+        ? dshInstallation.plugin_installation
+        : "not_checked" as const,
+      profile_name: definition.id === "dsh" ? dshInstallation.profile : null,
+      profile_runtime_version: definition.id === "dsh" ? dshInstallation.harness_version : null,
       compatibility: !observed.found
-        ? "missing_executable" as const
+        ? definition.id === "dsh" && dshInstallation.plugin_installation === "manifest_verified"
+          ? "available_via_profile" as const
+          : "missing_executable" as const
         : mismatch
           ? "version_mismatch" as const
           : "available" as const,
@@ -145,7 +228,7 @@ export function collectDoctorReport(
       { product: "Authorized site", supported_path: "click-driven selector recipe and visible DOM preview", fidelity: "C", automatic_commercial_dom_capture: false },
     ],
     boundaries: [
-      "Executable detection does not prove that a host plugin is installed or that provider/model claims are authentic.",
+      "Executable detection does not prove that a host plugin is installed or that provider/model claims are authentic; DSH profile verification reads manifests only and does not attest plugin code.",
       "Commercial ChatGPT, Claude, Gemini, and DeepSeek web origins have no built-in DOM selector preset.",
       "A recognized API or Harness persistence shape is user-supplied evidence, not provider authentication.",
       "Visible reasoning is classified as provider-exposed reasoning, summary, generated rationale, opaque state, or unavailable; never hidden chain of thought.",
@@ -163,7 +246,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     `trajpack doctor (${report.report_version})`,
     `Node ${report.node.version}: ${report.node.compatible ? "compatible" : "requires Node 24+"}`,
     "",
-    "Native agent executables (plugin installation is checked separately by each host):",
+    "Native agent executables (DSH also receives a read-only profile-manifest check):",
     ...rows,
     "",
     "Web products: official/manual import only; commercial DOM presets are intentionally disabled.",
@@ -171,7 +254,7 @@ export function formatDoctorReport(report: DoctorReport): string {
   ].join("\n");
 }
 
-export function runDoctor(options: { json?: boolean } = {}): void {
-  const report = collectDoctorReport();
+export function runDoctor(options: { json?: boolean; dshProfile?: string } = {}): void {
+  const report = collectDoctorReport(probeExecutable, new Date(), inspectDshProfile, options.dshProfile ?? "headless");
   process.stdout.write(`${options.json ? JSON.stringify(report, null, 2) : formatDoctorReport(report)}\n`);
 }

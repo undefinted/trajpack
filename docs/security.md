@@ -41,16 +41,22 @@ binding produces no opaque artifact. This follows Claude Code's documented
 trajpack does not depend on the private JSONL field schema.
 
 The wrapper capability is inherited by the explicitly launched host so its
-native plugin can post events. A host may in turn pass environment variables to
-repository commands or tools. Consequently, the bearer proves membership in
-that local capture process tree; it does **not** prove that an event came from a
-provider or that untrusted repository code could not forge an event. Use a
-clean, trusted execution environment for provenance-sensitive collection and
-retain provider request/response artifacts when available. Source provider,
-model, and license claims remain reviewer-verifiable evidence, not cryptographic
-attestation by trajpack. In particular, a token-bearing child could race a
-forged `SessionStart`; the transcript binding prevents later cross-project path
-switching but cannot cryptographically identify the genuine Claude process.
+native observer can post events. The DeepSeek Harness plugin consumes and
+removes `TRAJPACK_COLLECTOR_URL`, `TRAJPACK_CAPTURE_TOKEN`, and
+`TRAJPACK_CAPTURE_HOST` from `process.env` during plugin boot, before an agent
+turn can launch repository tools. A child tool therefore cannot recover the
+bearer from its inherited environment. This is a meaningful isolation boundary,
+but not a provider signature: another trusted-profile plugin running in the same
+Harness process could observe or instrument the observer before that boundary,
+and a compromised host runtime remains in scope. Codex/Claude hook hosts may
+also propagate their wrapper environment to child processes. Use a clean,
+minimal plugin profile and trusted execution environment for
+provenance-sensitive collection, and retain provider request/response receipts
+when available. Source provider, model, and license claims remain
+reviewer-verifiable evidence, not cryptographic attestation by trajpack. For
+Claude, a token-bearing child could still race a forged `SessionStart`; the
+transcript binding prevents later cross-project path switching but cannot
+cryptographically identify the genuine Claude process.
 
 Source manifests therefore carry an independent authenticity tier:
 `cryptographically_verified`, `request_receipt_verified`, `locally_observed`,
@@ -62,10 +68,11 @@ teacher-source authenticity are separate questions.
 For the default native DeepSeek Harness path, the pinned adapter also requires
 a durable `request/header` event and reconciles its provider/model against the
 manifest. The resulting evidence reference is bound to those raw header
-envelopes. This detects configuration/label drift; because the local capture
-process tree can forge events, it still is not a provider signature. Self-hosted
-weights remain stricter and need an evidence-backed manual runtime-binding
-decision before training.
+envelopes. This detects configuration/label drift and the native plugin removes
+the capability from later tool-child environments. It is still only
+`locally_observed`, not a provider signature or cryptographic proof of the
+teacher model. Self-hosted weights remain stricter and need an evidence-backed
+manual runtime-binding decision before training.
 
 ## Vault
 
@@ -162,8 +169,9 @@ DeepSeek origins are explicitly blocked.
 - Deleting a managed vault writes a tombstone but cannot delete external
   plaintext copies.
 - Terms and authorization references are evidence records, not legal opinions.
-- Native capture credentials authenticate a local process tree, not an
-  adversarial host/tool subprocess or the upstream model provider.
+- Native capture credentials authenticate a local observer, not the upstream
+  model provider. DeepSeek removes the credentials from later tool-child
+  environments, but same-process plugins and a compromised host remain trusted.
 - Dataset planning/export currently uses a bounded in-process compiler. A
   selection whose conservative decrypted-object estimate exceeds 256 MiB must
   be split into smaller builds; a future streaming compiler can lift this cap.

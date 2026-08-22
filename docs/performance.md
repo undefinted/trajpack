@@ -5,6 +5,64 @@ comes from bounded streaming and ciphertext batching, not unbounded parallelism.
 `trajpack` 是单机、local-first 的安全流水线；性能来自有界流式处理和密文批写，
 而不是无限并发。
 
+## End-to-end collector benchmark / Collector 端到端压测
+
+The collector benchmark sends concurrently generated, rights-owned synthetic
+DeepSeek Harness capsules through the real loopback HTTP server, admission
+control, `CaptureSession`, normalizer, sanitization passes, and encrypted vault
+publication. It does not prebuild an event array. Source sessions are processed
+sequentially within each session and concurrently across sessions, preserving
+the Harness sequence contract while applying real HTTP pressure.
+
+Collector 压测会把运行时生成、权利明确的合成 DeepSeek Harness capsule 送入真实
+loopback HTTP server，并经过 admission control、`CaptureSession`、normalizer、
+清洗 pass 和加密 vault 发布。它不会预先构造完整事件数组；单个 source session
+内部顺序发送，不同 session 并发发送，既遵守 Harness sequence contract，也施加
+真实 HTTP 压力。
+
+```sh
+pnpm bench:collector
+pnpm bench:collector:smoke
+```
+
+The JSON report is content-free. It includes session/event/byte counts, total
+and ingest duration, events/s, logical MiB/s, accepted-request p50/p95/p99,
+HTTP 202/429/error counts, peak RSS, encrypted vault size, and only SHA-256
+lineage evidence. Before succeeding, the benchmark verifies zero event loss,
+contiguous per-session raw and normalized topology, and scans the vault as a
+byte stream to prove that neither its random event sentinel nor its in-memory
+passphrase appears statically in the published file.
+
+JSON 报告不含事件内容，只包含 session/event/byte 数量、总耗时与写入耗时、
+events/s、逻辑 MiB/s、已接受请求的 p50/p95/p99、HTTP 202/429/error 计数、
+峰值 RSS、加密 vault 大小和 SHA-256 lineage 证据。成功退出前会验证零事件丢失、
+每个 session 的 raw/normalized 拓扑连续，并流式扫描 vault，确认随机明文哨兵和
+仅驻留内存的口令都没有静态出现在文件中。
+
+Parameters are bounded and can be combined. Client concurrency cannot exceed
+the number of source sessions; total configured logical data is capped at
+96 MiB, independently of the collector and vault's own fail-closed limits.
+
+参数都有硬上限且可组合。client concurrency 不能超过 source session 数量；配置
+的逻辑数据总量额外限制在 96 MiB，collector 与 vault 自身仍保留独立的 fail-closed
+上限。
+
+```sh
+node --expose-gc scripts/benchmark-collector.mjs \
+  --events 20000 --sessions 32 --concurrency 16 \
+  --collector-concurrency 4 --payload-bytes 1024
+```
+
+`429` is not silently treated as loss: only `collector_busy` is retried with a
+bounded delay and counted. Any terminal limit, integrity failure, unexpected
+status, count mismatch, topology mismatch, or plaintext hit makes the command
+fail without printing the passphrase, sentinel, event content, or temporary
+path.
+
+`429` 不会被静默当作成功：只有 `collector_busy` 会进行有界重试并计数。任何
+终止性限额、完整性失败、异常状态、数量/拓扑不一致或明文命中都会让命令失败，
+且不会打印口令、哨兵、事件内容或临时路径。
+
 ## Reproducible 100k benchmark / 可复现 10 万事件基准
 
 Run from the repository root with Node.js 24. Each scenario runs in a fresh

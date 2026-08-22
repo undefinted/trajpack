@@ -32,8 +32,12 @@ The built-in registry records engineering defaults and official authority URLs:
   noncompetitive narrow tasks require scope evidence; competing general models
   require written approval.
 - DeepSeek API or a legitimately sourced model in Harness: distillation may be
-  reviewed when all other gates pass. That permission never legitimizes webpage
-  scraping.
+  reviewed when all other gates pass. Observable live API/developer-tool and
+  instrumented Harness capture must retain both the general Terms and the
+  specific Open Platform Terms effective 2026-04-29; all applicable registry
+  authorities are intersected. A manual/offline response shape uses the general
+  Terms for archive routing but does not establish API-contract applicability
+  or training permission. Neither route legitimizes webpage scraping.
 - Self-hosted models: model/weights license, input rights, and tool/repository
   rights must still be known.
 
@@ -66,7 +70,9 @@ result, self-hosted training remains `unknown` until a trace-scoped manual
 decision binds a retained run configuration, model-load receipt, container
 attestation, or equivalent evidence file to the exact target and use.
 
-`trajpack policy snapshot` hashes a locally downloaded terms document. The tool
+`trajpack policy snapshot` hashes one locally downloaded terms document. Repeat
+it for every authority applicable to the account; one matching URL does not
+satisfy another specific agreement. The tool
 does not download or interpret it. `trajpack policy override` is intentionally
 trace- and dimension-scoped, expiring, evidence-backed, and resets human
 approval. There is no global bypass.

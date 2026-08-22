@@ -79,7 +79,7 @@ pnpm trajpack doctor
 pnpm trajpack --help
 ```
 
-导入商业提供商的官方导出前，应先下载适用于你的地区和账号的条款，将其纳入科研证据留存，然后建立本地快照。工具只负责对文件取哈希，不会自行下载或解释法律文本。
+导入商业提供商的官方导出前，应先下载适用于你的地区和账号的全部条款，将其纳入科研证据留存，并为每个 authority 分别建立本地快照。工具只负责对文件取哈希，不会自行下载或解释法律文本。内置 registry 目前要求可观察的实时 DeepSeek API/开发者工具采集同时提供通用条款与 Open Platform 专项条款。手动复制或离线的 API-shaped 文件可按通用条款路径归档，但文件结构本身既不能证明 API 专项条款适用，也不会获得训练资格。
 
 ```bash
 pnpm trajpack policy snapshot \
@@ -126,7 +126,7 @@ pnpm trajpack arm claude --next-session --cwd <absolute-path> --ttl 10m [source 
 pnpm trajpack arm gemini --next-session --cwd <absolute-path> --ttl 10m [source and rights options]
 ```
 
-采集真实数据前，运行 `pnpm trajpack doctor`（或 `doctor --json`）可以探测宿主可执行文件，并报告预期插件目录、固定接口和安全网页导入路径。它会刻意把插件安装状态报告为 `not_verified`；请再使用各宿主自己的 list/validate 命令确认安装。
+采集真实数据前，运行 `pnpm trajpack doctor`（或 `doctor --json --dsh-profile headless`）可以探测宿主可执行文件，并报告预期插件目录、固定接口和安全网页导入路径。对于 DeepSeek Harness，它还会只读检查所选 profile、runtime 与插件 manifest，而不执行 profile 代码；`manifest_verified` 只证明安装元数据兼容，不证明插件代码或提供商真实性。如果裸 `dsh` 不在 `PATH`，capture 会从官方 `DSH_HOME/profiles` 布局安全启动精确的 rc.6 runtime。其他宿主仍请使用各自的 list/validate 命令确认。
 
 在来源、账号、当前条款或限定范围的许可、同意记录和必要的权利元数据满足 `automatic_capture` gate 之前，采集会被主动阻断。内置来源关联最强的是固定版本的 DeepSeek Harness 路径：trajpack 会把批准的 provider/model 与 durable `request/header` 证据绑定。自托管模型还可以在本地计算内容哈希，但该哈希并不能证明运行时确实加载了这些权重；因此，自托管训练仍需单独、证据绑定的运行时证明与审阅。
 
@@ -329,7 +329,7 @@ trajpack delete <trace-id> --yes
 - Harness persistence 导入目前只接受未打包、未压缩的 v0 JSONL。Packed/chunked row 和 zstd 压缩 persistence 会 fail closed；请使用原生插件采集，或显式生成 unpacked artifact。
 - Harness 通用训练 recipe 遇到 resumed partial context 或目标之前的 surface replacement 时会阻断，不会猜测 teacher-visible prefix。请使用完整的 sequence-zero trace 和 `deepseek_epoch_sft` 进行 compaction-aware 的精确 request 重建。
 - 任何 recipe 都不会恢复隐藏 CoT。`reasoning_sft` 要求完整的 provider-exposed reasoning；`pointwise_reward_rl_ready` 是供下游 reward-model/RL 科研使用的已验证标量 reward 证据，不是 DPO preference pair 或 RL trainer。
-- 本地 collector capability 只能认证采集进程树，不能认证提供商或对抗恶意工具子进程。
+- 本地 collector capability 不能认证提供商。DeepSeek 插件会在工具子进程启动前消费并移除该凭证，但 Harness 运行时和同进程 profile 插件仍属于信任边界，因此原生证据只标记为 `locally_observed`。
 - 离线响应结构、本地模型哈希、reviewer 身份和导出 checksum 都只是证据，不是厂商签名或当前授权证明。
 - Secret/PII 扫描是保守的模式匹配，无法证明数据已完全匿名或许可证完全干净。
 - 数据集编译采用有界的 in-process 实现，解密对象保守估算上限为 256 MiB；近似去重采用 token-shingle Jaccard，不是 embedding 语义去重。

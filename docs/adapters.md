@@ -158,6 +158,35 @@ transport failure latches the affected capture, rejects its flush, and admits
 no later events. This bounds slow/offline-collector memory instead of allowing
 an unbounded promise-chain backlog.
 
+## Content-free terminal receipts / 无内容终态回执
+
+Wrapper capture can optionally commit a small plaintext audit receipt after the
+encrypted vault has either finalized or aborted:
+
+```text
+trajpack capture dsh --receipt ./capture-receipt.json -- dsh <arguments>
+```
+
+The `trajpack/capture-receipt/0.1` record contains only the trace ID, host,
+bounded interface identifier, terminal status/reason code, host exit code,
+raw/normalized counts, raw byte count, and raw-lineage SHA-256. It never copies
+prompts, reasoning, tool arguments/results, exception messages, paths, model
+output, or policy evidence. The destination parent must already be a real
+symlink/junction-free directory; the `.json` leaf must not exist and is opened
+with exclusive create. A receipt is a local lineage commitment, not provider
+authentication or training approval. An aborted capture keeps its accepted raw
+count and partial lineage commitment, while `normalized_event_count` remains
+`null` because no canonical view was published.
+
+捕获包装器可通过 `--receipt <new-json-file>` 在加密 vault 成功发布或安全中止后，
+生成一份小型明文审计回执。回执只含 trace ID、host、受限 interface 标识、终态
+状态/原因码、宿主退出码、raw/normalized 数量、raw 字节数和 lineage SHA-256；
+不会写入提示词、推理、工具参数/结果、异常原文、路径、模型输出或政策证据。
+父目录必须真实存在且不含符号链接或 junction，目标 `.json` 文件必须尚不存在，
+并以独占创建方式写入。中止捕获会保留已接收的 raw 计数和部分 lineage 承诺，
+但 `normalized_event_count` 为 `null`，因为并未发布 canonical 视图。该回执只证明
+本地 lineage 绑定，不代表厂商认证或训练许可。
+
 ## Native compatibility and validation status
 
 | Surface | Pinned interface | Implemented path | Current validation boundary |
@@ -165,7 +194,7 @@ an unbounded promise-chain backlog.
 | Codex CLI / hooks | JSONL + hook pins; App Server v2 JSON-RPC pin | `plugins/trajpack` and offline adapters | Codex plugin structure passes the bundled plugin validator; golden fixtures cover exec, hooks and App Server messages. The adapter does not launch or proxy App Server. |
 | Claude Code | stream-json and hook pins | `plugins/claude-code` | Golden fixtures cover stream, hooks, subagents and opaque transcript retention. Private transcript JSONL is never parsed. |
 | Gemini CLI | `gemini-cli-hook/1` | `plugins/trajpack-gemini` | Official-format manifest/hook vocabulary and armed/unarmed descriptor forwarding are fixture-tested. A live Gemini binary is not required by the test suite. |
-| DeepSeek Harness | `@deepseek-ai/dsh@0.1.0-rc.6`, session format 0 | `plugins/deepseek-harness` | Plugin callback and bundle metadata are tested against rc.6's published types and event catalog; every Harness upgrade requires new golden fixtures before changing the pin. |
+| DeepSeek Harness | `@deepseek-ai/dsh@0.1.0-rc.6`, session format 0 | `plugins/deepseek-harness` | Plugin callback and bundle metadata are tested against rc.6's published types and event catalog. An integration canary sends the plugin's real HTTP requests through the loopback collector, finalizes the encrypted vault, reopens identical raw/canonical/lineage data, and verifies that neither vault bytes nor the terminal receipt expose sentinels. Every Harness upgrade requires new golden fixtures before changing the pin. |
 
 ## Official/manual import
 
