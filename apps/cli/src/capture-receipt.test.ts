@@ -33,7 +33,15 @@ describe("content-free capture receipts", () => {
         stats,
         terminalAt: "2026-08-22T00:00:00.000Z",
       });
-      await expect(writeCaptureReceipt(destination, receipt)).resolves.toBe(target);
+      const writtenPath = await writeCaptureReceipt(destination, receipt);
+      const [writtenStat, targetStat] = await Promise.all([
+        stat(writtenPath),
+        stat(target),
+      ]);
+      expect({ dev: writtenStat.dev, ino: writtenStat.ino }).toEqual({
+        dev: targetStat.dev,
+        ino: targetStat.ino,
+      });
       const encoded = await readFile(target, "utf8");
       const parsed = JSON.parse(encoded) as Record<string, unknown>;
       expect(parsed).toEqual({

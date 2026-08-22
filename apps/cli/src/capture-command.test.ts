@@ -106,7 +106,14 @@ describe("capture child environment", () => {
         command: process.execPath,
         viaCommandProcessor: false,
       });
-      expect(launch.resolvedExecutable).toBe(entrypoint);
+      const [resolvedStat, entrypointStat] = await Promise.all([
+        stat(launch.resolvedExecutable),
+        stat(entrypoint),
+      ]);
+      expect({ dev: resolvedStat.dev, ino: resolvedStat.ino }).toEqual({
+        dev: entrypointStat.dev,
+        ino: entrypointStat.ino,
+      });
       const result = spawnSync(launch.command, launch.args, {
         env: environment,
         encoding: "utf8",
